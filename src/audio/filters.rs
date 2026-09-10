@@ -662,27 +662,45 @@ pub fn helmholtz_frequency(
 
 pub use crate::physics::plumbing::MufflerGeometry;
 
-/// The muffler: a Helmholtz bandpass in parallel with a damped through path.
+/// The muffler: a Helmholtz bandpass in parallel with a through path, and the
+/// tailpipe mouth both of them leave by.
 ///
 /// A pure bandpass is what the cavity does, but it is not what a muffler
 /// *sounds* like — all of the transient energy that gives an exhaust note its
-/// edge lives outside the resonance. Real mufflers pass that energy through with
-/// loss, so the output here is a mix: `resonant_mix` of the cavity, the rest
-/// lowpassed by the tailpipe.
+/// edge lives outside the resonance. Real mufflers pass that energy through, so
+/// what arrives at the tailpipe is a mix: `resonant_mix` of the cavity, the rest
+/// straight through.
+///
+/// What leaves the tailpipe is then not that mixture but its radiated field.
+/// The old model lowpassed here, which is the tilt backwards: inside the pipe
+/// the low end dominates, outside it is the part that never got out. See
+/// [`Mouth`] — below the mouth corner the radiated field rises at 6 dB/octave,
+/// above it, it is flat.
+///
+/// The mouth's reflected wave is dropped rather than fed back, because there is
+/// nothing here to feed it into: this muffler is a pair of lumped filters, not
+/// a waveguide with a `p^-` to carry it. In the pipe network the same
+/// termination loads the tailpipe properly.
 #[derive(Debug, Clone)]
 pub struct Muffler {
     geometry: MufflerGeometry,
     cavity: Biquad,
-    tailpipe: OnePole,
+    mouth: Mouth,
     sample_rate: f32,
     centre_hz: f32,
 }
 
 impl Muffler {
-    /// Builds a muffler and tunes it for `temperature` [K].
+    /// Builds a muffler discharging through a tailpipe of `tailpipe_radius`
+    /// metres, and tunes it for `temperature` [K].
+    ///
+    /// `flanged` is whether the tailpipe exits through a panel or hangs free;
+    /// it changes the end correction, not the radiation.
     pub fn new(
         sample_rate: f32,
         geometry: MufflerGeometry,
+        tailpipe_radius: f32,
+        flanged: bool,
         gamma: f32,
         gas_constant: f32,
         temperature: f32,
@@ -690,7 +708,12 @@ impl Muffler {
         let mut muffler = Self {
             geometry,
             cavity: Biquad::default(),
-            tailpipe: OnePole::new(sample_rate, geometry.tailpipe_cutoff as f32),
+            mouth: Mouth::new(
+                sample_rate,
+                tailpipe_radius,
+                flanged,
+                speed_of_sound(gamma, gas_constant, temperature),
+            ),
             sample_rate,
             centre_hz: 0.0,
         };
@@ -698,12 +721,15 @@ impl Muffler {
         muffler
     }
 
-    /// Retunes the cavity for the current exhaust temperature [K].
+    /// Retunes the cavity and the mouth for the current exhaust temperature
+    /// [K].
     ///
     /// Called at the control rate, not per sample: the transcendentals in the
     /// coefficient design are the expensive part of this whole module, and the
     /// temperature that drives them is already smoothed.
     pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
+        self.mouth
+            .tune(speed_of_sound(gamma, gas_constant, temperature));
         self.centre_hz = helmholtz_frequency(
             gamma,
             gas_constant,
@@ -724,19 +750,25 @@ impl Muffler {
         self.centre_hz
     }
 
-    /// Filters one sample.
+    /// Frequency above which the tailpipe radiates rather than reflects [Hz].
+    pub fn mouth_corner_hz(&self) -> f32 {
+        self.mouth.corner_hz()
+    }
+
+    /// Radiates one sample: in at the muffler inlet, out at the tailpipe mouth.
     #[inline(always)]
     pub fn process(&mut self, x: f32) -> f32 {
         let mix = self.geometry.resonant_mix as f32;
         let resonant = self.cavity.process(x);
-        let through = self.tailpipe.process(x);
-        through * (1.0 - mix) + resonant * mix
+        let at_tailpipe = x * (1.0 - mix) + resonant * mix;
+        let (_reflected, radiated) = self.mouth.step(at_tailpipe);
+        radiated
     }
 
     /// Clears state.
     pub fn reset(&mut self) {
         self.cavity.reset();
-        self.tailpipe.reset();
+        self.mouth.reset();
     }
 }
 
@@ -1666,7 +1698,15 @@ mod tests {
 
     #[test]
     fn muffler_tracks_temperature() {
-        let mut muffler = Muffler::new(48_000.0, MufflerGeometry::default(), 1.33, 287.0, 500.0);
+        let mut muffler = Muffler::new(
+            48_000.0,
+            MufflerGeometry::default(),
+            0.030,
+            false,
+            1.33,
+            287.0,
+            500.0,
+        );
         let cold = muffler.centre_frequency();
         muffler.tune(1.33, 287.0, 1100.0);
         let hot = muffler.centre_frequency();
