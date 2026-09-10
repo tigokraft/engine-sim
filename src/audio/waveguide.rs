@@ -203,13 +203,6 @@ impl ValveTermination {
     }
 
     /// Softens the reflection, `0` for the bare boundary and `1` fully damped.
-    ///
-    /// Until the solver's own valve lift reaches the snapshot, a primary's head
-    /// is a rigid closed end at every instant, which is what a real one is for
-    /// most of the cycle but never all of it: while the valve is open the pipe
-    /// is looking into the cylinder and the reflection is far weaker. This
-    /// stands in for that, and it is the same physical quantity a lift curve
-    /// would set — see [`ValveTermination::set_effective_area`].
     pub fn set_damping(&mut self, damping: f32) {
         self.damping = damping.clamp(0.0, 1.0);
     }
@@ -845,14 +838,21 @@ impl TaperedCollector {
 
     /// Steps the collector by one sample:
     /// - `primaries_plus`: forward waves arriving from each primary runner ($p_i^+$).
+    /// - `excitation`: pressure released *inside* the collector this sample [Pa].
     /// - `downstream_minus`: backward wave returning from downstream ($p^-$).
     /// - `primaries_minus`: output buffer filled with waves returning up each primary ($p_i^-$).
+    ///
+    /// The excitation enters as an incident wave at the junction rather than as
+    /// something added to the output, so it scatters into every port the way a
+    /// pressure rise at that node physically does: down the collector, and back
+    /// up every primary standing open to it.
     ///
     /// Returns the transmitted wave continuing downstream.
     #[inline(always)]
     pub fn step(
         &mut self,
         primaries_plus: &[f32],
+        excitation: f32,
         downstream_minus: f32,
         primaries_minus: &mut [f32],
     ) -> f32 {
@@ -869,7 +869,7 @@ impl TaperedCollector {
         {
             *dst = src;
         }
-        self.scatter_in[self.inlet_count] = p_taper_upstream;
+        self.scatter_in[self.inlet_count] = p_taper_upstream + excitation;
 
         self.junction
             .scatter(&self.scatter_in, &mut self.scatter_out);
@@ -1571,8 +1571,58 @@ impl ExhaustNetwork {
         self.bank_count
     }
 
-    /// Damps a cylinder's primary by softening its valve-end reflection, `0` for
-    /// the bare closed valve and `1` for fully damped.
+    /// One-way transit delay of a cylinder's primary [samples].
+    pub fn primary_delay_samples(&self, cylinder: usize) -> f32 {
+        self.primaries[cylinder.min(self.primaries.len() - 1)].delay_samples()
+    }
+
+    /// Acoustic round-trip time of a cylinder's primary [s].
+    ///
+    /// This is the `tau_pulse` of the Transit-Time Decision Rule, read back from
+    /// the delay the pipe is actually using rather than recomputed from
+    /// temperature, so it follows the glide instead of leading it.
+    pub fn primary_round_trip_seconds(&self, cylinder: usize) -> f32 {
+        let i = cylinder.min(self.primaries.len() - 1);
+        2.0 * self.primaries[i].transit_time_seconds()
+    }
+
+    /// Damping currently applied to a cylinder's valve end, `0..=1` [-].
+    pub fn valve_damping(&self, cylinder: usize) -> f32 {
+        self.valves[cylinder.min(self.valves.len() - 1)].damping()
+    }
+
+    /// Mean acoustic round-trip time of a bank's primaries [s].
+    ///
+    /// A bank no longer has *a* runner — it has one primary per cylinder, and on
+    /// an unequal-length header no two of them agree. This is the average, which
+    /// is the quantity a per-bank lumped model was ever standing in for.
+    pub fn bank_mean_round_trip_seconds(&self, bank: usize) -> f32 {
+        let cyls = match self.bank_cylinders.get(bank) {
+            Some(cyls) if !cyls.is_empty() => cyls,
+            _ => return 0.0,
+        };
+        let total: f32 = cyls
+            .iter()
+            .map(|&i| 2.0 * self.primaries[i].transit_time_seconds())
+            .sum();
+        total / cyls.len() as f32
+    }
+
+    /// Reflection coefficient currently at a cylinder's valve end [-].
+    pub fn valve_reflection(&self, cylinder: usize) -> f32 {
+        self.valves[cylinder.min(self.valves.len() - 1)].reflection()
+    }
+
+    /// Damps a primary by softening its valve-end reflection, `0` for the bare
+    /// closed valve and `1` for fully damped.
+    ///
+    /// Until the solver's own valve lift reaches the snapshot, a primary's head
+    /// is a rigid closed end at every instant, which is what a real one is for
+    /// most of the cycle but never all of it: for the part of the cycle the
+    /// valve is open, the pipe is looking into the cylinder and the reflection
+    /// is far weaker. Scaling the reflection here stands in for that, and it is
+    /// the same physical quantity a lift curve would set — see
+    /// [`ValveTermination::set_effective_area`].
     pub fn set_valve_damping(&mut self, cylinder: usize, damping: f32) {
         if let Some(valve) = self.valves.get_mut(cylinder) {
             valve.set_damping(damping);
@@ -1601,6 +1651,9 @@ impl ExhaustNetwork {
 
     /// Steps the entire waveguide network by one audio sample:
     /// - `excitations`: blowdown pressure pulse injected at each cylinder's port.
+    /// - `bank_excitations`: pressure released inside each bank's collector — an
+    ///   exhaust backfire is unburnt fuel lighting off in the pipework, not a
+    ///   cylinder event, so it belongs at the junction and not at a valve.
     /// - `radiated`: filled with the pressure radiated from each bank's mouth.
     ///
     /// A bank is a tailpipe, so the caller gets one radiated signal per bank and
@@ -1608,7 +1661,7 @@ impl ExhaustNetwork {
     /// business, and folding it to stereo here would silently drop the outer
     /// banks of anything with more than two.
     #[inline(always)]
-    pub fn step(&mut self, excitations: &[f32], radiated: &mut [f32]) {
+    pub fn step(&mut self, excitations: &[f32], bank_excitations: &[f32], radiated: &mut [f32]) {
         let n_cyl = self.primaries.len();
         let crossed = !self.pre_cross_pipes.is_empty();
 
@@ -1647,8 +1700,10 @@ impl ExhaustNetwork {
             } else {
                 self.collector_returns[b]
             };
+            let excitation = bank_excitations.get(b).copied().unwrap_or(0.0);
             self.bank_trans[b] = self.collectors[b].step(
                 &self.bank_prim_in[b],
+                excitation,
                 downstream_refl,
                 &mut self.bank_prim_refl[b],
             );
