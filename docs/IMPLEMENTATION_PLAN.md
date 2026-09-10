@@ -1245,7 +1245,7 @@ compressor in the crate. Several very recognisable sounds are simply absent.
 - **Centrifugal supercharger.** Shaft-order like a turbo, but belt-locked, so it
   has a turbo's pitch behaviour with none of its lag.
 - **Blow-off / dump valve.** A broadband whoosh on lift, distinct from the surge
-  flutter that exists today, and triggered by the same closed-throttine-with-boost
+  flutter that exists today, and triggered by the same closed-throttle-with-boost
   condition.
 - **Wastegate chatter.** A rattling flutter at high boost as the gate hunts.
 - **Exhaust cutout / active valve flap.** A step change in the silencer chain —
