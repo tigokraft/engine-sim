@@ -1165,6 +1165,7 @@ pub struct MechanicalVoice {
     pub piston_slap: Option<ImpulsiveSource>,
     pub injector: Option<ImpulsiveSource>,
     pub timing_chain: Option<ImpulsiveSource>,
+    pub gear_whine: Option<ImpulsiveSource>,
     rumble_a: OnePole,
     rumble_b: OnePole,
     pub click_gain: Smoothed,
@@ -1235,12 +1236,26 @@ impl MechanicalVoice {
         );
         timing_chain.phase = 0.35;
 
+        let mut gear_whine = ImpulsiveSource::new(
+            sample_rate,
+            SourceRate::Order(31.0),
+            0.05,
+            0.0015,
+            ModalBank::dual(sample_rate, (2_200.0, 10.0, 0.8), (4_400.0, 12.0, 0.2)),
+            LevelLaw::Speed {
+                reference_rpm: 3_000.0,
+            },
+            0.20,
+        );
+        gear_whine.phase = 0.45;
+
         Self {
             intake_valve: Some(intake_valve),
             exhaust_valve: Some(exhaust_valve),
             piston_slap: Some(piston_slap),
             injector: Some(injector),
             timing_chain: Some(timing_chain),
+            gear_whine: Some(gear_whine),
             rumble_a: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             rumble_b: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             click_gain: Smoothed::new(0.0, sample_rate, 0.040),
@@ -1268,6 +1283,9 @@ impl MechanicalVoice {
             s.tune(snapshot, cycle_hz, cylinders);
         }
         if let Some(s) = &mut self.timing_chain {
+            s.tune(snapshot, cycle_hz, cylinders);
+        }
+        if let Some(s) = &mut self.gear_whine {
             s.tune(snapshot, cycle_hz, cylinders);
         }
 
@@ -1313,6 +1331,9 @@ impl MechanicalVoice {
         if let Some(s) = &mut self.timing_chain {
             clicks += s.process(noise);
         }
+        if let Some(s) = &mut self.gear_whine {
+            clicks += s.process(noise);
+        }
 
         let rumble = self
             .rumble_b
@@ -1337,6 +1358,9 @@ impl MechanicalVoice {
             s.reset();
         }
         if let Some(s) = &mut self.timing_chain {
+            s.reset();
+        }
+        if let Some(s) = &mut self.gear_whine {
             s.reset();
         }
         self.click_phase = 0.0;
