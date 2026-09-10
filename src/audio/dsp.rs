@@ -1139,47 +1139,69 @@ impl ImpulsiveSource {
 /// so the rumble follows FMEP directly.
 #[derive(Debug, Clone)]
 pub struct MechanicalVoice {
-    click: ImpulsiveSource,
+    pub intake_valve: Option<ImpulsiveSource>,
+    pub exhaust_valve: Option<ImpulsiveSource>,
     rumble_a: OnePole,
     rumble_b: OnePole,
     pub click_gain: Smoothed,
     pub rumble_gain: Smoothed,
     pub event_hz: Smoothed,
     pub click_phase: f32,
+    sample_rate: f32,
 }
 
 pub type MechanicalRig = MechanicalVoice;
 
 impl MechanicalVoice {
     fn new(sample_rate: f32) -> Self {
-        let click = ImpulsiveSource::new(
+        let mut intake_valve = ImpulsiveSource::new(
             sample_rate,
-            SourceRate::Order(0.0),
-            0.45,
-            0.0007,
-            ModalBank::single(sample_rate, 3_200.0, 1.1),
+            SourceRate::PerCylinder,
+            0.40,
+            0.0005,
+            ModalBank::single(sample_rate, 3_800.0, 1.4),
             LevelLaw::CamLash { base_ratio: 0.45 },
-            1.0,
+            0.50,
         );
+        intake_valve.phase = 0.0;
+
+        let mut exhaust_valve = ImpulsiveSource::new(
+            sample_rate,
+            SourceRate::PerCylinder,
+            0.40,
+            0.0008,
+            ModalBank::single(sample_rate, 2_600.0, 1.1),
+            LevelLaw::CamLash { base_ratio: 0.45 },
+            0.50,
+        );
+        exhaust_valve.phase = 0.5;
+
         Self {
-            click,
+            intake_valve: Some(intake_valve),
+            exhaust_valve: Some(exhaust_valve),
             rumble_a: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             rumble_b: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             click_gain: Smoothed::new(0.0, sample_rate, 0.040),
             rumble_gain: Smoothed::new(0.0, sample_rate, 0.040),
             event_hz: Smoothed::new(0.0, sample_rate, 0.030),
             click_phase: 0.0,
+            sample_rate,
         }
     }
 
     /// Retunes from FMEP [Pa], cycle rate [Hz] and cylinder count.
     fn tune(&mut self, friction_mep: f32, cycle_hz: f32, cylinders: usize) {
         let drag = (friction_mep / REFERENCE_FMEP).clamp(0.0, 1.5);
+        let rpm = cycle_hz * 120.0;
+
+        if let Some(s) = &mut self.intake_valve {
+            s.tune(friction_mep, rpm, cycle_hz, cylinders);
+        }
+        if let Some(s) = &mut self.exhaust_valve {
+            s.tune(friction_mep, rpm, cycle_hz, cylinders);
+        }
+
         let hz = cycle_hz * cylinders.max(1) as f32 * VALVE_EVENTS_PER_CYLINDER;
-        self.click.rate =
-            SourceRate::Order(cylinders.max(1) as f32 * (VALVE_EVENTS_PER_CYLINDER * 0.5));
-        self.click
-            .tune(friction_mep, cycle_hz * 120.0, cycle_hz, cylinders);
         self.event_hz.set_target(hz);
 
         self.click_gain.set_target(0.45 + 0.55 * drag);
@@ -1197,11 +1219,21 @@ impl MechanicalVoice {
         let rumble_gain = self.rumble_gain.next_value();
         let event_hz = self.event_hz.next_value();
 
-        self.click.event_hz.snap(event_hz);
-        self.click.gain.snap(click_gain);
+        let increment = event_hz / self.sample_rate;
+        if (1e-9..1.0).contains(&increment) {
+            self.click_phase += increment;
+            if self.click_phase >= 1.0 {
+                self.click_phase -= 1.0;
+            }
+        }
 
-        let click = self.click.process(noise);
-        self.click_phase = self.click.phase;
+        let mut clicks = 0.0f32;
+        if let Some(s) = &mut self.intake_valve {
+            clicks += s.process(noise);
+        }
+        if let Some(s) = &mut self.exhaust_valve {
+            clicks += s.process(noise);
+        }
 
         let rumble = self
             .rumble_b
@@ -1209,11 +1241,16 @@ impl MechanicalVoice {
             * MECHANICAL_RUMBLE_MAKEUP
             * rumble_gain;
 
-        click * 0.35 + rumble * 0.65
+        clicks * click_gain * 0.35 + rumble * 0.65
     }
 
     fn reset(&mut self) {
-        self.click.reset();
+        if let Some(s) = &mut self.intake_valve {
+            s.reset();
+        }
+        if let Some(s) = &mut self.exhaust_valve {
+            s.reset();
+        }
         self.click_phase = 0.0;
         self.rumble_a.reset();
         self.rumble_b.reset();
