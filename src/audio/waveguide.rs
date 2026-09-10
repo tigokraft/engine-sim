@@ -146,6 +146,11 @@ impl ViscothermalLoss {
         self.cutoff_hz
     }
 
+    /// Delay the loss filter adds to a wave passing through it [samples].
+    pub fn phase_delay_samples(&self) -> f32 {
+        self.filter.phase_delay_samples()
+    }
+
     /// Clears internal state.
     pub fn reset(&mut self) {
         self.filter.reset();
@@ -301,6 +306,16 @@ impl MouthTermination {
         self.area
     }
 
+    /// Delay the reflection filter adds to a wave turning around here [samples].
+    ///
+    /// The end correction says how much *longer* than its machined length the
+    /// pipe behaves; this says how much of that the reflection filter has
+    /// already supplied. A pipe attached to this mouth has to subtract it, or
+    /// the mouth is counted twice and the pipe plays flat.
+    pub fn phase_delay_samples(&self) -> f32 {
+        self.filter.phase_delay_samples()
+    }
+
     /// Steps the termination with incident forward wave $p^+$ from the pipe:
     /// Returns `(p_minus, p_radiated)`:
     /// - `p_minus`: reflected backward wave returning down the pipe ($p^-$) [Pa].
@@ -339,6 +354,9 @@ impl MouthTermination {
 pub struct WaveguidePipe {
     length: f32,
     area: f32,
+    /// Delay contributed by filters at the pipe's boundaries, per round trip
+    /// [samples]; see [`WaveguidePipe::set_boundary_phase_delay`].
+    boundary_phase_delay: f32,
     forward_line: DelayLine,
     backward_line: DelayLine,
     forward_loss: ViscothermalLoss,
@@ -374,7 +392,6 @@ impl WaveguidePipe {
         let max_delay_samples = (max_delay_sec * sample_rate).ceil() as usize + 8;
 
         let initial_delay_sec = runner_delay_seconds(length_f32, gamma, gas_constant, temperature);
-        let initial_delay_samples = (initial_delay_sec * sample_rate).max(1.0);
 
         let c = speed_of_sound(gamma, gas_constant, temperature);
         let rho = REFERENCE_PRESSURE_PA / (gas_constant * temperature.max(1.0));
@@ -382,10 +399,13 @@ impl WaveguidePipe {
 
         let forward_loss = ViscothermalLoss::new(radius_f32, length_f32, c, gamma, sample_rate);
         let backward_loss = ViscothermalLoss::new(radius_f32, length_f32, c, gamma, sample_rate);
+        let initial_delay_samples =
+            (initial_delay_sec * sample_rate - forward_loss.phase_delay_samples()).max(1.0);
 
         Self {
             length: length_f32,
             area: area_f32,
+            boundary_phase_delay: 0.0,
             forward_line: DelayLine::with_max_delay(max_delay_samples),
             backward_line: DelayLine::with_max_delay(max_delay_samples),
             forward_loss,
@@ -401,11 +421,6 @@ impl WaveguidePipe {
 
     /// Retunes propagation delay, acoustic admittance, and wall losses for current gas state.
     pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
-        let delay_sec = runner_delay_seconds(self.length, gamma, gas_constant, temperature);
-        let samples = delay_sec * self.sample_rate;
-        self.delay_samples
-            .set_target(samples.clamp(1.0, self.forward_line.max_delay()));
-
         let c = speed_of_sound(gamma, gas_constant, temperature);
         let rho = REFERENCE_PRESSURE_PA / (gas_constant * temperature.max(1.0));
         self.admittance = self.area / (rho * c).max(1e-4);
@@ -415,6 +430,33 @@ impl WaveguidePipe {
             .tune(r, self.length, c, gamma, self.sample_rate);
         self.backward_loss
             .tune(r, self.length, c, gamma, self.sample_rate);
+
+        // Retune the loss filters first, then take the delay they now add out of
+        // the line. What the pipe owes the wave is L / c of travel; the filters
+        // have already supplied part of it.
+        let delay_sec = runner_delay_seconds(self.length, gamma, gas_constant, temperature);
+        let samples = delay_sec * self.sample_rate - self.compensation();
+        self.delay_samples
+            .set_target(samples.clamp(1.0, self.forward_line.max_delay()));
+    }
+
+    /// Filter delay to take out of each direction of travel [samples].
+    ///
+    /// One loss filter sits in each direction, so each pays for its own; a
+    /// boundary filter is met once per round trip, so each direction pays half.
+    #[inline]
+    fn compensation(&self) -> f32 {
+        self.forward_loss.phase_delay_samples() + 0.5 * self.boundary_phase_delay
+    }
+
+    /// Declares the delay that filters at this pipe's boundaries add, per round
+    /// trip [samples] — a [`MouthTermination`]'s reflection filter, typically.
+    ///
+    /// Without this the pipe is longer than its geometry says by however much
+    /// phase the terminations happen to carry, and every resonance built on it
+    /// sits flat. Retune afterwards, or on the next [`WaveguidePipe::tune`].
+    pub fn set_boundary_phase_delay(&mut self, samples: f32) {
+        self.boundary_phase_delay = samples.max(0.0);
     }
 
     /// Length of the pipe section [m].
@@ -437,14 +479,18 @@ impl WaveguidePipe {
         self.admittance
     }
 
-    /// Current one-way transit delay [samples].
+    /// Current one-way acoustic transit delay $L / c$ [samples].
+    ///
+    /// This is the physical transit, not the length of the delay line: the line
+    /// is deliberately shorter by whatever the loss and boundary filters
+    /// contribute, and that bookkeeping is nobody else's business.
     pub fn delay_samples(&self) -> f32 {
-        self.delay_samples.value()
+        self.delay_samples.value() + self.compensation()
     }
 
     /// One-way transit time through the pipe [s].
     pub fn transit_time_seconds(&self) -> f32 {
-        self.delay_samples.value() / self.sample_rate
+        self.delay_samples() / self.sample_rate
     }
 
     /// Wall loss filter cutoff [Hz].
@@ -1489,7 +1535,7 @@ impl ExhaustNetwork {
                 sample_rate,
             );
             let eff_tail_len = exhaust.tailpipe.length + mouth.end_correction();
-            let tailpipe = WaveguidePipe::new(
+            let mut tailpipe = WaveguidePipe::new(
                 eff_tail_len,
                 exhaust.tailpipe.area,
                 sample_rate,
@@ -1497,6 +1543,10 @@ impl ExhaustNetwork {
                 r,
                 temp,
             );
+            // The mouth's reflection filter already holds part of the round
+            // trip; leave it in the pipe as well and the tailpipe plays flat.
+            tailpipe.set_boundary_phase_delay(mouth.phase_delay_samples());
+            tailpipe.tune(gamma, r, temp);
             tailpipes.push(tailpipe);
             mouths.push(mouth);
         }

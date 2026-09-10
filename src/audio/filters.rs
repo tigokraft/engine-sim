@@ -247,6 +247,22 @@ impl OnePole {
         self.z
     }
 
+    /// Delay the filter adds to a wave passing through it [samples].
+    ///
+    /// A one-pole is minimum phase, not zero phase: below its cutoff it lags by
+    ///
+    /// ```text
+    /// tau = (1 - a) / a
+    /// ```
+    ///
+    /// samples. That lag is real and it is small, but a filter sitting inside a
+    /// resonant loop does not merely attenuate — it lengthens the loop, and the
+    /// pipe comes out flat. Anything tuning a delay line around one of these has
+    /// to subtract this.
+    pub fn phase_delay_samples(&self) -> f32 {
+        (1.0 - self.a) / self.a.max(1e-6)
+    }
+
     /// Clears state.
     pub fn reset(&mut self) {
         self.z = 0.0;
