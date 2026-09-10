@@ -22,7 +22,9 @@
 
 use std::f64::consts::PI;
 
-use crate::audio::{EngineControls, Induction, SnapshotSource, SynthConfig};
+use crate::audio::{
+    EngineControls, ImpulsiveSpec, Induction, MechanicalSpec, SnapshotSource, SynthConfig,
+};
 use crate::environment::Environment;
 use crate::physics::cylinder::{deg, CylinderGeometry};
 use crate::physics::engine_block::{EngineBlock, FiringOrder};
@@ -69,6 +71,8 @@ pub struct EnginePreset {
     /// The block is solved atmospherically whichever this is; see
     /// [`Induction`] for why forced induction lives in the audio path only.
     pub induction: Induction,
+    /// Mechanical noise rig specification: which sources exist, their orders and levels.
+    pub mechanical: MechanicalSpec,
     /// Speed at which ignition is cut [rev/min].
     pub redline: f64,
     /// Speed the idle governor holds [rev/min].
@@ -101,9 +105,11 @@ impl EnginePreset {
         SnapshotSource::with_induction(block, self.induction)
     }
 
-    /// The synth configuration for this engine, voiced for its induction.
+    /// The synth configuration for this engine, voiced for its induction and mechanical spec.
     pub fn synth_config(&self, block: &EngineBlock, sample_rate: f32) -> SynthConfig {
-        SynthConfig::from_block(block, sample_rate).with_induction(self.induction)
+        SynthConfig::from_block(block, sample_rate)
+            .with_induction(self.induction)
+            .with_mechanical(self.mechanical)
     }
 
     /// Whether a turbo is fitted.
@@ -152,6 +158,7 @@ impl EnginePreset {
             },
             firing: FiringOrder::inline_four(),
             induction: Induction::NaturallyAspirated,
+            mechanical: MechanicalSpec::default(),
             redline: 7_400.0,
             idle: 850.0,
             inertia: 0.22,
@@ -170,6 +177,7 @@ impl EnginePreset {
             },
             firing: FiringOrder::cross_plane_v8(),
             induction: Induction::NaturallyAspirated,
+            mechanical: MechanicalSpec::default(),
             redline: 7_000.0,
             idle: 750.0,
             inertia: 0.45,
@@ -191,6 +199,11 @@ impl EnginePreset {
             },
             firing: FiringOrder::flat_plane_v8(),
             induction: Induction::NaturallyAspirated,
+            mechanical: MechanicalSpec {
+                timing_chain: Some(ImpulsiveSpec::order(24.0, 0.22)),
+                gear_whine: Some(ImpulsiveSpec::order(36.0, 0.25)),
+                ..MechanicalSpec::default()
+            },
             redline: 8_600.0,
             idle: 900.0,
             inertia: 0.30,
@@ -210,6 +223,10 @@ impl EnginePreset {
             },
             firing: FiringOrder::v10(),
             induction: Induction::NaturallyAspirated,
+            mechanical: MechanicalSpec {
+                gear_whine: Some(ImpulsiveSpec::order(35.0, 0.28)),
+                ..MechanicalSpec::default()
+            },
             redline: 8_500.0,
             idle: 900.0,
             inertia: 0.40,
@@ -229,6 +246,10 @@ impl EnginePreset {
             },
             firing: FiringOrder::v12(),
             induction: Induction::NaturallyAspirated,
+            mechanical: MechanicalSpec {
+                timing_chain: Some(ImpulsiveSpec::order(24.0, 0.20)),
+                ..MechanicalSpec::default()
+            },
             redline: 8_500.0,
             idle: 800.0,
             inertia: 0.48,
@@ -271,6 +292,7 @@ impl EnginePreset {
             },
             firing: FiringOrder::two_rotor_wankel(),
             induction: Induction::NaturallyAspirated,
+            mechanical: MechanicalSpec::rotary(),
             redline: 8_800.0,
             idle: 950.0,
             inertia: 0.20,
@@ -295,6 +317,7 @@ impl EnginePreset {
             },
             firing: FiringOrder::inline_four(),
             induction: Induction::small_single(),
+            mechanical: MechanicalSpec::default(),
             redline: 6_900.0,
             idle: 820.0,
             inertia: 0.24,
@@ -319,6 +342,7 @@ impl EnginePreset {
             },
             firing: FiringOrder::cross_plane_v8(),
             induction: Induction::twin(),
+            mechanical: MechanicalSpec::default(),
             redline: 7_100.0,
             idle: 760.0,
             inertia: 0.44,
@@ -344,6 +368,7 @@ impl EnginePreset {
             },
             firing: FiringOrder::inline_six(),
             induction: Induction::large_single(),
+            mechanical: MechanicalSpec::default(),
             redline: 7_200.0,
             idle: 780.0,
             inertia: 0.33,

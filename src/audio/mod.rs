@@ -56,7 +56,10 @@ pub mod dsp;
 pub mod filters;
 pub mod stream;
 
-pub use dsp::{CylinderTap, EngineSnapshot, EngineSynth, SynthConfig, TurboVoicing, MAX_CYLINDERS};
+pub use dsp::{
+    CylinderTap, EngineSnapshot, EngineSynth, ImpulsiveSpec, MechanicalSpec, SourceRate,
+    SynthConfig, TurboVoicing, MAX_CYLINDERS,
+};
 pub use filters::MufflerGeometry;
 pub use stream::{
     AudioScope, AudioSettings, AudioStats, EngineAudio, StreamInfo, PREFERRED_SAMPLE_RATE,

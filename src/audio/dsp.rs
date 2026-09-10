@@ -329,6 +329,91 @@ impl Default for TurboVoicing {
     }
 }
 
+/// How an impulsive mechanical source sets its recurrence rate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SourceRate {
+    /// One event per cylinder per four-stroke engine cycle (crank order = cylinders * 0.5).
+    PerCylinder,
+    /// Explicit crankshaft order (events per crank revolution).
+    Order(f32),
+}
+
+/// Specification for one impulsive mechanical sound source.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImpulsiveSpec {
+    /// Recurrence rate: per-cylinder or an explicit crankshaft order.
+    pub rate: SourceRate,
+    /// Level of the source in the mechanical mix.
+    pub level: f32,
+}
+
+impl ImpulsiveSpec {
+    /// An impulsive event occurring once per cylinder per four-stroke cycle.
+    pub const fn per_cylinder(level: f32) -> Self {
+        Self {
+            rate: SourceRate::PerCylinder,
+            level,
+        }
+    }
+
+    /// An impulsive event occurring at an explicit crankshaft order.
+    pub const fn order(order: f32, level: f32) -> Self {
+        Self {
+            rate: SourceRate::Order(order),
+            level,
+        }
+    }
+}
+
+/// Configuration for the mechanical noise rig: which sources exist, their orders and levels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MechanicalSpec {
+    /// Intake valve seating event: lighter valve, brighter ring.
+    pub intake_valve: Option<ImpulsiveSpec>,
+    /// Exhaust valve seating event: heavier valve, hotter, duller ring.
+    pub exhaust_valve: Option<ImpulsiveSpec>,
+    /// Piston slap: transverse skirt impact against the bore at TDC compression.
+    pub piston_slap: Option<ImpulsiveSpec>,
+    /// Injector tick: high-frequency click from solenoid or direct injector.
+    pub injector: Option<ImpulsiveSpec>,
+    /// Timing drive: chain pitch or belt tooth whirr.
+    pub timing_chain: Option<ImpulsiveSpec>,
+    /// Gear whine: tooth-mesh singing from oil pump, accessory or timing gears.
+    pub gear_whine: Option<ImpulsiveSpec>,
+    /// Accessory drive: non-integer order belt/pulley rumble.
+    pub accessory: Option<ImpulsiveSpec>,
+}
+
+impl Default for MechanicalSpec {
+    fn default() -> Self {
+        Self {
+            intake_valve: Some(ImpulsiveSpec::per_cylinder(0.50)),
+            exhaust_valve: Some(ImpulsiveSpec::per_cylinder(0.50)),
+            piston_slap: Some(ImpulsiveSpec::per_cylinder(0.40)),
+            injector: Some(ImpulsiveSpec::per_cylinder(0.35)),
+            timing_chain: Some(ImpulsiveSpec::order(19.0, 0.25)),
+            gear_whine: Some(ImpulsiveSpec::order(31.0, 0.20)),
+            accessory: Some(ImpulsiveSpec::order(1.37, 0.20)),
+        }
+    }
+}
+
+impl MechanicalSpec {
+    /// Mechanical spec for a rotary engine: no valves, no reciprocating pistons,
+    /// but phasing gears, eccentric shaft drive, oil pump gear whine and accessories.
+    pub fn rotary() -> Self {
+        Self {
+            intake_valve: None,
+            exhaust_valve: None,
+            piston_slap: None,
+            injector: Some(ImpulsiveSpec::per_cylinder(0.35)),
+            timing_chain: None,
+            gear_whine: Some(ImpulsiveSpec::order(3.0, 0.30)),
+            accessory: Some(ImpulsiveSpec::order(1.37, 0.20)),
+        }
+    }
+}
+
 ///
 /// Everything here is fixed for the life of the stream — it is geometry, not
 /// state — so it is passed once at construction and never crosses the ring
@@ -400,6 +485,8 @@ pub struct SynthConfig {
     pub backfire_level: f64,
     /// Level of the valvetrain and bearing noise floor [-].
     pub mechanical_level: f64,
+    /// Mechanical rig configuration: which impulsive sources exist, their orders and levels.
+    pub mechanical: MechanicalSpec,
     /// Gain applied to the summed bus before the soft clipper [-].
     pub master_gain: f64,
 }
@@ -472,6 +559,7 @@ impl SynthConfig {
             // against a unity-RMS source, so this is directly comparable to
             // `intake_level` and [`TurboVoicing::level`].
             mechanical_level: 0.030,
+            mechanical: MechanicalSpec::default(),
             master_gain: 0.55,
         }
     }
@@ -522,6 +610,12 @@ impl SynthConfig {
     /// Firing frequency at a given speed, `f = (RPM / 120) * N_cyl` [Hz].
     pub fn firing_frequency(&self, rpm: f32) -> f32 {
         rpm / 120.0 * self.cylinder_count() as f32
+    }
+
+    /// Attaches a mechanical noise rig configuration.
+    pub fn with_mechanical(mut self, mechanical: MechanicalSpec) -> Self {
+        self.mechanical = mechanical;
+        self
     }
 }
 
@@ -978,15 +1072,6 @@ const MECHANICAL_RUMBLE_HZ: f32 = 380.0;
 // Impulsive mechanical source primitive
 // ---------------------------------------------------------------------------
 
-/// How an impulsive mechanical source sets its recurrence rate.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SourceRate {
-    /// One event per cylinder per four-stroke engine cycle (crank order = cylinders * 0.5).
-    PerCylinder,
-    /// Explicit crankshaft order (events per crank revolution).
-    Order(f32),
-}
-
 /// Control law governing how a mechanical source's gain scales with engine state.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LevelLaw {
@@ -1179,98 +1264,120 @@ pub struct MechanicalVoice {
 pub type MechanicalRig = MechanicalVoice;
 
 impl MechanicalVoice {
-    fn new(sample_rate: f32) -> Self {
-        let mut intake_valve = ImpulsiveSource::new(
-            sample_rate,
-            SourceRate::PerCylinder,
-            0.40,
-            0.0005,
-            ModalBank::single(sample_rate, 3_800.0, 1.4),
-            LevelLaw::CamLash { base_ratio: 0.45 },
-            0.50,
-        );
-        intake_valve.phase = 0.0;
+    /// Builds a mechanical noise rig from a specification.
+    pub fn from_spec(spec: &MechanicalSpec, sample_rate: f32) -> Self {
+        let intake_valve = spec.intake_valve.map(|s| {
+            let mut src = ImpulsiveSource::new(
+                sample_rate,
+                s.rate,
+                0.40,
+                0.0005,
+                ModalBank::single(sample_rate, 3_800.0, 1.4),
+                LevelLaw::CamLash { base_ratio: 0.45 },
+                s.level,
+            );
+            src.phase = 0.0;
+            src
+        });
 
-        let mut exhaust_valve = ImpulsiveSource::new(
-            sample_rate,
-            SourceRate::PerCylinder,
-            0.40,
-            0.0008,
-            ModalBank::single(sample_rate, 2_600.0, 1.1),
-            LevelLaw::CamLash { base_ratio: 0.45 },
-            0.50,
-        );
-        exhaust_valve.phase = 0.5;
+        let exhaust_valve = spec.exhaust_valve.map(|s| {
+            let mut src = ImpulsiveSource::new(
+                sample_rate,
+                s.rate,
+                0.40,
+                0.0008,
+                ModalBank::single(sample_rate, 2_600.0, 1.1),
+                LevelLaw::CamLash { base_ratio: 0.45 },
+                s.level,
+            );
+            src.phase = 0.5;
+            src
+        });
 
-        let mut piston_slap = ImpulsiveSource::new(
-            sample_rate,
-            SourceRate::PerCylinder,
-            0.35,
-            0.0030,
-            ModalBank::dual(sample_rate, (480.0, 1.6, 0.7), (950.0, 2.0, 0.3)),
-            LevelLaw::PeakPressure {
-                reference_pressure: REFERENCE_PEAK_PRESSURE,
-            },
-            0.40,
-        );
-        piston_slap.phase = 0.25;
+        let piston_slap = spec.piston_slap.map(|s| {
+            let mut src = ImpulsiveSource::new(
+                sample_rate,
+                s.rate,
+                0.35,
+                0.0030,
+                ModalBank::dual(sample_rate, (480.0, 1.6, 0.7), (950.0, 2.0, 0.3)),
+                LevelLaw::PeakPressure {
+                    reference_pressure: REFERENCE_PEAK_PRESSURE,
+                },
+                s.level,
+            );
+            src.phase = 0.25;
+            src
+        });
 
-        let mut injector = ImpulsiveSource::new(
-            sample_rate,
-            SourceRate::PerCylinder,
-            0.25,
-            0.0003,
-            ModalBank::single(sample_rate, 4_200.0, 3.5),
-            LevelLaw::Constant,
-            0.35,
-        );
-        injector.phase = 0.15;
+        let injector = spec.injector.map(|s| {
+            let mut src = ImpulsiveSource::new(
+                sample_rate,
+                s.rate,
+                0.25,
+                0.0003,
+                ModalBank::single(sample_rate, 4_200.0, 3.5),
+                LevelLaw::Constant,
+                s.level,
+            );
+            src.phase = 0.15;
+            src
+        });
 
-        let mut timing_chain = ImpulsiveSource::new(
-            sample_rate,
-            SourceRate::Order(19.0),
-            0.15,
-            0.0010,
-            ModalBank::single(sample_rate, 1_600.0, 2.2),
-            LevelLaw::FrictionMep,
-            0.25,
-        );
-        timing_chain.phase = 0.35;
+        let timing_chain = spec.timing_chain.map(|s| {
+            let mut src = ImpulsiveSource::new(
+                sample_rate,
+                s.rate,
+                0.15,
+                0.0010,
+                ModalBank::single(sample_rate, 1_600.0, 2.2),
+                LevelLaw::FrictionMep,
+                s.level,
+            );
+            src.phase = 0.35;
+            src
+        });
 
-        let mut gear_whine = ImpulsiveSource::new(
-            sample_rate,
-            SourceRate::Order(31.0),
-            0.05,
-            0.0015,
-            ModalBank::dual(sample_rate, (2_200.0, 10.0, 0.8), (4_400.0, 12.0, 0.2)),
-            LevelLaw::Speed {
-                reference_rpm: 3_000.0,
-            },
-            0.20,
-        );
-        gear_whine.phase = 0.45;
+        let gear_whine = spec.gear_whine.map(|s| {
+            let mut src = ImpulsiveSource::new(
+                sample_rate,
+                s.rate,
+                0.05,
+                0.0015,
+                ModalBank::dual(sample_rate, (2_200.0, 10.0, 0.8), (4_400.0, 12.0, 0.2)),
+                LevelLaw::Speed {
+                    reference_rpm: 3_000.0,
+                },
+                s.level,
+            );
+            src.phase = 0.45;
+            src
+        });
 
-        let mut accessory = ImpulsiveSource::new(
-            sample_rate,
-            SourceRate::Order(1.37),
-            0.20,
-            0.0020,
-            ModalBank::single(sample_rate, 1_100.0, 2.8),
-            LevelLaw::Speed {
-                reference_rpm: 1_000.0,
-            },
-            0.20,
-        );
-        accessory.phase = 0.60;
+        let accessory = spec.accessory.map(|s| {
+            let mut src = ImpulsiveSource::new(
+                sample_rate,
+                s.rate,
+                0.20,
+                0.0020,
+                ModalBank::single(sample_rate, 1_100.0, 2.8),
+                LevelLaw::Speed {
+                    reference_rpm: 1_000.0,
+                },
+                s.level,
+            );
+            src.phase = 0.60;
+            src
+        });
 
         Self {
-            intake_valve: Some(intake_valve),
-            exhaust_valve: Some(exhaust_valve),
-            piston_slap: Some(piston_slap),
-            injector: Some(injector),
-            timing_chain: Some(timing_chain),
-            gear_whine: Some(gear_whine),
-            accessory: Some(accessory),
+            intake_valve,
+            exhaust_valve,
+            piston_slap,
+            injector,
+            timing_chain,
+            gear_whine,
+            accessory,
             rumble_a: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             rumble_b: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             click_gain: Smoothed::new(0.0, sample_rate, 0.040),
@@ -1279,6 +1386,11 @@ impl MechanicalVoice {
             click_phase: 0.0,
             sample_rate,
         }
+    }
+
+    /// Builds a mechanical noise rig with default four-stroke sources.
+    pub fn new(sample_rate: f32) -> Self {
+        Self::from_spec(&MechanicalSpec::default(), sample_rate)
     }
 
     /// Retunes from engine snapshot, cycle rate [Hz] and cylinder count.
@@ -1810,7 +1922,7 @@ impl EngineSynth {
             intake: IntakeVoice::new(fs),
             turbo: TurboVoice::new(fs),
             backfire: BackfireVoice::new(fs),
-            mechanical: MechanicalVoice::new(fs),
+            mechanical: MechanicalVoice::from_spec(&config.mechanical, fs),
             knock: KnockVoice::new(fs),
             variation: vec![CycleVariation::default(); config.cylinders.len()],
             variation_depth: 0.0,
