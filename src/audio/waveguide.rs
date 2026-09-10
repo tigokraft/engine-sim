@@ -1030,6 +1030,355 @@ impl BankCrossover {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Exhaust waveguide network
+// ---------------------------------------------------------------------------
+
+/// Complete physical 1D exhaust waveguide network.
+///
+/// Instantiated from an [`ExhaustSystem`] geometry description:
+/// - One primary runner per cylinder, terminated at the valve with [`ValveTermination`].
+/// - An arithmetic [`TaperedCollector`] per bank.
+/// - Bank [`BankCrossover`] linking dual-bank systems.
+/// - Expansion chamber silencers.
+/// - Tailpipes terminated with Stage 4 [`MouthTermination`].
+///
+/// Fully preallocated at construction — zero allocations in the audio callback.
+#[derive(Debug, Clone)]
+pub struct ExhaustNetwork {
+    primaries: Vec<WaveguidePipe>,
+    valves: Vec<ValveTermination>,
+    collectors: Vec<TaperedCollector>,
+    crossover: BankCrossover,
+    pre_cross_pipes: Vec<WaveguidePipe>,
+    post_cross_pipes: Vec<WaveguidePipe>,
+    chambers: Vec<Vec<ExpansionChamber>>,
+    tailpipes: Vec<WaveguidePipe>,
+    mouths: Vec<MouthTermination>,
+    bank_cylinders: Vec<Vec<usize>>,
+    bank_count: usize,
+
+    // Preallocated buffers for real-time processing
+    prim_in_0: Vec<f32>,
+    prim_to_collector: Vec<f32>,
+    bank_prim_in: Vec<Vec<f32>>,
+    bank_prim_refl: Vec<Vec<f32>>,
+}
+
+impl ExhaustNetwork {
+    /// Constructs the network from physical geometry and engine configuration.
+    pub fn new(
+        exhaust: &crate::physics::plumbing::ExhaustSystem,
+        cylinders: &[crate::audio::dsp::CylinderTap],
+        bank_count: usize,
+        sample_rate: f32,
+        snapshot: &crate::audio::dsp::EngineSnapshot,
+    ) -> Self {
+        let n_cyl = cylinders.len().max(1);
+        let n_banks = bank_count.max(1);
+
+        let gamma = snapshot.exhaust_gamma;
+        let r = snapshot.exhaust_gas_constant;
+        let temp = snapshot.exhaust_temperature;
+        let c = speed_of_sound(gamma, r, temp);
+
+        // Map cylinders to banks
+        let mut bank_cylinders = vec![Vec::new(); n_banks];
+        for (i, tap) in cylinders.iter().enumerate() {
+            let b = tap.bank % n_banks;
+            bank_cylinders[b].push(i);
+        }
+
+        // 1. Primary runners and valve terminations
+        let mut primaries = Vec::with_capacity(n_cyl);
+        let mut valves = Vec::with_capacity(n_cyl);
+        for i in 0..n_cyl {
+            let spec = if !exhaust.primaries.is_empty() {
+                exhaust.primaries[i % exhaust.primaries.len()]
+            } else {
+                crate::physics::plumbing::PipeSection::from_diameter(0.45, 0.040, 850.0)
+            };
+            let prim = WaveguidePipe::new(spec.length, spec.area, sample_rate, gamma, r, temp);
+            let valve = ValveTermination::new(spec.area);
+            primaries.push(prim);
+            valves.push(valve);
+        }
+
+        // 2. Collectors per bank
+        let mut collectors = Vec::with_capacity(n_banks);
+        for cyls in &bank_cylinders {
+            let inlets = cyls.len().max(1);
+            let prim_area = if !exhaust.primaries.is_empty() {
+                exhaust.primary_area()
+            } else {
+                std::f64::consts::PI * 0.020 * 0.020
+            };
+            let collector = TaperedCollector::new(
+                inlets,
+                prim_area,
+                exhaust.collector.outlet_area,
+                exhaust.collector.taper_length,
+                sample_rate,
+                gamma,
+                r,
+                temp,
+            );
+            collectors.push(collector);
+        }
+
+        // 3. Crossover and intermediate pipes
+        let crossover = BankCrossover::from_crossover(
+            &exhaust.crossover,
+            exhaust.collector.outlet_area,
+            sample_rate,
+            gamma,
+            r,
+            temp,
+        );
+
+        let has_crossover = matches!(
+            exhaust.crossover,
+            crate::physics::plumbing::Crossover::XPipe { .. }
+                | crate::physics::plumbing::Crossover::HPipe { .. }
+                | crate::physics::plumbing::Crossover::Balance180
+        );
+
+        let mut pre_cross_pipes = Vec::with_capacity(n_banks);
+        let mut post_cross_pipes = Vec::with_capacity(n_banks);
+        for _ in 0..n_banks {
+            if has_crossover {
+                pre_cross_pipes.push(WaveguidePipe::new(
+                    0.30,
+                    exhaust.collector.outlet_area,
+                    sample_rate,
+                    gamma,
+                    r,
+                    temp,
+                ));
+                post_cross_pipes.push(WaveguidePipe::new(
+                    0.30,
+                    exhaust.collector.outlet_area,
+                    sample_rate,
+                    gamma,
+                    r,
+                    temp,
+                ));
+            }
+        }
+
+        // 4. Silencers (expansion chambers) per bank
+        let mut chambers = vec![Vec::new(); n_banks];
+        for bank_chambers in &mut chambers {
+            for silencer in &exhaust.silencers {
+                if let crate::physics::plumbing::Silencer::ExpansionChamber {
+                    length,
+                    area_ratio,
+                    ..
+                } = silencer
+                {
+                    bank_chambers.push(ExpansionChamber::new(
+                        exhaust.collector.outlet_area,
+                        *area_ratio,
+                        *length,
+                        sample_rate,
+                        gamma,
+                        r,
+                        temp,
+                    ));
+                }
+            }
+        }
+
+        // 5. Tailpipes and Mouth terminations per bank
+        let mut tailpipes = Vec::with_capacity(n_banks);
+        let mut mouths = Vec::with_capacity(n_banks);
+        for _ in 0..n_banks {
+            let mouth = MouthTermination::new(
+                exhaust.tailpipe.diameter() * 0.5,
+                exhaust.tailpipe_flanged,
+                c,
+                sample_rate,
+            );
+            let eff_tail_len = exhaust.tailpipe.length + mouth.end_correction();
+            let tailpipe = WaveguidePipe::new(
+                eff_tail_len,
+                exhaust.tailpipe.area,
+                sample_rate,
+                gamma,
+                r,
+                temp,
+            );
+            tailpipes.push(tailpipe);
+            mouths.push(mouth);
+        }
+
+        // Preallocate buffers
+        let prim_in_0 = vec![0.0; n_cyl];
+        let prim_to_collector = vec![0.0; n_cyl];
+        let mut bank_prim_in = Vec::with_capacity(n_banks);
+        let mut bank_prim_refl = Vec::with_capacity(n_banks);
+        for cyls in &bank_cylinders {
+            let cnt = cyls.len();
+            bank_prim_in.push(vec![0.0; cnt]);
+            bank_prim_refl.push(vec![0.0; cnt]);
+        }
+
+        Self {
+            primaries,
+            valves,
+            collectors,
+            crossover,
+            pre_cross_pipes,
+            post_cross_pipes,
+            chambers,
+            tailpipes,
+            mouths,
+            bank_cylinders,
+            bank_count: n_banks,
+            prim_in_0,
+            prim_to_collector,
+            bank_prim_in,
+            bank_prim_refl,
+        }
+    }
+
+    /// Retunes propagation delay and acoustic filters across the whole network.
+    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32, sample_rate: f32) {
+        let c = speed_of_sound(gamma, gas_constant, temperature);
+        for p in &mut self.primaries {
+            p.tune(gamma, gas_constant, temperature);
+        }
+        for coll in &mut self.collectors {
+            coll.tune(gamma, gas_constant, temperature);
+        }
+        self.crossover.tune(gamma, gas_constant, temperature);
+        for p in &mut self.pre_cross_pipes {
+            p.tune(gamma, gas_constant, temperature);
+        }
+        for p in &mut self.post_cross_pipes {
+            p.tune(gamma, gas_constant, temperature);
+        }
+        for b in 0..self.bank_count {
+            for ch in &mut self.chambers[b] {
+                ch.tune(gamma, gas_constant, temperature);
+            }
+        }
+        for tp in &mut self.tailpipes {
+            tp.tune(gamma, gas_constant, temperature);
+        }
+        for m in &mut self.mouths {
+            m.tune(c, sample_rate);
+        }
+    }
+
+    /// Updates valve effective flow areas for all cylinders.
+    pub fn set_valve_areas(&mut self, valve_areas: &[f64]) {
+        for (v, &area) in self.valves.iter_mut().zip(valve_areas.iter()) {
+            v.set_effective_area(area);
+        }
+    }
+
+    /// Steps the entire waveguide network by one audio sample:
+    /// - `excitations`: slice of blowdown pressure pulse injections per cylinder.
+    ///
+    /// Returns stereo radiated pressure `(left_radiated, right_radiated)`.
+    #[inline(always)]
+    pub fn step(&mut self, excitations: &[f32]) -> (f32, f32) {
+        let n_cyl = self.primaries.len();
+
+        // 1. Read outputs from primaries and apply valve boundaries
+        for i in 0..n_cyl {
+            let (p_at_valve, p_at_coll) = self.primaries[i].read_outputs();
+            let excit = if i < excitations.len() {
+                excitations[i]
+            } else {
+                0.0
+            };
+            self.prim_in_0[i] = self.valves[i].step(excit, p_at_valve);
+            self.prim_to_collector[i] = p_at_coll;
+        }
+
+        // 2. Step collectors for each bank
+        let mut bank_trans = [0.0f32; 2];
+        for (b, trans_slot) in bank_trans[..self.bank_count.min(2)].iter_mut().enumerate() {
+            let cyls = &self.bank_cylinders[b];
+            for (k, &cyl_idx) in cyls.iter().enumerate() {
+                self.bank_prim_in[b][k] = self.prim_to_collector[cyl_idx];
+            }
+
+            let downstream_refl = 0.0f32;
+            let trans = self.collectors[b].step(
+                &self.bank_prim_in[b],
+                downstream_refl,
+                &mut self.bank_prim_refl[b],
+            );
+            *trans_slot = trans;
+
+            for (k, &cyl_idx) in cyls.iter().enumerate() {
+                let p_in_1 = self.bank_prim_refl[b][k];
+                self.primaries[cyl_idx].push_inputs(self.prim_in_0[cyl_idx], p_in_1);
+            }
+        }
+
+        // 3. Crossover
+        let (cross_out_0, cross_out_1) = if self.bank_count > 1 {
+            let (b0_in, b1_in) = (bank_trans[0], bank_trans[1]);
+            let (_, _, b0_out, b1_out) = self.crossover.step(b0_in, b1_in, 0.0, 0.0);
+            (b0_out, b1_out)
+        } else {
+            (bank_trans[0], 0.0)
+        };
+
+        // 4. Silencers & Tailpipes
+        let mut radiated = [0.0f32; 2];
+        let bank_inputs = [cross_out_0, cross_out_1];
+
+        for b in 0..self.bank_count.min(2) {
+            let mut sig = bank_inputs[b];
+            for ch in &mut self.chambers[b] {
+                let (_, trans) = ch.step(sig, 0.0);
+                sig = trans;
+            }
+
+            // Tailpipe & Mouth
+            let (_, p_tail_exit) = self.tailpipes[b].read_outputs();
+            let (p_mouth_refl, p_mouth_rad) = self.mouths[b].step(p_tail_exit);
+            self.tailpipes[b].push_inputs(sig, p_mouth_refl);
+            radiated[b] = p_mouth_rad;
+        }
+
+        (radiated[0], radiated[1])
+    }
+
+    /// Clears internal state across the entire network.
+    pub fn reset(&mut self) {
+        for p in &mut self.primaries {
+            p.reset();
+        }
+        for coll in &mut self.collectors {
+            coll.reset();
+        }
+        self.crossover.reset();
+        for p in &mut self.pre_cross_pipes {
+            p.reset();
+        }
+        for p in &mut self.post_cross_pipes {
+            p.reset();
+        }
+        for b in 0..self.bank_count {
+            for ch in &mut self.chambers[b] {
+                ch.reset();
+            }
+        }
+        for tp in &mut self.tailpipes {
+            tp.reset();
+        }
+        for m in &mut self.mouths {
+            m.reset();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
