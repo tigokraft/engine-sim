@@ -180,6 +180,10 @@ pub struct EngineSnapshot {
     pub friction_mep: f32,
     /// Whether ignition is currently cut (shift cut, launch control, overrun).
     pub spark_cut: bool,
+    /// How far past 1.0 the Livengood-Wu knock integral went, `(I - 1).max(0)` [-].
+    pub knock_intensity: f32,
+    /// Cylinder bore diameter [m].
+    pub bore: f32,
 }
 
 impl Default for EngineSnapshot {
@@ -199,6 +203,8 @@ impl Default for EngineSnapshot {
             unburnt_fuel_mass: 0.0,
             friction_mep: 0.0,
             spark_cut: false,
+            knock_intensity: 0.0,
+            bore: 0.084,
         }
     }
 }
@@ -237,6 +243,8 @@ impl EngineSnapshot {
         guard!(turbo_surge, 0.0, 1.0);
         guard!(unburnt_fuel_mass, 0.0, 1.0);
         guard!(friction_mep, 0.0, 2.0e6);
+        guard!(knock_intensity, 0.0, 50.0);
+        guard!(bore, 0.010, 0.500);
         self
     }
 }
@@ -1764,6 +1772,8 @@ mod tests {
             // Chen-Flynn on the shipped V8 at 3000 rpm under load.
             friction_mep: 1.5e5,
             spark_cut: false,
+            knock_intensity: 0.0,
+            bore: 0.084,
         }
     }
 
@@ -1995,6 +2005,8 @@ mod tests {
             unburnt_fuel_mass: f32::NAN,
             friction_mep: f32::NAN,
             spark_cut: true,
+            knock_intensity: f32::NAN,
+            bore: f32::NAN,
         });
         let out = render(&mut synth, 48_000);
         assert!(out.iter().all(|s| s.is_finite()), "NaN reached the device");

@@ -470,6 +470,9 @@ impl SnapshotSource {
             None => (0.0, 0.0),
         };
 
+        let knock_intensity = (block.master.knock_integral - 1.0).max(0.0) as f32;
+        let bore = block.model.geometry.bore as f32;
+
         EngineSnapshot {
             rpm: rpm as f32,
             blowdown_delta,
@@ -483,6 +486,8 @@ impl SnapshotSource {
             unburnt_fuel_mass: unburnt_fuel_mass as f32,
             friction_mep: friction_mep as f32,
             spark_cut: controls.spark_cut,
+            knock_intensity,
+            bore,
         }
         .sanitized()
     }
@@ -664,6 +669,8 @@ mod tests {
                 unburnt_fuel_mass: 0.0,
                 friction_mep: 1.6e5,
                 spark_cut: false,
+                knock_intensity: 0.0,
+                bore: 0.084,
             };
             snapshot = snapshot.sanitized();
 
