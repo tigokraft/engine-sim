@@ -281,6 +281,10 @@ mod tests {
         (2.0 * (re * re + im * im).sqrt() / measure as f64) as f32
     }
 
+    fn db(ratio: f32) -> f32 {
+        20.0 * ratio.max(1e-12).log10()
+    }
+
     #[test]
     fn end_correction_lowers_the_pipe_fundamental() {
         // A pipe closed at one end and open at the other, built from nothing
@@ -334,6 +338,39 @@ mod tests {
         assert!(
             (measured - corrected).abs() / corrected < 0.02,
             "measured {measured:.2} Hz against {corrected:.2} Hz"
+        );
+    }
+
+    #[test]
+    fn radiated_tilt_is_six_db_per_octave() {
+        let radius = 0.030;
+        let corner = corner_hz(radius, C);
+        let radiated = |hz: f32| {
+            let mut mouth = Mouth::new(FS, radius, false, C);
+            magnitude_at(hz, 4_000, 8_000, |x| mouth.step(x).1)
+        };
+
+        // Well below the corner the mouth is a differentiator: an octave up is
+        // 6 dB up, because a monopole radiates the rate of change of what it
+        // pumps and not the amount.
+        let low = radiated(corner / 32.0);
+        let low_octave_up = radiated(corner / 16.0);
+        approx(db(low_octave_up) - db(low), 6.02, 0.3);
+
+        // Above it, everything gets out and the tilt is gone.
+        let high = radiated(corner * 4.0);
+        let high_octave_up = radiated(corner * 8.0);
+        assert!(
+            (db(high_octave_up) - db(high)).abs() < 1.0,
+            "still tilting above the corner: {:.2} dB",
+            db(high_octave_up) - db(high)
+        );
+    }
+
+    fn approx(value: f32, expected: f32, tolerance: f32) {
+        assert!(
+            (value - expected).abs() <= tolerance,
+            "{value} is not within {tolerance} of {expected}"
         );
     }
 }
