@@ -11,6 +11,8 @@
 //! synthesis of its own: nothing here may change what the engine sounds like,
 //! only what can be said about it.
 //!
+//! - [`script`] — the fixed drive cycles a preset is measured through, each a
+//!   pure function of elapsed time.
 //! - [`orders`] — a Hann-windowed STFT; the level of each engine order read off
 //!   it against the speed curve the render was driven by, and peak picking on
 //!   the long-term average spectrum for the pipe resonances that stay put while
@@ -24,3 +26,4 @@
 //! what makes a difference between two builds attributable to the build.
 
 pub mod orders;
+pub mod script;
