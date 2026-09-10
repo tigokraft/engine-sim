@@ -291,3 +291,128 @@ pub fn limiter_bounce(preset: &EnginePreset) -> RenderScript {
         ],
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v8() -> EnginePreset {
+        EnginePreset::cross_plane_v8()
+    }
+
+    #[test]
+    fn the_catalogue_is_the_six_named_profiles() {
+        let preset = v8();
+        let scripts = catalogue(&preset);
+        let names: Vec<_> = scripts.iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            [
+                "idle_hold",
+                "sweep_up",
+                "sweep_down",
+                "tip_in",
+                "overrun_cut",
+                "limiter_bounce"
+            ]
+        );
+        assert!(scripts.iter().all(|s| s.seconds() > 0.0));
+    }
+
+    /// A script is a function of time and nothing else, so the same instant
+    /// gives the same answer however many times it is asked.
+    #[test]
+    fn a_script_is_a_pure_function_of_time() {
+        let preset = v8();
+        let script = sweep_up(&preset);
+        for step in 0..500 {
+            let t = step as f64 * 0.01;
+            let (rpm, controls) = script.at(t);
+            let (again, controls_again) = script.at(t);
+            assert_eq!(rpm.to_bits(), again.to_bits());
+            assert_eq!(
+                controls.throttle.to_bits(),
+                controls_again.throttle.to_bits()
+            );
+            assert_eq!(controls.spark_cut, controls_again.spark_cut);
+        }
+    }
+
+    /// Every profile stays inside the engine it was built for.
+    #[test]
+    fn no_profile_leaves_the_rev_range() {
+        for preset in EnginePreset::catalogue() {
+            for script in catalogue(&preset) {
+                let steps = 2_000;
+                for step in 0..=steps {
+                    let t = script.seconds() * step as f64 / steps as f64;
+                    let (rpm, controls) = script.at(t);
+                    assert!(
+                        rpm > 0.0 && rpm <= preset.redline + 1e-9,
+                        "{} on {} asked for {rpm:.0} rpm against a {:.0} redline",
+                        preset.name,
+                        script.name,
+                        preset.redline
+                    );
+                    assert!((0.0..=1.0).contains(&controls.throttle));
+                }
+            }
+        }
+    }
+
+    /// The limiter bounce dips below the redline and comes back, several times.
+    #[test]
+    fn the_limiter_bounce_bounces() {
+        let preset = v8();
+        let script = limiter_bounce(&preset);
+
+        // Sample the leg that is on the limiter, which starts 1.5 s in.
+        let speeds: Vec<f64> = (0..400)
+            .map(|i| script.at(1.5 + i as f64 * 0.01).0)
+            .collect();
+        let reversals = speeds
+            .windows(3)
+            .filter(|w| (w[1] - w[0]).signum() != (w[2] - w[1]).signum())
+            .count();
+        assert!(
+            reversals > 20,
+            "the limiter leg reversed {reversals} times in four seconds"
+        );
+
+        let lowest = speeds.iter().cloned().fold(f64::INFINITY, f64::min);
+        assert!(
+            lowest < preset.redline - 0.01 * preset.redline,
+            "the bounce never left the redline"
+        );
+    }
+
+    /// Scaling changes how long a cycle takes, not what it does.
+    #[test]
+    fn scaling_preserves_the_shape_of_a_script() {
+        let preset = v8();
+        let full = sweep_up(&preset);
+        let half = sweep_up(&preset).scaled_to(full.seconds() / 2.0);
+
+        assert!((half.seconds() - full.seconds() / 2.0).abs() < 1e-9);
+        for step in 0..=100 {
+            let u = step as f64 / 100.0;
+            let (fast, _) = half.at(u * half.seconds());
+            let (slow, _) = full.at(u * full.seconds());
+            assert!(
+                (fast - slow).abs() < 1.0,
+                "at {:.0} % the scaled script was at {fast:.0} rpm and the \
+                 original at {slow:.0}",
+                u * 100.0
+            );
+        }
+    }
+
+    /// Past its end a script holds, rather than falling to a stalled engine.
+    #[test]
+    fn a_script_holds_past_its_end() {
+        let preset = v8();
+        let script = idle_hold(&preset);
+        let (rpm, _) = script.at(script.seconds() * 10.0);
+        assert!((rpm - preset.idle).abs() < 1e-9);
+    }
+}
