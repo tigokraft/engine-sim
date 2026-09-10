@@ -56,7 +56,7 @@ pub mod dsp;
 pub mod filters;
 pub mod stream;
 
-pub use dsp::{CylinderTap, EngineSnapshot, EngineSynth, SynthConfig, TurboVoicing};
+pub use dsp::{CylinderTap, EngineSnapshot, EngineSynth, SynthConfig, TurboVoicing, MAX_CYLINDERS};
 pub use filters::MufflerGeometry;
 pub use stream::{
     AudioScope, AudioSettings, AudioStats, EngineAudio, StreamInfo, PREFERRED_SAMPLE_RATE,
@@ -399,10 +399,25 @@ impl SnapshotSource {
         manifold_pressure /= banks;
         manifold_temperature /= banks;
 
-        // The blowdown driver. Clamped at zero because a negative difference
+        // The blowdown driver per cylinder. Clamped at zero because a negative difference
         // means the manifold is momentarily above the cylinder — reverse flow,
         // which is a scavenging event, not an acoustic excitation.
-        let blowdown_delta = (at_evo.pressure - manifold_pressure).max(0.0);
+        let mut blowdown_delta = [0.0f32; MAX_CYLINDERS];
+        for (i, cyl) in block
+            .firing
+            .cylinders
+            .iter()
+            .enumerate()
+            .take(MAX_CYLINDERS)
+        {
+            let bank = (cyl.bank as usize) % block.exhaust_banks.len().max(1);
+            let manifold_p = block
+                .exhaust_banks
+                .get(bank)
+                .map_or(manifold_pressure, |b| b.port_pressure());
+            let evo_p = block.cylinder_evo_pressure(i);
+            blowdown_delta[i] = (evo_p - manifold_p).max(0.0) as f32;
+        }
 
         // Instantaneous induction flux summed over the cylinders that are
         // actually drawing. This is a *sum of instants*, not a cycle average:
@@ -457,7 +472,7 @@ impl SnapshotSource {
 
         EngineSnapshot {
             rpm: rpm as f32,
-            blowdown_delta: blowdown_delta as f32,
+            blowdown_delta,
             exhaust_temperature: manifold_temperature as f32,
             exhaust_gamma: gamma as f32,
             exhaust_gas_constant: gas_constant as f32,
@@ -572,11 +587,14 @@ mod tests {
         let snapshot = source.sample(&block, 3_000.0, 1.0 / 240.0, EngineControls::wide_open());
 
         assert_eq!(snapshot.rpm, 3_000.0);
-        assert!(snapshot.blowdown_delta > 0.0, "no blowdown pressure at all");
         assert!(
-            snapshot.blowdown_delta < 5.0e6,
+            snapshot.blowdown_delta[0] > 0.0,
+            "no blowdown pressure at all"
+        );
+        assert!(
+            snapshot.blowdown_delta[0] < 5.0e6,
             "implausible blowdown: {} Pa",
-            snapshot.blowdown_delta
+            snapshot.blowdown_delta[0]
         );
         assert!(
             (300.0..2_500.0).contains(&snapshot.exhaust_temperature),
@@ -635,7 +653,7 @@ mod tests {
             let shaft = induction.shaft().expect("turbocharged");
             let mut snapshot = EngineSnapshot {
                 rpm: 7_000.0,
-                blowdown_delta: 5.0e5,
+                blowdown_delta: [5.0e5; MAX_CYLINDERS],
                 exhaust_temperature: 1_100.0,
                 exhaust_gamma: 1.33,
                 exhaust_gas_constant: 287.0,

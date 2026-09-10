@@ -138,6 +138,9 @@ pub const CCV_THRESHOLD_RPM: f32 = 1_500.0;
 // Snapshot
 // ---------------------------------------------------------------------------
 
+/// Maximum number of cylinders supported by fixed-size snapshot arrays.
+pub const MAX_CYLINDERS: usize = 16;
+
 /// One frame of thermodynamic state, handed from the physics thread to the
 /// audio callback.
 ///
@@ -151,8 +154,8 @@ pub const CCV_THRESHOLD_RPM: f32 = 1_500.0;
 pub struct EngineSnapshot {
     /// Crankshaft speed [rev/min].
     pub rpm: f32,
-    /// `P_cylinder(theta_EVO) - P_exhaust_manifold`, the blowdown driver [Pa].
-    pub blowdown_delta: f32,
+    /// Per-cylinder `P_cylinder(theta_EVO) - P_exhaust_manifold(bank)` [Pa].
+    pub blowdown_delta: [f32; MAX_CYLINDERS],
     /// Bulk exhaust runner gas temperature [K].
     pub exhaust_temperature: f32,
     /// Ratio of specific heats of the exhaust gas [-].
@@ -185,7 +188,7 @@ impl Default for EngineSnapshot {
     fn default() -> Self {
         Self {
             rpm: 0.0,
-            blowdown_delta: 0.0,
+            blowdown_delta: [0.0; MAX_CYLINDERS],
             exhaust_temperature: 300.0,
             exhaust_gamma: 1.33,
             exhaust_gas_constant: 287.0,
@@ -219,7 +222,12 @@ impl EngineSnapshot {
             };
         }
         guard!(rpm, 0.0, 30_000.0);
-        guard!(blowdown_delta, 0.0, 5.0e6);
+        for p in self.blowdown_delta.iter_mut() {
+            if !p.is_finite() {
+                *p = 0.0;
+            }
+            *p = p.clamp(0.0, 5.0e6);
+        }
         guard!(exhaust_temperature, 200.0, 2_500.0);
         guard!(exhaust_gamma, 1.05, 1.70);
         guard!(exhaust_gas_constant, 150.0, 600.0);
@@ -1422,7 +1430,7 @@ impl EngineSynth {
 
         // RPM / 120 is the four-stroke cycle rate: two revolutions per cycle.
         self.cycle_hz.set_target(snapshot.rpm / 120.0);
-        self.blowdown_pa.set_target(snapshot.blowdown_delta);
+        self.blowdown_pa.set_target(snapshot.blowdown_delta[0]);
         self.exhaust_temperature
             .set_target(snapshot.exhaust_temperature);
         self.exhaust_gamma.set_target(snapshot.exhaust_gamma);
@@ -1732,7 +1740,7 @@ mod tests {
     fn loaded_snapshot() -> EngineSnapshot {
         EngineSnapshot {
             rpm: 3_000.0,
-            blowdown_delta: 4.0e5,
+            blowdown_delta: [4.0e5; MAX_CYLINDERS],
             exhaust_temperature: 950.0,
             exhaust_gamma: 1.33,
             exhaust_gas_constant: 287.0,
@@ -1845,7 +1853,7 @@ mod tests {
             config.mechanical_level = 0.0;
             let mut synth = EngineSynth::new(config);
             let mut snapshot = loaded_snapshot();
-            snapshot.blowdown_delta = delta;
+            snapshot.blowdown_delta = [delta; MAX_CYLINDERS];
             snapshot.intake_mass_flow = 0.0;
             snapshot.turbo_rpm = 0.0;
             synth.set_snapshot(&snapshot);
@@ -1918,7 +1926,7 @@ mod tests {
         let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
         let idle = EngineSnapshot {
             rpm: 800.0,
-            blowdown_delta: 0.6e5,
+            blowdown_delta: [0.6e5; MAX_CYLINDERS],
             exhaust_temperature: 600.0,
             intake_mass_flow: 0.02,
             throttle: 0.05,
@@ -1930,7 +1938,7 @@ mod tests {
 
         let mut hot = loaded_snapshot();
         hot.rpm = 7_000.0;
-        hot.blowdown_delta = 6.0e5;
+        hot.blowdown_delta = [6.0e5; MAX_CYLINDERS];
         hot.exhaust_temperature = 1_250.0;
         hot.intake_mass_flow = 0.45;
         hot.throttle = 1.0;
@@ -1964,7 +1972,7 @@ mod tests {
         let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
         synth.set_snapshot(&EngineSnapshot {
             rpm: f32::NAN,
-            blowdown_delta: f32::INFINITY,
+            blowdown_delta: [f32::INFINITY; MAX_CYLINDERS],
             exhaust_temperature: f32::NAN,
             exhaust_gamma: -1.0,
             exhaust_gas_constant: 0.0,
@@ -2070,7 +2078,7 @@ mod tests {
         // the gaps between chuffs and hide exactly what this measures.
         synth.config.mechanical_level = 0.0;
         let mut snapshot = loaded_snapshot();
-        snapshot.blowdown_delta = 0.0;
+        snapshot.blowdown_delta = [0.0; MAX_CYLINDERS];
         snapshot.intake_mass_flow = 0.0;
         snapshot.turbo_rpm = 120_000.0;
         snapshot.turbo_surge = 1.0;
@@ -2104,7 +2112,7 @@ mod tests {
             let mut synth = EngineSynth::new(config);
             synth.exhaust_level.snap(0.0);
             let mut snapshot = loaded_snapshot();
-            snapshot.blowdown_delta = 0.0;
+            snapshot.blowdown_delta = [0.0; MAX_CYLINDERS];
             snapshot.intake_mass_flow = 0.0;
             snapshot.turbo_rpm = 150_000.0;
             snapshot.turbo_surge = 0.8;
@@ -2130,7 +2138,7 @@ mod tests {
     fn idle_snapshot() -> EngineSnapshot {
         EngineSnapshot {
             rpm: 800.0,
-            blowdown_delta: 1.0e5,
+            blowdown_delta: [1.0e5; MAX_CYLINDERS],
             exhaust_temperature: 700.0,
             intake_mass_flow: 0.025,
             throttle: 0.04,
@@ -2283,7 +2291,7 @@ mod tests {
         // Start exactly on a cycle boundary at a settled speed, so the count is
         // a whole number of cycles by construction.
         synth.cycle_hz.snap(800.0 / 120.0);
-        synth.blowdown_pa.snap(idle_snapshot().blowdown_delta);
+        synth.blowdown_pa.snap(idle_snapshot().blowdown_delta[0]);
         synth.cycle_phase = 0.0;
 
         let cycles = 5usize;
