@@ -252,12 +252,16 @@ impl Stft {
     /// The block's mean is removed first. A DC term would put a main lobe over
     /// the bottom of the spectrum that has nothing to do with the engine, and
     /// the lowest orders are read from exactly there.
+    /// A block shorter than the window is zero-padded, which costs it level
+    /// rather than leaving whatever the previous block put in the scratch.
     pub fn analyse(&mut self, block: &[f32]) {
         debug_assert_eq!(block.len(), self.size);
 
-        let mean = block.iter().map(|&s| s as f64).sum::<f64>() / self.size as f64;
-        for (i, &sample) in block.iter().enumerate().take(self.size) {
-            self.re[i] = (sample as f64 - mean) * self.taper[i];
+        let taken = block.len().min(self.size);
+        let mean = block[..taken].iter().map(|&s| s as f64).sum::<f64>() / self.size as f64;
+        for i in 0..self.size {
+            let sample = block.get(i).map_or(0.0, |&s| s as f64 - mean);
+            self.re[i] = sample * self.taper[i];
             self.im[i] = 0.0;
         }
 
@@ -315,15 +319,14 @@ impl Stft {
         }
 
         let bin = self.bin_hz();
+        let top = (self.size / 2).min(power.len().saturating_sub(1));
         let first = ((lo_hz / bin).floor() as isize - LOBE).max(1) as usize;
-        let last = (((hi_hz / bin).ceil() as isize + LOBE).max(1) as usize).min(self.size / 2);
+        let last = (((hi_hz / bin).ceil() as isize + LOBE).max(1) as usize).min(top);
         if first > last {
             return None;
         }
 
-        let summed: f64 = power[first..=last.min(power.len().saturating_sub(1))]
-            .iter()
-            .sum();
+        let summed: f64 = power[first..=last].iter().sum();
         Some(2.0 * (summed / (self.size as f64 * self.taper_energy)).sqrt())
     }
 }
