@@ -11,6 +11,7 @@
 //!   between the two threads.
 //! - [`filters`] — biquads, delay lines and the gas-dynamic formulas that tune
 //!   them.
+//! - [`radiation`] — what an open end does: reflect, lengthen, and radiate.
 //! - [`stream`] — the `cpal` output stream and the lock-free queue feeding it.
 //!
 //! # Wiring it up
@@ -54,6 +55,7 @@
 
 pub mod dsp;
 pub mod filters;
+pub mod radiation;
 pub mod stream;
 pub mod waveguide;
 
