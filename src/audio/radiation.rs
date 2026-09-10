@@ -395,6 +395,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_wider_mouth_radiates_more_low_end() {
+        let narrow = 0.025;
+        let wide = 2.0 * narrow;
+        // Doubling the radius drops the corner by an octave: ka = 1 arrives at
+        // half the frequency.
+        approx(corner_hz(wide, C), corner_hz(narrow, C) / 2.0, 1e-3);
+
+        // A decade below either corner, where both are still mirrors, the wide
+        // mouth is 12 dB louder: 6 dB for a corner an octave lower, and 6 dB
+        // again for a mouth twice the size.
+        //
+        // To within a decibel, not to within a tenth. The reflection is a
+        // sampled one-pole placed by its pole rather than by its -3 dB point,
+        // and that costs a fraction of a decibel of transmission at the bottom
+        // — more for the narrow mouth, whose corner is a larger fraction of the
+        // sample rate, which is why the measured difference runs a little over
+        // the analytic one.
+        let hz = corner_hz(wide, C) / 10.0;
+        let level = |radius: f32| {
+            let mut mouth = Mouth::new(FS, radius, false, C);
+            magnitude_at(hz, 4_000, 8_000, |x| mouth.step(x).1)
+        };
+        approx(db(level(wide)) - db(level(narrow)), 12.04, 1.0);
+    }
+
     fn approx(value: f32, expected: f32, tolerance: f32) {
         assert!(
             (value - expected).abs() <= tolerance,
