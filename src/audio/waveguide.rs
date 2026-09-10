@@ -1304,7 +1304,7 @@ pub struct ExhaustNetwork {
     crossover: BankCrossover,
     pre_cross_pipes: Vec<WaveguidePipe>,
     post_cross_pipes: Vec<WaveguidePipe>,
-    chambers: Vec<Vec<ExpansionChamber>>,
+    silencers: Vec<Vec<SilencerElement>>,
     tailpipes: Vec<WaveguidePipe>,
     mouths: Vec<MouthTermination>,
     bank_cylinders: Vec<Vec<usize>>,
@@ -1418,26 +1418,19 @@ impl ExhaustNetwork {
             }
         }
 
-        // 4. Silencers (expansion chambers) per bank
-        let mut chambers = vec![Vec::new(); n_banks];
-        for bank_chambers in &mut chambers {
+        // 4. Silencer chain per bank
+        let mut silencers = vec![Vec::new(); n_banks];
+        for chain in &mut silencers {
             for silencer in &exhaust.silencers {
-                if let crate::physics::plumbing::Silencer::ExpansionChamber {
-                    length,
-                    area_ratio,
-                    ..
-                } = silencer
-                {
-                    bank_chambers.push(ExpansionChamber::new(
-                        exhaust.collector.outlet_area,
-                        *area_ratio,
-                        *length,
-                        sample_rate,
-                        gamma,
-                        r,
-                        temp,
-                    ));
-                }
+                SilencerElement::extend_chain(
+                    chain,
+                    silencer,
+                    exhaust.collector.outlet_area,
+                    sample_rate,
+                    gamma,
+                    r,
+                    temp,
+                );
             }
         }
 
@@ -1482,7 +1475,7 @@ impl ExhaustNetwork {
             crossover,
             pre_cross_pipes,
             post_cross_pipes,
-            chambers,
+            silencers,
             tailpipes,
             mouths,
             bank_cylinders,
@@ -1510,9 +1503,9 @@ impl ExhaustNetwork {
         for p in &mut self.post_cross_pipes {
             p.tune(gamma, gas_constant, temperature);
         }
-        for b in 0..self.bank_count {
-            for ch in &mut self.chambers[b] {
-                ch.tune(gamma, gas_constant, temperature);
+        for chain in &mut self.silencers {
+            for element in chain {
+                element.tune(gamma, gas_constant, temperature);
             }
         }
         for tp in &mut self.tailpipes {
@@ -1587,8 +1580,8 @@ impl ExhaustNetwork {
 
         for b in 0..self.bank_count.min(2) {
             let mut sig = bank_inputs[b];
-            for ch in &mut self.chambers[b] {
-                let (_, trans) = ch.step(sig, 0.0);
+            for element in &mut self.silencers[b] {
+                let (_, trans) = element.step(sig, 0.0);
                 sig = trans;
             }
 
@@ -1617,9 +1610,9 @@ impl ExhaustNetwork {
         for p in &mut self.post_cross_pipes {
             p.reset();
         }
-        for b in 0..self.bank_count {
-            for ch in &mut self.chambers[b] {
-                ch.reset();
+        for chain in &mut self.silencers {
+            for element in chain {
+                element.reset();
             }
         }
         for tp in &mut self.tailpipes {
