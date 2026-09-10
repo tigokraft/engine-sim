@@ -81,7 +81,7 @@ use std::f32::consts::TAU;
 
 use crate::audio::filters::{
     firing_interval_seconds, soft_clip, waveguide_damping, Biquad, BiquadCoeffs, BlockResonator,
-    DcBlocker, ExhaustRunner, ModalBank, Muffler, MufflerGeometry, Noise, OnePole, Smoothed,
+    DcBlocker, ExhaustRunner, ModalBank, Muffler, Noise, OnePole, Smoothed,
 };
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
 
@@ -431,12 +431,6 @@ pub struct SynthConfig {
     pub exhaust: ExhaustSystem,
     /// Intake system geometry: runners, plenum, throttle, airbox, and snorkel.
     pub intake: IntakeSystem,
-    /// Primary runner length from valve to collector [m].
-    pub runner_length: f64,
-    /// Magnitude of the collector reflection coefficient, `0..1` [-].
-    pub runner_reflection: f64,
-    /// Muffler cavity dimensions.
-    pub muffler: MufflerGeometry,
     /// Blowdown duration in crank degrees, which sets the pulse decay [deg].
     pub blowdown_degrees: f64,
     /// The turbocharger, or `None` for a naturally aspirated engine.
@@ -528,9 +522,6 @@ impl SynthConfig {
             bank_count: banks,
             exhaust,
             intake,
-            runner_length: 0.45,
-            runner_reflection: 0.55,
-            muffler: MufflerGeometry::default(),
             blowdown_degrees: 40.0,
             // Atmospheric by default: a turbo is something a preset fits, not
             // something every engine is born with.
@@ -921,15 +912,17 @@ impl ExhaustBank {
             pulses: PulsePool::default(),
             runner: ExhaustRunner::new(
                 fs,
-                config.runner_length as f32,
-                config.runner_reflection as f32,
+                config
+                    .exhaust
+                    .primary_length_for_bank(index, config.bank_count) as f32,
+                config.exhaust.collector_reflection().abs() as f32,
                 snapshot.exhaust_gamma,
                 snapshot.exhaust_gas_constant,
                 snapshot.exhaust_temperature,
             ),
             muffler: Muffler::new(
                 fs,
-                config.muffler,
+                config.exhaust.muffler_geometry(),
                 snapshot.exhaust_gamma,
                 snapshot.exhaust_gas_constant,
                 snapshot.exhaust_temperature,

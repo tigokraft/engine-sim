@@ -551,9 +551,6 @@ impl SynthConfig {
             exhaust: block.exhaust.clone(),
             intake: block.intake_system.clone(),
             block_mass: block.block_mass,
-            runner_length: block.exhaust.primary_length_for_bank(0, bank_count),
-            runner_reflection: block.exhaust.collector_reflection().abs(),
-            muffler: block.exhaust.muffler_geometry(),
             ..Self::uniform(sample_rate, block.firing.len().max(1), bank_count)
         }
     }
