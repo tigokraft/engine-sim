@@ -80,6 +80,11 @@ pub struct EnginePreset {
     pub exhaust: ExhaustSystem,
     /// Intake system geometry: runners, plenum, throttle, airbox, and snorkel.
     pub intake: IntakeSystem,
+    /// Dressed mass of the engine block [kg].
+    ///
+    /// Sets where the structural rumble sits: a heavy iron block rings low and
+    /// an alloy one rings high.
+    pub block_mass: f64,
     /// Speed at which ignition is cut [rev/min].
     pub redline: f64,
     /// Speed the idle governor holds [rev/min].
@@ -187,6 +192,7 @@ impl EnginePreset {
                 snorkel: Some(PipeSection::from_diameter(0.30, 0.065, 300.0)),
                 trumpet_flanged: true,
             },
+            block_mass: 110.0,
             redline: 7_400.0,
             idle: 850.0,
             inertia: 0.22,
@@ -239,6 +245,7 @@ impl EnginePreset {
                 snorkel: Some(PipeSection::from_diameter(0.40, 0.075, 300.0)),
                 trumpet_flanged: true,
             },
+            block_mass: 210.0,
             redline: 7_000.0,
             idle: 750.0,
             inertia: 0.45,
@@ -282,6 +289,7 @@ impl EnginePreset {
                 snorkel: None,
                 trumpet_flanged: false,
             },
+            block_mass: 180.0,
             redline: 8_600.0,
             idle: 900.0,
             inertia: 0.30,
@@ -337,6 +345,7 @@ impl EnginePreset {
                 snorkel: None,
                 trumpet_flanged: true,
             },
+            block_mass: 220.0,
             redline: 8_500.0,
             idle: 900.0,
             inertia: 0.40,
@@ -381,6 +390,7 @@ impl EnginePreset {
                 snorkel: None,
                 trumpet_flanged: true,
             },
+            block_mass: 260.0,
             redline: 8_500.0,
             idle: 800.0,
             inertia: 0.48,
@@ -445,6 +455,7 @@ impl EnginePreset {
                 snorkel: None,
                 trumpet_flanged: false,
             },
+            block_mass: 95.0,
             redline: 8_800.0,
             idle: 950.0,
             inertia: 0.20,
@@ -491,6 +502,7 @@ impl EnginePreset {
                 snorkel: Some(PipeSection::from_diameter(0.35, 0.065, 300.0)),
                 trumpet_flanged: true,
             },
+            block_mass: 125.0,
             redline: 6_900.0,
             idle: 820.0,
             inertia: 0.24,
@@ -549,6 +561,7 @@ impl EnginePreset {
                 snorkel: Some(PipeSection::from_diameter(0.40, 0.075, 300.0)),
                 trumpet_flanged: true,
             },
+            block_mass: 235.0,
             redline: 7_100.0,
             idle: 760.0,
             inertia: 0.44,
@@ -596,6 +609,7 @@ impl EnginePreset {
                 snorkel: Some(PipeSection::from_diameter(0.35, 0.070, 300.0)),
                 trumpet_flanged: true,
             },
+            block_mass: 195.0,
             redline: 7_200.0,
             idle: 780.0,
             inertia: 0.33,
