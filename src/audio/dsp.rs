@@ -2708,6 +2708,88 @@ mod tests {
     }
 
     #[test]
+    fn firing_intervals_ripple_at_idle_and_converge_at_limiter() {
+        // Measures interval in samples between successive cylinder firings across the engine.
+        let measure_intervals = |rpm: f32, torque: f32, cycles: usize| -> (Vec<f32>, usize) {
+            let mut config = SynthConfig::cross_plane_v8(FS);
+            // Disable stochastic CCV so interval variations are purely from crank dynamics.
+            config.combustion_variation_max = 0.0;
+            config.combustion_variation_min = 0.0;
+            let mut synth = EngineSynth::new(config);
+
+            let mut snapshot = idle_snapshot();
+            snapshot.rpm = rpm;
+            snapshot.indicated_torque = torque;
+            // Distinct per-cylinder blowdowns (physical cylinder differences, Stage 1b).
+            for i in 0..8 {
+                snapshot.blowdown_delta[i] = 1.0e5 + (i as f32 * 0.2e5);
+            }
+            synth.set_snapshot(&snapshot);
+            synth.cycle_hz.snap(rpm / 120.0);
+            for (i, smoother) in synth.blowdown_pa.iter_mut().enumerate() {
+                smoother.snap(snapshot.blowdown_delta[i]);
+            }
+            synth.cycle_phase = 0.001;
+
+            let expected_fires = 8 * cycles;
+            let mut last: Vec<usize> = synth.banks.iter().map(|b| b.pulses.next).collect();
+            let mut firing_times = Vec::new();
+            let mut buffer = [0.0f32; 2];
+            let mut sample_idx = 0;
+
+            while firing_times.len() < expected_fires && sample_idx < 100_000 {
+                synth.render(&mut buffer, 2);
+                for (i, bank) in synth.banks.iter().enumerate() {
+                    let slots = bank.pulses.slots.len();
+                    let advanced = (bank.pulses.next + slots - last[i]) % slots;
+                    if advanced > 0 {
+                        firing_times.push(sample_idx);
+                    }
+                    last[i] = bank.pulses.next;
+                }
+                sample_idx += 1;
+            }
+
+            let intervals = firing_times
+                .windows(2)
+                .map(|w| (w[1] - w[0]) as f32)
+                .collect();
+            (intervals, firing_times.len())
+        };
+
+        let cycles = 5;
+        let (idle_intervals, idle_fires) = measure_intervals(800.0, 50.0, cycles);
+        let (limiter_intervals, limiter_fires) = measure_intervals(7000.0, 50.0, cycles);
+
+        // Every cylinder still fires exactly once per cycle (8 cylinders * 5 cycles = 40).
+        let expected_fires = 8 * cycles;
+        assert_eq!(
+            idle_fires, expected_fires,
+            "idle: {idle_fires} firings over {cycles} cycles, expected {expected_fires}"
+        );
+        assert_eq!(
+            limiter_fires, expected_fires,
+            "limiter: {limiter_fires} firings over {cycles} cycles, expected {expected_fires}"
+        );
+
+        // At idle, intra-cycle torque acceleration and compression deceleration
+        // cause the sample interval between consecutive cylinder firings to ripple.
+        let idle_cv = coefficient_of_variation(&idle_intervals);
+        assert!(
+            idle_cv > 0.01,
+            "idle firing intervals must ripple: COV {idle_cv:.4}"
+        );
+
+        // At limiter, large rotating inertia (I * omega) dominates gas torque,
+        // so firing intervals converge toward uniform.
+        let limiter_cv = coefficient_of_variation(&limiter_intervals);
+        assert!(
+            limiter_cv < idle_cv * 0.25,
+            "firing intervals must converge toward uniform at limiter: {limiter_cv:.4} vs {idle_cv:.4}"
+        );
+    }
+
+    #[test]
     fn combustion_variation_is_inert_above_the_threshold() {
         // Above CCV_THRESHOLD_RPM no draw is taken, so the whole synth — every
         // layer downstream of the shared noise generator included — must be
