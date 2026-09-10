@@ -28,7 +28,9 @@ use crate::audio::{
 use crate::environment::Environment;
 use crate::physics::cylinder::{deg, CylinderGeometry};
 use crate::physics::engine_block::{EngineBlock, FiringOrder};
-use crate::physics::plumbing::{Collector, Crossover, ExhaustSystem, PipeSection, Silencer};
+use crate::physics::plumbing::{
+    Collector, Crossover, ExhaustSystem, IntakeSystem, PipeSection, Silencer, ThrottleLayout,
+};
 use crate::physics::thermodynamics::{CylinderModel, ValveEvent, ValveTrain, WiebeProfile};
 
 /// Speed below which the engine has stalled [rev/min].
@@ -76,6 +78,8 @@ pub struct EnginePreset {
     pub mechanical: MechanicalSpec,
     /// Exhaust system geometry: primaries, collector, crossover, and silencers.
     pub exhaust: ExhaustSystem,
+    /// Intake system geometry: runners, plenum, throttle, airbox, and snorkel.
+    pub intake: IntakeSystem,
     /// Speed at which ignition is cut [rev/min].
     pub redline: f64,
     /// Speed the idle governor holds [rev/min].
@@ -175,6 +179,14 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.2, 0.054, 600.0),
                 tailpipe_flanged: false,
             },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.28, 0.042, 310.0); 4],
+                plenum_volume: 2.2e-3,
+                throttle: ThrottleLayout::Single { bore: 0.060 },
+                airbox: Some(PipeSection::from_diameter(0.15, 0.070, 300.0)),
+                snorkel: Some(PipeSection::from_diameter(0.30, 0.065, 300.0)),
+                trumpet_flanged: true,
+            },
             redline: 7_400.0,
             idle: 850.0,
             inertia: 0.22,
@@ -219,6 +231,14 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
                 tailpipe_flanged: false,
             },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.38, 0.044, 310.0); 8],
+                plenum_volume: 4.8e-3,
+                throttle: ThrottleLayout::Single { bore: 0.075 },
+                airbox: Some(PipeSection::from_diameter(0.20, 0.080, 300.0)),
+                snorkel: Some(PipeSection::from_diameter(0.40, 0.075, 300.0)),
+                trumpet_flanged: true,
+            },
             redline: 7_000.0,
             idle: 750.0,
             inertia: 0.45,
@@ -253,6 +273,14 @@ impl EnginePreset {
                 silencers: vec![Silencer::Straight],
                 tailpipe: PipeSection::from_diameter(0.9, 0.065, 650.0),
                 tailpipe_flanged: false,
+            },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.18, 0.048, 310.0); 8],
+                plenum_volume: 0.0,
+                throttle: ThrottleLayout::IndividualBodies { bore: 0.048 },
+                airbox: None,
+                snorkel: None,
+                trumpet_flanged: false,
             },
             redline: 8_600.0,
             idle: 900.0,
@@ -301,6 +329,14 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.1, 0.062, 650.0),
                 tailpipe_flanged: false,
             },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.22, 0.046, 310.0); 10],
+                plenum_volume: 0.0,
+                throttle: ThrottleLayout::IndividualBodies { bore: 0.050 },
+                airbox: None,
+                snorkel: None,
+                trumpet_flanged: true,
+            },
             redline: 8_500.0,
             idle: 900.0,
             inertia: 0.40,
@@ -336,6 +372,14 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.0, 0.055, 650.0),
                 tailpipe_flanged: false,
+            },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.14, 0.042, 310.0); 12],
+                plenum_volume: 0.0,
+                throttle: ThrottleLayout::IndividualBodies { bore: 0.045 },
+                airbox: None,
+                snorkel: None,
+                trumpet_flanged: true,
             },
             redline: 8_500.0,
             idle: 800.0,
@@ -393,6 +437,14 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.0, 0.060, 700.0),
                 tailpipe_flanged: false,
             },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.20, 0.052, 320.0); 2],
+                plenum_volume: 0.0,
+                throttle: ThrottleLayout::IndividualBodies { bore: 0.055 },
+                airbox: None,
+                snorkel: None,
+                trumpet_flanged: false,
+            },
             redline: 8_800.0,
             idle: 950.0,
             inertia: 0.20,
@@ -430,6 +482,14 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.2, 0.060, 600.0),
                 tailpipe_flanged: false,
+            },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.24, 0.042, 310.0); 4],
+                plenum_volume: 2.5e-3,
+                throttle: ThrottleLayout::Single { bore: 0.065 },
+                airbox: Some(PipeSection::from_diameter(0.20, 0.065, 310.0)),
+                snorkel: Some(PipeSection::from_diameter(0.35, 0.065, 300.0)),
+                trumpet_flanged: true,
             },
             redline: 6_900.0,
             idle: 820.0,
@@ -481,6 +541,14 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.4, 0.065, 600.0),
                 tailpipe_flanged: false,
             },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.26, 0.044, 310.0); 8],
+                plenum_volume: 4.5e-3,
+                throttle: ThrottleLayout::Single { bore: 0.080 },
+                airbox: Some(PipeSection::from_diameter(0.25, 0.080, 310.0)),
+                snorkel: Some(PipeSection::from_diameter(0.40, 0.075, 300.0)),
+                trumpet_flanged: true,
+            },
             redline: 7_100.0,
             idle: 760.0,
             inertia: 0.44,
@@ -519,6 +587,14 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.6, 0.070, 600.0),
                 tailpipe_flanged: false,
+            },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.30, 0.044, 310.0); 6],
+                plenum_volume: 3.5e-3,
+                throttle: ThrottleLayout::Single { bore: 0.075 },
+                airbox: Some(PipeSection::from_diameter(0.20, 0.075, 310.0)),
+                snorkel: Some(PipeSection::from_diameter(0.35, 0.070, 300.0)),
+                trumpet_flanged: true,
             },
             redline: 7_200.0,
             idle: 780.0,
