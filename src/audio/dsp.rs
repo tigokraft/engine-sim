@@ -2113,8 +2113,7 @@ impl EngineSynth {
         let cycle_hz = self.cycle_hz.value();
         let rpm = cycle_hz * 120.0;
 
-        self.network
-            .tune(gamma, gas_constant, temperature, self.config.sample_rate);
+        self.network.tune(gamma, gas_constant, temperature);
         // The Transit-Time Decision Rule, applied where the reflection it is
         // talking about actually happens: the closed valve at the head of each
         // primary. Every cylinder has its own primary now, so each one gets the

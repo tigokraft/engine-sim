@@ -24,6 +24,7 @@
 //! in the audio callback.
 
 use crate::audio::filters::{runner_delay_seconds, speed_of_sound, DelayLine, OnePole, Smoothed};
+use crate::audio::radiation::Mouth;
 
 /// Coldest gas temperature used to size delay line buffers [K].
 ///
@@ -450,7 +451,7 @@ impl WaveguidePipe {
     }
 
     /// Declares the delay that filters at this pipe's boundaries add, per round
-    /// trip [samples] — a [`MouthTermination`]'s reflection filter, typically.
+    /// trip [samples] — a [`Mouth`]'s reflection filter, typically.
     ///
     /// Without this the pipe is longer than its geometry says by however much
     /// phase the terminations happen to carry, and every resonance built on it
@@ -1365,7 +1366,7 @@ impl BankCrossover {
 /// - An arithmetic [`TaperedCollector`] per bank.
 /// - Bank [`BankCrossover`] linking dual-bank systems.
 /// - Expansion chamber silencers.
-/// - Tailpipes terminated with Stage 4 [`MouthTermination`].
+/// - Tailpipes terminated with a [`Mouth`], which reflects, lengthens and radiates.
 ///
 /// Fully preallocated at construction — zero allocations in the audio callback.
 #[derive(Debug, Clone)]
@@ -1377,7 +1378,7 @@ pub struct ExhaustNetwork {
     pre_cross_pipes: Vec<WaveguidePipe>,
     silencers: Vec<Vec<SilencerElement>>,
     tailpipes: Vec<WaveguidePipe>,
-    mouths: Vec<MouthTermination>,
+    mouths: Vec<Mouth>,
     bank_cylinders: Vec<Vec<usize>>,
     bank_count: usize,
 
@@ -1528,13 +1529,13 @@ impl ExhaustNetwork {
         let mut tailpipes = Vec::with_capacity(n_banks);
         let mut mouths = Vec::with_capacity(n_banks);
         for _ in 0..n_banks {
-            let mouth = MouthTermination::new(
-                exhaust.tailpipe.diameter() * 0.5,
+            let mouth = Mouth::new(
+                sample_rate,
+                (exhaust.tailpipe.diameter() * 0.5) as f32,
                 exhaust.tailpipe_flanged,
                 c,
-                sample_rate,
             );
-            let eff_tail_len = exhaust.tailpipe.length + mouth.end_correction();
+            let eff_tail_len = exhaust.tailpipe.length + mouth.end_correction() as f64;
             let mut tailpipe = WaveguidePipe::new(
                 eff_tail_len,
                 exhaust.tailpipe.area,
@@ -1591,7 +1592,7 @@ impl ExhaustNetwork {
     }
 
     /// Retunes propagation delay and acoustic filters across the whole network.
-    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32, sample_rate: f32) {
+    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
         let c = speed_of_sound(gamma, gas_constant, temperature);
         for p in &mut self.primaries {
             p.tune(gamma, gas_constant, temperature);
@@ -1612,7 +1613,7 @@ impl ExhaustNetwork {
             tp.tune(gamma, gas_constant, temperature);
         }
         for m in &mut self.mouths {
-            m.tune(c, sample_rate);
+            m.tune(c);
         }
     }
 
@@ -1871,12 +1872,16 @@ mod tests {
 
         for (length, radius) in [(0.5f64, 0.025f64), (0.9, 0.030), (0.35, 0.020)] {
             let area = std::f64::consts::PI * radius * radius;
-            let mouth =
-                MouthTermination::new(radius, false, speed_of_sound(GAMMA, R, TEMPERATURE), FS);
+            let mouth = Mouth::new(
+                FS,
+                radius as f32,
+                false,
+                speed_of_sound(GAMMA, R, TEMPERATURE),
+            );
             // The open end acts as if the pipe ran on past its edge; the network
             // adds the same correction, so the resonance is set by the effective
             // length rather than the machined one.
-            let effective = length + mouth.end_correction();
+            let effective = length + mouth.end_correction() as f64;
             let mut pipe = WaveguidePipe::new(effective, area, FS, GAMMA, R, TEMPERATURE);
             pipe.set_boundary_phase_delay(mouth.phase_delay_samples());
             pipe.tune(GAMMA, R, TEMPERATURE);
