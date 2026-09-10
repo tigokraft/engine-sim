@@ -38,6 +38,22 @@ pub const UNFLANGED_END_CORRECTION: f64 = 0.6133;
 /// bumper valance sits flat rather than sharp against one hanging free.
 pub const FLANGED_END_CORRECTION: f64 = 0.8216;
 
+/// First cross-mode cut-on of a circular duct, in units of the mouth corner [-].
+///
+/// A duct carries a plane wave alone only up to $ka = 1.8412$, the first zero of
+/// $J_1'$; above it the (1,0) mode propagates, the field across the bore stops
+/// being uniform, and a one-dimensional waveguide has nothing left to say. That
+/// ceiling is $1.8412 / (2 \pi a) \cdot c$ — the mouth corner times this
+/// number, since both are the same $ka$ measured at different values.
+///
+/// The radiated path is rolled off there. Not as a tone control: it is the edge
+/// of the model's own validity, and above it the excitation the synth is
+/// carrying — broadband noise generated at the port — is an extrapolation
+/// rather than a prediction. Leaving it flat to Nyquist puts white noise
+/// straight out of the tailpipe, which is neither what a pipe does nor what one
+/// sounds like.
+pub const DUCT_CUT_ON: f32 = 1.8412;
+
 /// Mouth radius the radiated level is expressed against [m].
 ///
 /// A 60 mm tailpipe. The synth carries pressure normalised to
@@ -153,6 +169,7 @@ pub struct Mouth {
     corner_hz: f32,
     gain: f32,
     reflection: OnePole,
+    plane_wave: OnePole,
 }
 
 impl Mouth {
@@ -171,6 +188,7 @@ impl Mouth {
             corner_hz: corner,
             gain: radiation_gain(radius, REFERENCE_DISTANCE),
             reflection: OnePole::new(sample_rate, corner),
+            plane_wave: OnePole::new(sample_rate, DUCT_CUT_ON * corner),
         }
     }
 
@@ -189,6 +207,8 @@ impl Mouth {
     pub fn tune(&mut self, speed_of_sound: f32) {
         self.corner_hz = corner_hz(self.radius, speed_of_sound);
         self.reflection.set_cutoff(self.sample_rate, self.corner_hz);
+        self.plane_wave
+            .set_cutoff(self.sample_rate, DUCT_CUT_ON * self.corner_hz);
     }
 
     /// Mouth radius [m].
@@ -199,6 +219,11 @@ impl Mouth {
     /// Radiation corner as currently tuned [Hz].
     pub fn corner_hz(&self) -> f32 {
         self.corner_hz
+    }
+
+    /// Frequency above which the duct is no longer one-dimensional [Hz].
+    pub fn cut_on_hz(&self) -> f32 {
+        DUCT_CUT_ON * self.corner_hz
     }
 
     /// Length the pipe has to be lengthened by to account for this mouth [m].
@@ -234,16 +259,19 @@ impl Mouth {
     /// Returns `(reflected, radiated)`: the wave sent back down the pipe, and
     /// the sound that leaves it. The second is the first added to the incident
     /// wave — the transmission $(1 + R) p^+$ of the type docs — scaled by
-    /// [`radiation_gain`].
+    /// [`radiation_gain`] and rolled off above the duct's own cut-on, for the
+    /// reason given at [`DUCT_CUT_ON`].
     #[inline(always)]
     pub fn step(&mut self, incident: f32) -> (f32, f32) {
         let reflected = self.reflect(incident);
-        (reflected, (incident + reflected) * self.gain)
+        let transmitted = (incident + reflected) * self.gain;
+        (reflected, self.plane_wave.process(transmitted))
     }
 
     /// Clears the filter state.
     pub fn reset(&mut self) {
         self.reflection.reset();
+        self.plane_wave.reset();
     }
 }
 
@@ -385,13 +413,16 @@ mod tests {
         let low_octave_up = radiated(corner / 16.0);
         approx(db(low_octave_up) - db(low), 6.02, 0.3);
 
-        // Above it, everything gets out and the tilt is gone.
-        let high = radiated(corner * 4.0);
-        let high_octave_up = radiated(corner * 8.0);
+        // Above it, everything gets out and the tilt is gone. Measured
+        // between the corner and the duct's cut-on, which is where the flat
+        // stretch lives: 0.58 of an octave, over which a differentiator would
+        // still be climbing 3.5 dB.
+        let flat_low = radiated(corner * 1.2);
+        let flat_high = radiated(corner * 1.8);
         assert!(
-            (db(high_octave_up) - db(high)).abs() < 1.0,
+            (db(flat_high) - db(flat_low)).abs() < 1.0,
             "still tilting above the corner: {:.2} dB",
-            db(high_octave_up) - db(high)
+            db(flat_high) - db(flat_low)
         );
     }
 
