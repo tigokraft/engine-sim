@@ -833,3 +833,394 @@ test valve timing changes the pulse spectrum
 > must show measurably different pulse spectra with no per-engine tuning constant
 > involved. Extend the existing starvation and state-jump tests rather than
 > replacing them.
+
+---
+
+# Stage 8 — The structural path
+
+**Goal.** Give combustion a route to the listener that is not the exhaust pipe:
+cylinder pressure rise rate driving a modal block.
+
+**Why.** `BlockResonator` is one peaking biquad sitting on the *output bus*,
+excited by the exhaust mix. Physically the dominant structure-borne path is
+`dP/dtheta` hammering the block — that is what "combustion noise" means in NVH,
+and it is most of what a diesel is. Right now nothing from combustion reaches the
+structure except as a filtered copy of the exhaust.
+
+**Files.** New `src/audio/structure.rs`; `src/audio/filters.rs` (retire the single
+`BlockResonator`), `src/audio/dsp.rs` (route knock and the mechanical rig through
+it), `src/bench.rs` (per-preset structural spec).
+
+**Design.** A modal filterbank — 4 to 8 resonators standing for block bending,
+torsional, bore-wall and pan-drumming modes, with frequencies and Qs derived from
+dressed mass, material stiffness and bore spacing rather than typed in. Keep the
+existing `block_resonance_hz(mass)` law as the anchor for the first mode so the
+current calibration is not lost.
+
+Three excitations into the bank:
+
+- `dP/dtheta` per cylinder from the Stage 7 tables — the combustion path.
+- The Stage 2 mechanical impulses — they radiate through the block, not the air.
+- Stage 1's knock burst — knock is heard through the structure.
+
+An alloy block and an iron block of the same size differ mostly in mass, and mass
+is already a preset field; stiffness barely changes. That asymmetry is exactly why
+an alloy V8 rings higher than an iron one, and it should come out of the formula.
+
+**Tests.**
+
+- Mode frequencies scale as `1/sqrt(mass)`; a heavier block rings lower (carry
+  over `a_heavier_block_rumbles_lower`).
+- A steeper `dP/dtheta` at constant peak pressure raises radiated level — the
+  diesel-clatter mechanism.
+- Knock and the mechanical rig appear in the structural output and not on the
+  exhaust bus.
+- Structural output is still bounded and DC-free.
+
+**Commits.**
+
+```
+add modal structure module
+derive mode frequencies from mass and stiffness
+excite the structure from pressure rise rate
+route the mechanical rig through the structure
+route knock through the structure
+add per-preset structural spec
+retire the single block resonator
+test modes scale with block mass
+test steeper pressure rise radiates more
+```
+
+**Prompt.**
+
+> Implement Stage 8 of `docs/IMPLEMENTATION_PLAN.md`. Read it, Stage 7 (whose
+> pressure tables you differentiate) and `AGENTS.md`. One-line granular commits,
+> no trailers.
+>
+> Replace the single `BlockResonator` biquad (`src/audio/filters.rs:1008`) with a
+> modal filterbank in a new `src/audio/structure.rs`: 4–8 modes whose frequencies
+> and Qs come from dressed mass, material stiffness and bore spacing, anchored so
+> the first mode reproduces the existing `block_resonance_hz(mass)` law. Excite it
+> from three sources — per-cylinder `dP/dtheta` off the Stage 7 tables, the
+> Stage 2 mechanical impulses, and the Stage 1 knock burst — so the structure
+> becomes a second radiating path rather than a filter on the exhaust bus.
+>
+> The mechanism to get right: a steeper pressure rise at the same peak pressure
+> must radiate more. That is combustion noise, and it is what makes a diesel
+> clatter. Keep the `a_heavier_block_rumbles_lower` and
+> `block_rumble_is_strongest_at_idle_and_gone_at_speed` behaviours or explain in
+> the commit why the physical model supersedes them.
+
+---
+
+# Stage 9 — Thermal state and warm-up
+
+**Goal.** One state variable that makes a cold engine sound cold.
+
+**Why.** `WoschniModel::wall_temperature` is a constant, so there is no cold
+start. Warm-up moves several things at once, all of which the audio path already
+reads: cooler walls give cooler exhaust, so a lower `c`, so **every pipe
+resonance drops in pitch**; thicker oil raises FMEP, so the mechanical floor is
+louder; the idle is fast; the mixture is rich. Sixty seconds of continuously
+changing sound for one ODE.
+
+**Files.** New `src/physics/thermal.rs`; `src/physics/thermodynamics.rs` (wall
+temperature becomes state), `src/bench.rs` (thermal mass, oil viscosity law,
+cold-idle target), `src/audio/waveguide.rs` (pipe wall temperature per section).
+
+**Design.** Lumped thermal masses with the heat the solver already computes:
+
+```
+C_block  dT_block/dt = Q_wall(t) - h_coolant (T_block - T_coolant)
+C_pipe_i dT_pipe/dt  = Q_gas_i(t)  - h_air     (T_pipe  - T_ambient)
+```
+
+`Q_wall` is Woschni's, already integrated per cycle. Friction rises as oil
+viscosity falls with temperature — a Vogel or Walther law on the Chen–Flynn
+coefficients. Each pipe section carries its own temperature, which Stage 10 then
+uses for the gradient.
+
+**Tests.**
+
+- From cold, exhaust temperature rises monotonically to a plateau.
+- Every derived resonance rises with it by `sqrt(T2/T1)`.
+- FMEP falls monotonically as the block warms; the mechanical floor follows.
+- Cold idle sits above warm idle and converges.
+- A stopped hot engine cools toward ambient at the modelled time constant.
+
+**Commits.**
+
+```
+add lumped thermal masses
+make cylinder wall temperature a state
+warm the pipes from gas heat
+scale friction with oil viscosity
+raise cold idle from thermal state
+test resonances rise as the engine warms
+```
+
+**Prompt.**
+
+> Implement Stage 9 of `docs/IMPLEMENTATION_PLAN.md`. Read it and `AGENTS.md`.
+> Granular one-line commits, no trailers.
+>
+> `WoschniModel::wall_temperature` is a fixed constant, so this simulator has no
+> cold engine. Add `src/physics/thermal.rs` with lumped thermal masses for the
+> block and for each pipe section, integrated from the wall heat flow Woschni
+> already computes, and make cylinder wall temperature a state variable rather
+> than a parameter. Scale the Chen–Flynn friction coefficients with oil viscosity
+> against block temperature (Vogel or Walther), and raise the idle target when
+> cold.
+>
+> The audible payoff is that every pipe resonance rises by `sqrt(T2/T1)` as the
+> engine warms — assert exactly that, plus monotonic warm-up, falling FMEP, cold
+> idle above warm idle, and a hot stopped engine cooling at the modelled time
+> constant. Give each pipe section its own temperature; Stage 10 needs the
+> gradient.
+
+---
+
+# Stage 10 — Pipe numerics: mean flow, gradient, steepening
+
+**Goal.** Four corrections that separate a pipe model from a delay line.
+
+**Why.** Each is small, each is currently wrong, and together they are the
+difference between a note that is loud and a note that is *hard*.
+
+**Files.** `src/audio/waveguide.rs`, `src/audio/filters.rs`, `src/audio/dsp.rs`.
+
+### 10a — Mean-flow convection
+
+Waves run downstream at `c + u` and upstream at `c - u`, so a pipe's effective
+tuning length is **asymmetric and load-dependent** — an effect the current model
+cannot produce at all. Two lines: bias the forward and backward delays separately.
+The prediction to test:
+
+```
+f_1 = c (1 - M^2) / (4 L)        M = u / c
+```
+
+### 10b — Temperature gradient along the pipe
+
+One bulk `exhaust_temperature` sets every delay, but a real system runs ~900 C at
+the port and ~400 C at the tailpipe. `c` varies about 35 % along the length, so
+tuning computed from a bulk temperature is simply wrong. Use Stage 9's per-section
+temperatures.
+
+### 10c — Wave steepening
+
+At blowdown the pressure ratio exceeds 2 and the crest travels faster than the
+trough, so the front steepens toward a shock down the primary. Amplitude-dependent
+delay, or a saturating shaper with level-dependent HF emphasis per segment. This
+is the mechanism behind a race engine sounding hard rather than merely loud.
+
+### 10d — Interpolation and aliasing
+
+Linear interpolation inside a feedback loop is a lowpass whose cutoff moves with
+the fractional part — audible as a breathing dullness while the delay glides with
+temperature. Move to Thiran allpass or Lagrange-3. Separately, a 0.16 ms attack
+into a soft clipper at 48 kHz folds; oversample the nonlinear stages 2x or
+bandlimit the excitation.
+
+Also: `CONTROL_BLOCK = 32` is 1.5 ms at 48 kHz, while a V12 at 8000 rpm fires
+every 1.25 ms — every control-rate schedule is quantised coarser than the events
+it tracks. Either shorten the block or move the affected schedules to per-sample.
+
+**Tests.**
+
+- Fundamental shifts as `(1 - M^2)` with mean flow, in both directions.
+- A pipe with a hot end and a cold end resonates between the two bulk
+  predictions, not at either.
+- Steepening raises high-order content with amplitude at constant fundamental,
+  and is absent at low amplitude.
+- Glide with the new interpolator shows no measurable amplitude modulation.
+- No aliasing products above the excitation's bandlimit after oversampling.
+
+**Commits.**
+
+```
+bias pipe delays by mean flow
+test fundamental shifts with mach number
+give each pipe section its own gas temperature
+add amplitude-dependent wave steepening
+replace linear delay interpolation with thiran allpass
+oversample the nonlinear stages
+shorten the control block below the firing interval
+test steepening raises high orders with amplitude
+```
+
+**Prompt.**
+
+> Implement Stage 10 of `docs/IMPLEMENTATION_PLAN.md`. Read it, Stage 5 and
+> Stage 9, plus `AGENTS.md`. Four independent corrections, each its own commit,
+> one line, no trailers.
+>
+> 1. **Mean flow.** Bias forward and backward delays separately by `c+u` and
+>    `c-u` so tuning becomes load-dependent and asymmetric. Test that the
+>    fundamental moves as `c(1-M^2)/(4L)`.
+> 2. **Gradient.** Stop deriving every delay from one bulk exhaust temperature;
+>    use the per-section temperatures from Stage 9. A pipe hot at the port and
+>    cool at the tailpipe must resonate between the two bulk predictions.
+> 3. **Steepening.** Make propagation amplitude-dependent so a large pulse
+>    steepens toward a shock down the primary — high-order content must rise with
+>    amplitude at a fixed fundamental, and be absent when quiet.
+> 4. **Interpolation and aliasing.** Replace linear fractional delay with Thiran
+>    allpass or Lagrange-3 (linear interpolation in a feedback loop modulates
+>    brightness as the delay glides), oversample the nonlinear stages 2x, and deal
+>    with `CONTROL_BLOCK = 32` being slower than the firing interval of a V12 at
+>    8000 rpm.
+>
+> Check CPU against the Stage 0 baseline after each one and report the cost.
+
+---
+
+# Stage 11 — Propagation: apertures, directivity, space
+
+**Goal.** Stop mixing sources into a stereo bus and start placing real radiators
+in real positions relative to a listener.
+
+**Why.** Today the exhaust is panned by bank index and everything else is centred
+(`src/audio/dsp.rs:1626`). Tailpipe, intake mouth and block are metres apart on a
+real car; getting that *geometry* right does more for "this is a physical object"
+than any single filter.
+
+**Files.** New `src/audio/propagation.rs`; `src/audio/dsp.rs` (the mix becomes an
+aperture list), `src/bench.rs` (aperture positions per preset).
+
+**Design.**
+
+- **Apertures.** Each radiator — tailpipe(s), intake mouth, block — has a
+  position, an area and a facing. Each gets its own path delay (1 m ≈ 3 ms, an
+  audible comb), its own `1/r`, and its own air absorption.
+- **Directivity.** A mouth is a monopole to `ka = 1` and beams above it, so
+  off-axis loses the top. This is why a car sounds different from behind than
+  from alongside.
+- **Ground reflection.** Outdoors this is the dominant coloration:
+
+```
+delta = sqrt((h_s + h_r)^2 + d^2) - sqrt((h_s - h_r)^2 + d^2)
+```
+
+- **Doppler**, if this becomes a vehicle: per aperture, because the tailpipe and
+  the intake are ~3 m apart and genuinely arrive differently on a pass-by.
+- **Cabin path**, if inside: at low frequency the structure-borne route through
+  the mounts dominates and is *not* a filtered version of the exterior sound.
+- **Environment**: geometry-derived early reflections — tunnel, garage, wall.
+
+**Tests.**
+
+- Aperture delays match `r / c` and the sum shows the expected comb.
+- Moving the listener behind the car attenuates the tailpipe's high end and not
+  its low end.
+- Ground reflection notches at the frequency the path difference predicts.
+- Doppler shift matches `f' = f c / (c - v_r)`.
+- Total level falls as `1/r` with distance.
+
+**Commits.**
+
+```
+add propagation module
+place apertures with position area and facing
+delay each aperture by its path length
+add distance attenuation and air absorption
+add mouth directivity
+add ground reflection
+add per-aperture doppler
+add aperture positions to the presets
+test ground notch matches the path difference
+```
+
+**Prompt.**
+
+> Implement Stage 11 of `docs/IMPLEMENTATION_PLAN.md`. Read it and `AGENTS.md`.
+> Granular one-line commits, no trailers.
+>
+> The mix in `src/audio/dsp.rs:1626` pans the exhaust by bank index and puts
+> everything else in the centre. Replace it with a real propagation model in
+> `src/audio/propagation.rs`: an aperture list (tailpipes, intake mouth, block)
+> each with position, area and facing, each delayed by its own path length,
+> attenuated by `1/r` and by air absorption, and filtered by mouth directivity
+> (monopole to `ka=1`, beaming above). Add ground reflection using the path
+> difference `sqrt((hs+hr)^2+d^2) - sqrt((hs-hr)^2+d^2)`, and per-aperture Doppler
+> so a pass-by shifts the tailpipe and the intake mouth separately.
+>
+> Test what is predictable: aperture delays equal `r/c`, the ground notch lands
+> where the path difference says, Doppler matches `f' = f c/(c - v_r)`, level falls
+> as `1/r`, and a listener behind the car loses the tailpipe's high end but not its
+> low end. Put aperture positions on `EnginePreset`.
+
+---
+
+# Stage 12 — Fuelling, timing and the driver's controls
+
+**Goal.** Make the two remaining constants — AFR and spark angle — into the
+control signals they are, and give the limiter and misfire real character.
+
+**Why.** `air_fuel_ratio: STOICH_AFR` for every engine always, and
+`WiebeProfile::spark_angle` is a preset constant. Both feed channels the audio
+path already reads, so plumbing them costs little and unlocks a lot.
+
+**Files.** New `src/physics/control.rs`; `src/physics/thermodynamics.rs`,
+`src/bench.rs`, `src/audio/dsp.rs` (per-cylinder health, limiter modes).
+
+**Design.**
+
+- **AFR** as a function of load and speed: WOT enrichment near 12.5:1, lean
+  cruise, accel enrichment, and **decel fuel cut-off** — which is why a real
+  overrun goes quiet and then bangs on tip-in. AFR moves `gamma`, `R`, flame speed
+  (Wiebe duration) and EGT, all of which the synth already consumes.
+- **Spark map** in advance versus load and speed, with knock-driven retard closing
+  the loop on Stage 1's knock integral. Heavy deliberate retard is what anti-lag
+  and launch control *are*.
+- **Limiter modes**: hard cut, soft progressive cut, rotating per-cylinder
+  stutter, and fuel-cut versus spark-cut — fuel cut sends no unburnt charge to the
+  exhaust, so it cannot bang, while spark cut can. Among the most identifiable
+  sounds a car makes.
+- **Per-cylinder health**: a dead plug or fouled injector as a hole in the firing
+  pattern — the classic hunting idle. `CycleVariation` is already per-cylinder.
+
+**Tests.**
+
+- Enrichment lowers EGT and measurably lowers every pipe resonance.
+- Decel fuel cut-off silences combustion while the mechanical floor and pumping
+  continue; tip-in produces unburnt fuel and a bang.
+- Knock retard reduces the knock integral below 1 within a bounded number of
+  cycles.
+- A fuel-cut limiter produces no backfires; a spark-cut limiter does.
+- A single dead cylinder shows as a missing order component and a lope at the
+  cycle rate.
+
+**Commits.**
+
+```
+add fuelling and spark control module
+schedule afr against load and speed
+add decel fuel cut-off
+add spark advance map
+close knock retard on the knock integral
+add limiter modes
+add per-cylinder health
+test enrichment lowers the pipe resonances
+test fuel cut cannot backfire
+test a dead cylinder lopes at the cycle rate
+```
+
+**Prompt.**
+
+> Implement Stage 12 of `docs/IMPLEMENTATION_PLAN.md`. Read it and `AGENTS.md`;
+> granular one-line commits, no trailers.
+>
+> Two constants are doing real damage: `air_fuel_ratio` is `STOICH_AFR` for every
+> engine at every operating point, and `WiebeProfile::spark_angle` is fixed. Add
+> `src/physics/control.rs` scheduling AFR against load and speed (WOT enrichment,
+> lean cruise, accel enrichment, decel fuel cut-off) and spark advance against
+> load and speed, with knock-driven retard closing the loop on the Livengood–Wu
+> integral from Stage 1. Then add limiter modes — hard cut, soft cut, rotating
+> per-cylinder stutter, and fuel-cut versus spark-cut — and per-cylinder health so
+> a dead plug becomes a hole in the firing pattern.
+>
+> These all reach the ear through channels the synth already reads, so assert the
+> chain: enrichment must lower EGT and therefore every pipe resonance; a fuel-cut
+> limiter must produce no backfires while a spark-cut limiter does; decel fuel
+> cut-off must silence combustion while the mechanical floor continues; a dead
+> cylinder must show as a missing order and a lope at the cycle rate.
