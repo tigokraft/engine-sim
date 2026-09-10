@@ -111,6 +111,7 @@ pub fn corner_hz(radius: f32, speed_of_sound: f32) -> f32 {
 #[derive(Debug, Clone, Copy)]
 pub struct Mouth {
     radius: f32,
+    flanged: bool,
     sample_rate: f32,
     corner_hz: f32,
     reflection: OnePole,
@@ -119,11 +120,15 @@ pub struct Mouth {
 impl Mouth {
     /// A mouth of radius `radius` [m] in gas carrying sound at `speed_of_sound`
     /// [m/s].
-    pub fn new(sample_rate: f32, radius: f32, speed_of_sound: f32) -> Self {
+    ///
+    /// `flanged` says whether the end is baffled, which changes nothing but how
+    /// much air it drags along — see [`Mouth::end_correction`].
+    pub fn new(sample_rate: f32, radius: f32, flanged: bool, speed_of_sound: f32) -> Self {
         let radius = radius.max(1e-4);
         let corner = corner_hz(radius, speed_of_sound);
         Self {
             radius,
+            flanged,
             sample_rate,
             corner_hz: corner,
             reflection: OnePole::new(sample_rate, corner),
@@ -148,6 +153,17 @@ impl Mouth {
     /// Radiation corner as currently tuned [Hz].
     pub fn corner_hz(&self) -> f32 {
         self.corner_hz
+    }
+
+    /// Length the pipe has to be lengthened by to account for this mouth [m].
+    ///
+    /// The air outside the mouth moves with the wave inside it, and that slug
+    /// of air is part of the resonator: a pipe of length $L$ open at one end
+    /// stands its fundamental at $c / (4 (L + \delta))$. On a 45 mm primary
+    /// that is 14 mm, which is a percent of the length and therefore a percent
+    /// of the pitch — small, but it is a systematic flat, and it is free.
+    pub fn end_correction(&self) -> f32 {
+        end_correction(self.radius as f64, self.flanged) as f32
     }
 
     /// Mouth area [m^2].
