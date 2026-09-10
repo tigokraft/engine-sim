@@ -233,3 +233,254 @@ pub struct IntakeSystem {
     /// Whether runner entries feature flared velocity stack trumpets.
     pub trumpet_flanged: bool,
 }
+
+impl ExhaustSystem {
+    /// Area of a primary runner [m^2].
+    ///
+    /// When primaries vary slightly in area, this returns their arithmetic mean.
+    pub fn primary_area(&self) -> f64 {
+        if self.primaries.is_empty() {
+            0.0
+        } else {
+            self.primaries.iter().map(|p| p.area).sum::<f64>() / self.primaries.len() as f64
+        }
+    }
+
+    /// Characteristic centerline length of primary runners [m].
+    pub fn primary_length(&self) -> f64 {
+        if self.primaries.is_empty() {
+            0.0
+        } else {
+            self.primaries.iter().map(|p| p.length).sum::<f64>() / self.primaries.len() as f64
+        }
+    }
+
+    /// Primary runner length for a given bank [m].
+    pub fn primary_length_for_bank(&self, bank: usize, bank_count: usize) -> f64 {
+        if self.primaries.is_empty() {
+            return 0.0;
+        }
+        if bank_count <= 1 {
+            return self.primary_length();
+        }
+        let per_bank = self.primaries.len() / bank_count;
+        if per_bank == 0 {
+            return self.primary_length();
+        }
+        let start = bank * per_bank;
+        let end = (start + per_bank).min(self.primaries.len());
+        if start >= end {
+            return self.primary_length();
+        }
+        let slice = &self.primaries[start..end];
+        slice.iter().map(|p| p.length).sum::<f64>() / slice.len() as f64
+    }
+
+    /// Acoustic reflection coefficient at the collector junction:
+    /// $$r = \frac{A_{\text{primary}} - A_{\text{outlet}}}{A_{\text{primary}} + A_{\text{outlet}}}$$
+    ///
+    /// For an expansion into a larger collector outlet ($A_{\text{outlet}} > A_{\text{primary}}$),
+    /// this value is negative, corresponding to the expected acoustic phase inversion at an open end.
+    pub fn collector_reflection(&self) -> f64 {
+        let a1 = self.primary_area();
+        let a2 = self.collector.outlet_area;
+        if a1 + a2 > 0.0 {
+            (a1 - a2) / (a1 + a2)
+        } else {
+            0.0
+        }
+    }
+
+    /// Quarter-wave fundamental resonance frequency of the primary runner [Hz]:
+    /// $$f_0 = \frac{c}{4 L}$$
+    pub fn primary_quarter_wave_hz(&self, speed_of_sound: f64) -> f64 {
+        let l = self.primary_length();
+        if l > 0.0 {
+            speed_of_sound / (4.0 * l)
+        } else {
+            0.0
+        }
+    }
+
+    /// Round-trip wave propagation delay along the primary runner [s]:
+    /// $$\tau = \frac{2 L}{c}$$
+    pub fn primary_round_trip_seconds(&self, speed_of_sound: f64) -> f64 {
+        let l = self.primary_length();
+        if speed_of_sound > 0.0 {
+            2.0 * l / speed_of_sound
+        } else {
+            0.0
+        }
+    }
+
+    /// Derives effective Helmholtz/muffler cavity geometry from the silencer list.
+    pub fn muffler_geometry(&self) -> MufflerGeometry {
+        for s in &self.silencers {
+            match s {
+                Silencer::Helmholtz(geo) => return *geo,
+                Silencer::ExpansionChamber {
+                    length,
+                    area_ratio,
+                    stages,
+                } => {
+                    let a_pipe = self.primary_area().max(1e-4);
+                    let st = (*stages).max(1) as f64;
+                    return MufflerGeometry {
+                        neck_area: a_pipe,
+                        chamber_volume: length * a_pipe * area_ratio * st,
+                        neck_length: (length / (2.0 * st)).max(0.04),
+                        q: 1.2 + 0.3 * st,
+                        resonant_mix: (0.35 + 0.10 * st).clamp(0.0, 0.85),
+                        tailpipe_cutoff: (3500.0 / st.sqrt()).clamp(1500.0, 5000.0),
+                    };
+                }
+                Silencer::Absorptive {
+                    length,
+                    area,
+                    loss_db_per_m: _,
+                } => {
+                    return MufflerGeometry {
+                        neck_area: *area,
+                        chamber_volume: length * area * 2.5,
+                        neck_length: length * 0.2,
+                        q: 0.8,
+                        resonant_mix: 0.20,
+                        tailpipe_cutoff: 5500.0,
+                    };
+                }
+                Silencer::QuarterWaveStub { length, area } => {
+                    return MufflerGeometry {
+                        neck_area: *area,
+                        chamber_volume: length * area,
+                        neck_length: 0.05,
+                        q: 2.2,
+                        resonant_mix: 0.35,
+                        tailpipe_cutoff: 4000.0,
+                    };
+                }
+                Silencer::Straight => continue,
+            }
+        }
+        // Straight-through or no silencer: bypass resonance
+        MufflerGeometry {
+            neck_area: 0.0,
+            chamber_volume: 0.0,
+            neck_length: 0.0,
+            q: 1.0,
+            resonant_mix: 0.0,
+            tailpipe_cutoff: 8000.0,
+        }
+    }
+}
+
+impl IntakeSystem {
+    /// Mean centerline length of the intake runners [m].
+    pub fn runner_length(&self) -> f64 {
+        if self.runners.is_empty() {
+            0.0
+        } else {
+            self.runners.iter().map(|p| p.length).sum::<f64>() / self.runners.len() as f64
+        }
+    }
+
+    /// Mean cross-sectional area of the intake runners [m^2].
+    pub fn runner_area(&self) -> f64 {
+        if self.runners.is_empty() {
+            0.0
+        } else {
+            self.runners.iter().map(|p| p.area).sum::<f64>() / self.runners.len() as f64
+        }
+    }
+
+    /// Quarter-wave ram resonance frequency of an intake runner [Hz]:
+    /// $$f_0 = \frac{c}{4 L}$$
+    pub fn runner_quarter_wave_hz(&self, speed_of_sound: f64) -> f64 {
+        let l = self.runner_length();
+        if l > 0.0 {
+            speed_of_sound / (4.0 * l)
+        } else {
+            0.0
+        }
+    }
+
+    /// Helmholtz resonance frequency of the intake plenum and runners [Hz].
+    pub fn helmholtz_resonance_hz(&self, speed_of_sound: f64) -> Option<f64> {
+        if self.plenum_volume <= 0.0 || self.runners.is_empty() {
+            return None;
+        }
+        let total_area: f64 = self.runners.iter().map(|p| p.area).sum();
+        let l_eff = self.runner_length() + 0.6 * (self.runner_area() / PI).sqrt();
+        if l_eff > 0.0 {
+            let f =
+                (speed_of_sound / (2.0 * PI)) * (total_area / (self.plenum_volume * l_eff)).sqrt();
+            Some(f)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collector_reflection_matches_area_ratio() {
+        let primary = PipeSection::from_diameter(0.40, 0.038, 800.0);
+        let collector = Collector::from_diameter(4, 0.054, 0.12);
+        let exhaust = ExhaustSystem {
+            primaries: vec![primary; 4],
+            collector,
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![Silencer::Straight],
+            tailpipe: PipeSection::from_diameter(1.0, 0.054, 600.0),
+            tailpipe_flanged: false,
+        };
+
+        let a1 = primary.area;
+        let a2 = collector.outlet_area;
+        let expected = (a1 - a2) / (a1 + a2);
+        let actual = exhaust.collector_reflection();
+        assert!((actual - expected).abs() < 1e-12);
+        assert!(actual < 0.0, "expansion into collector inverts phase");
+    }
+
+    #[test]
+    fn primary_quarter_wave_resonates_at_c_over_four_l() {
+        let length = 0.42;
+        let primary = PipeSection::from_diameter(length, 0.041, 800.0);
+        let exhaust = ExhaustSystem {
+            primaries: vec![primary; 8],
+            collector: Collector::from_diameter(4, 0.065, 0.15),
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![],
+            tailpipe: PipeSection::from_diameter(1.0, 0.065, 600.0),
+            tailpipe_flanged: false,
+        };
+
+        let c = 550.0; // speed of sound on hot exhaust gas
+        let expected = c / (4.0 * length);
+        assert!((exhaust.primary_quarter_wave_hz(c) - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn primary_round_trip_matches_two_l_over_c() {
+        let length = 0.55;
+        let primary = PipeSection::from_diameter(length, 0.044, 800.0);
+        let exhaust = ExhaustSystem {
+            primaries: vec![primary; 8],
+            collector: Collector::from_diameter(4, 0.060, 0.15),
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![],
+            tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
+            tailpipe_flanged: false,
+        };
+
+        let c = 580.0;
+        let expected = 2.0 * length / c;
+        assert!((exhaust.primary_round_trip_seconds(c) - expected).abs() < 1e-12);
+    }
+}
