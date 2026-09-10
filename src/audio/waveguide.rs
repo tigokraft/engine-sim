@@ -840,6 +840,29 @@ impl TaperedCollector {
 /// its dry dimensions suggest.
 pub const PACKING_SOUND_SPEED_RATIO: f32 = 0.5;
 
+/// Attenuation of a lined duct, from Sabine's empirical formula [dB/m]:
+///
+/// ```text
+/// alpha_dB = 1.05 (P / A) a_bar^1.4
+/// ```
+///
+/// `P / A` is the lined perimeter over the open flow area — for a circular
+/// core of radius $a$ that is $2 / a$, so a narrow core is silenced far harder
+/// than a wide one of the same packing, because every part of the gas is
+/// closer to something absorbing. `a_bar` is the absorption coefficient of the
+/// packing itself, near 0.8 for the mineral and glass wools used in silencers.
+///
+/// This is where the decibels come from, rather than from a number somebody
+/// liked: a 64 mm core in good packing works out near 48 dB/m, so a 0.6 m body
+/// is worth some 29 dB across the band it covers — which is what a real
+/// straight-through absorptive muffler measures, and an order of magnitude
+/// more than a figure picked to sound about right.
+#[inline]
+pub fn sabine_attenuation_db_per_m(core_radius: f64, packing_absorption: f64) -> f64 {
+    let perimeter_over_area = 2.0 / core_radius.max(1e-4);
+    1.05 * perimeter_over_area * packing_absorption.clamp(0.0, 1.0).powf(1.4)
+}
+
 /// Frequency at which packing of depth `thickness` starts absorbing properly [Hz]:
 ///
 /// ```text
@@ -1115,18 +1138,21 @@ impl SilencerElement {
                 length,
                 area,
                 packing_thickness,
-                loss_db_per_m,
-            } => chain.push(Self::Absorptive(AbsorptiveSilencer::new(
-                pipe_area,
-                *area,
-                *length,
-                *packing_thickness,
-                *loss_db_per_m,
-                sample_rate,
-                gamma,
-                gas_constant,
-                temperature,
-            ))),
+                packing_absorption,
+            } => {
+                let core_radius = (area.max(1e-7) / std::f64::consts::PI).sqrt();
+                chain.push(Self::Absorptive(AbsorptiveSilencer::new(
+                    pipe_area,
+                    *area,
+                    *length,
+                    *packing_thickness,
+                    sabine_attenuation_db_per_m(core_radius, *packing_absorption),
+                    sample_rate,
+                    gamma,
+                    gas_constant,
+                    temperature,
+                )))
+            }
             Silencer::QuarterWaveStub { length, area } => {
                 chain.push(Self::SideBranch(QuarterWaveStub::new(
                     pipe_area,

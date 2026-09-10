@@ -178,9 +178,14 @@ pub enum Silencer {
         /// why a thin wrap kills only the hiss and a deep one reaches down into
         /// the midrange.
         packing_thickness: f64,
-        /// Fibrous acoustic attenuation per metre, once the packing is deep
-        /// enough to be working [dB/m].
-        loss_db_per_m: f64,
+        /// Absorption coefficient of the packing material, `0..=1` [-].
+        ///
+        /// A property of the wool, not of the silencer: how much of the energy
+        /// reaching it that the fibre bed takes rather than returns, near 0.8
+        /// for the mineral and glass wools these are packed with. The
+        /// decibels per metre follow from it and the core bore, by
+        /// [`sabine_attenuation_db_per_m`](crate::audio::waveguide::sabine_attenuation_db_per_m).
+        packing_absorption: f64,
     },
     /// Side-branch quarter-wave destructive interference stub (drone killer).
     QuarterWaveStub {
@@ -350,7 +355,7 @@ impl ExhaustSystem {
                     length,
                     area,
                     packing_thickness: _,
-                    loss_db_per_m: _,
+                    packing_absorption: _,
                 } => {
                     return MufflerGeometry {
                         neck_area: *area,
