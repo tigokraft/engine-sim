@@ -1987,6 +1987,106 @@ mod tests {
     }
 
     #[test]
+    fn packed_absorption_rises_with_frequency() {
+        // The claim that separates a muffler from a volume knob: packing takes
+        // the top out and leaves the bottom alone. Fibre dissipates by dragging
+        // gas through itself, and the gas is still within a quarter wavelength
+        // of the shell, so a layer of depth t is transparent below
+        // c_packing / 4t and fully effective above it.
+        //
+        // Modelled as the shelf that argument implies,
+        //
+        //   |H(x)|^2 = (1 + p^2 x^2) / (1 + x^2),   x = f / f_q
+        //
+        // which is unity at DC and the packing's rated gain p far above the
+        // corner. The core is given the same area as the pipe either side of
+        // it, so the two area steps are transparent and what is left to measure
+        // is the packing alone.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.4;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 300.0;
+
+        let area = std::f64::consts::PI * 0.030 * 0.030;
+        let length = 0.50f64;
+        let thickness = 0.035f64;
+        let loss_db_per_m = 20.0f64;
+
+        let c = speed_of_sound(GAMMA, R, TEMPERATURE);
+        let corner = packing_corner_hz(thickness, c);
+        let pass = 10f64.powf(-loss_db_per_m * length / 20.0) as f32;
+
+        let analytic_loss = |f: f32| {
+            let x = f / corner;
+            -10.0 * ((1.0 + pass * pass * x * x) / (1.0 + x * x)).log10()
+        };
+
+        let measured_loss = |f: f32| {
+            let mut silencer = AbsorptiveSilencer::new(
+                area,
+                area,
+                length,
+                thickness,
+                loss_db_per_m,
+                FS,
+                GAMMA,
+                R,
+                TEMPERATURE,
+            );
+            let (settle, measure) = (24_000, 24_000);
+            let mut transmitted = vec![0.0f32; measure];
+            for i in 0..(settle + measure) {
+                let phase = std::f32::consts::TAU * f * i as f32 / FS;
+                // A zero backward wave from downstream is the anechoic
+                // termination, as in the chamber test above.
+                let (_, out) = silencer.step(phase.sin(), 0.0);
+                if i >= settle {
+                    transmitted[i - settle] = out;
+                }
+            }
+            -20.0 * magnitude_at(&transmitted, f, FS).max(1e-9).log10()
+        };
+
+        // Transparent an octave and a half below the corner, working hard two
+        // octaves above it, and never going backwards in between. The upper
+        // bound on the low point is the whole difference from a flat gain,
+        // which would have taken all 10 dB out down here as well.
+        let low = measured_loss(corner / 8.0);
+        let mid = measured_loss(corner);
+        let high = measured_loss(4.0 * corner);
+        assert!(
+            low < 0.5,
+            "packing is not transparent below its corner: {low:.2} dB at {:.0} Hz",
+            corner / 8.0
+        );
+        assert!(
+            high > 7.0,
+            "packing is not working above its corner: {high:.2} dB at {:.0} Hz",
+            4.0 * corner
+        );
+        assert!(
+            low < mid && mid < high,
+            "absorption did not rise with frequency: {low:.2}, {mid:.2}, {high:.2} dB"
+        );
+
+        // And it follows the shelf, not merely the right direction. Checked up
+        // to twice the corner: beyond that the core's own viscothermal wall
+        // loss (which rises as sqrt(f)) and the one-pole's discretisation both
+        // contribute, and by four times the corner they add 1.8 dB between
+        // them. Both take *more* out of the top, so the element stays on the
+        // right side of the claim; they are simply not part of the shelf, and
+        // this assertion is about the shelf.
+        for f in [corner / 8.0, corner / 2.0, corner, 2.0 * corner] {
+            let (measured, expected) = (measured_loss(f), analytic_loss(f));
+            assert!(
+                (measured - expected).abs() < 0.5,
+                "at {f:.0} Hz (f/f_q = {:.2}): {measured:.2} dB measured, {expected:.2} dB from the shelf",
+                f / corner
+            );
+        }
+    }
+
+    #[test]
     fn crossover_transfers_energy_between_banks() {
         // What separates a flat-plane V8 from a cross-plane one at equal firing
         // order is whether the banks can hear each other. Fire only bank 0 and
