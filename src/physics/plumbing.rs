@@ -168,7 +168,18 @@ pub enum Silencer {
         length: f64,
         /// Core flow area [m^2].
         area: f64,
-        /// Viscothermal and fibrous acoustic attenuation per metre [dB/m].
+        /// Radial depth of packing between the perforated core and the shell [m].
+        ///
+        /// What decides which half of the spectrum the silencer takes. Porous
+        /// packing does work against the gas only where the gas is moving, and
+        /// the particle velocity of a wave is greatest a quarter wavelength
+        /// from a rigid surface — the shell. So a layer of depth $t$ starts
+        /// absorbing near $c / 4t$ and is fully effective above it, which is
+        /// why a thin wrap kills only the hiss and a deep one reaches down into
+        /// the midrange.
+        packing_thickness: f64,
+        /// Fibrous acoustic attenuation per metre, once the packing is deep
+        /// enough to be working [dB/m].
         loss_db_per_m: f64,
     },
     /// Side-branch quarter-wave destructive interference stub (drone killer).
@@ -338,6 +349,7 @@ impl ExhaustSystem {
                 Silencer::Absorptive {
                     length,
                     area,
+                    packing_thickness: _,
                     loss_db_per_m: _,
                 } => {
                     return MufflerGeometry {

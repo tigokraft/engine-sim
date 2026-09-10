@@ -1009,6 +1009,7 @@ impl SilencerElement {
             Silencer::Absorptive {
                 length,
                 area,
+                packing_thickness: _,
                 loss_db_per_m,
             } => chain.push(Self::Absorptive(AbsorptiveSilencer::new(
                 pipe_area,
