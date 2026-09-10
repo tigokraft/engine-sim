@@ -126,6 +126,12 @@ pub const REFERENCE_INTAKE_FLOW: f32 = 0.20;
 /// source, and they scale together because they are the same losses.
 pub const REFERENCE_FMEP: f32 = 2.5e5;
 
+/// Peak in-cylinder pressure that maps to reference piston slap amplitude [Pa].
+///
+/// Typical peak cylinder pressure at normal load sits around 50 to 70 bar, so
+/// 60 bar (6.0e6 Pa) maps to unity scale for piston slap impacts.
+pub const REFERENCE_PEAK_PRESSURE: f32 = 60.0e5;
+
 /// Speed below which cycle-to-cycle combustion variation is modelled [rev/min].
 ///
 /// Above this the residual fraction is low, the charge motion is strong and
@@ -184,6 +190,8 @@ pub struct EngineSnapshot {
     pub knock_intensity: f32,
     /// Cylinder bore diameter [m].
     pub bore: f32,
+    /// Peak in-cylinder combustion pressure over the cycle [Pa].
+    pub peak_cylinder_pressure: f32,
     /// Mean indicated torque over the cycle [N m].
     pub indicated_torque: f32,
     /// Rotating assembly inertia [kg m^2].
@@ -209,6 +217,7 @@ impl Default for EngineSnapshot {
             spark_cut: false,
             knock_intensity: 0.0,
             bore: 0.084,
+            peak_cylinder_pressure: 0.0,
             indicated_torque: 0.0,
             inertia: 0.25,
         }
@@ -251,6 +260,7 @@ impl EngineSnapshot {
         guard!(friction_mep, 0.0, 2.0e6);
         guard!(knock_intensity, 0.0, 50.0);
         guard!(bore, 0.010, 0.500);
+        guard!(peak_cylinder_pressure, 0.0, 50.0e6);
         guard!(indicated_torque, -500.0, 50_000.0);
         guard!(inertia, 0.010, 100.0);
         self
@@ -983,6 +993,8 @@ pub enum LevelLaw {
     /// Cam lash and spring force: constant base + moderate friction scaling.
     /// Does not vanish on spark cut.
     CamLash { base_ratio: f32 },
+    /// Piston slap: scales directly with peak cylinder pressure, and vanishes on spark cut.
+    PeakPressure { reference_pressure: f32 },
     /// Scales directly with friction mean effective pressure.
     FrictionMep,
     /// Scales with crankshaft speed: `rpm / reference_rpm`.
@@ -992,19 +1004,28 @@ pub enum LevelLaw {
 }
 
 impl LevelLaw {
-    /// Evaluates the gain multiplier given friction MEP, engine speed, and cycle rate.
-    pub fn compute(&self, friction_mep: f32, rpm: f32, cycle_hz: f32) -> f32 {
-        if cycle_hz < 1e-3 || rpm < 1.0 {
+    /// Evaluates the gain multiplier given engine snapshot and cycle rate.
+    pub fn compute(&self, snapshot: &EngineSnapshot, cycle_hz: f32) -> f32 {
+        if cycle_hz < 1e-3 || snapshot.rpm < 1.0 {
             return 0.0;
         }
         match *self {
             LevelLaw::Constant => 1.0,
             LevelLaw::CamLash { base_ratio } => {
-                let drag = (friction_mep / REFERENCE_FMEP).clamp(0.0, 2.0);
+                let drag = (snapshot.friction_mep / REFERENCE_FMEP).clamp(0.0, 2.0);
                 base_ratio + (1.0 - base_ratio) * drag
             }
-            LevelLaw::FrictionMep => (friction_mep / REFERENCE_FMEP).clamp(0.0, 3.0),
-            LevelLaw::Speed { reference_rpm } => (rpm / reference_rpm.max(100.0)).clamp(0.0, 3.0),
+            LevelLaw::PeakPressure { reference_pressure } => {
+                if snapshot.spark_cut || snapshot.peak_cylinder_pressure <= 0.0 {
+                    0.0
+                } else {
+                    (snapshot.peak_cylinder_pressure / reference_pressure.max(1e3)).max(0.0)
+                }
+            }
+            LevelLaw::FrictionMep => (snapshot.friction_mep / REFERENCE_FMEP).clamp(0.0, 3.0),
+            LevelLaw::Speed { reference_rpm } => {
+                (snapshot.rpm / reference_rpm.max(100.0)).clamp(0.0, 3.0)
+            }
         }
     }
 }
@@ -1069,11 +1090,11 @@ impl ImpulsiveSource {
     }
 
     /// Retunes recurrence rate and target gain.
-    pub fn tune(&mut self, friction_mep: f32, rpm: f32, cycle_hz: f32, cylinders: usize) {
+    pub fn tune(&mut self, snapshot: &EngineSnapshot, cycle_hz: f32, cylinders: usize) {
         let hz = self.effective_hz(cycle_hz, cylinders);
         self.event_hz.set_target(hz);
 
-        let law_gain = self.level_law.compute(friction_mep, rpm, cycle_hz);
+        let law_gain = self.level_law.compute(snapshot, cycle_hz);
         self.gain.set_target(self.base_level * law_gain);
     }
 
@@ -1141,6 +1162,7 @@ impl ImpulsiveSource {
 pub struct MechanicalVoice {
     pub intake_valve: Option<ImpulsiveSource>,
     pub exhaust_valve: Option<ImpulsiveSource>,
+    pub piston_slap: Option<ImpulsiveSource>,
     rumble_a: OnePole,
     rumble_b: OnePole,
     pub click_gain: Smoothed,
@@ -1176,9 +1198,23 @@ impl MechanicalVoice {
         );
         exhaust_valve.phase = 0.5;
 
+        let mut piston_slap = ImpulsiveSource::new(
+            sample_rate,
+            SourceRate::PerCylinder,
+            0.35,
+            0.0030,
+            ModalBank::dual(sample_rate, (480.0, 1.6, 0.7), (950.0, 2.0, 0.3)),
+            LevelLaw::PeakPressure {
+                reference_pressure: REFERENCE_PEAK_PRESSURE,
+            },
+            0.40,
+        );
+        piston_slap.phase = 0.25;
+
         Self {
             intake_valve: Some(intake_valve),
             exhaust_valve: Some(exhaust_valve),
+            piston_slap: Some(piston_slap),
             rumble_a: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             rumble_b: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             click_gain: Smoothed::new(0.0, sample_rate, 0.040),
@@ -1189,16 +1225,18 @@ impl MechanicalVoice {
         }
     }
 
-    /// Retunes from FMEP [Pa], cycle rate [Hz] and cylinder count.
-    fn tune(&mut self, friction_mep: f32, cycle_hz: f32, cylinders: usize) {
-        let drag = (friction_mep / REFERENCE_FMEP).clamp(0.0, 1.5);
-        let rpm = cycle_hz * 120.0;
+    /// Retunes from engine snapshot, cycle rate [Hz] and cylinder count.
+    fn tune(&mut self, snapshot: &EngineSnapshot, cycle_hz: f32, cylinders: usize) {
+        let drag = (snapshot.friction_mep / REFERENCE_FMEP).clamp(0.0, 1.5);
 
         if let Some(s) = &mut self.intake_valve {
-            s.tune(friction_mep, rpm, cycle_hz, cylinders);
+            s.tune(snapshot, cycle_hz, cylinders);
         }
         if let Some(s) = &mut self.exhaust_valve {
-            s.tune(friction_mep, rpm, cycle_hz, cylinders);
+            s.tune(snapshot, cycle_hz, cylinders);
+        }
+        if let Some(s) = &mut self.piston_slap {
+            s.tune(snapshot, cycle_hz, cylinders);
         }
 
         let hz = cycle_hz * cylinders.max(1) as f32 * VALVE_EVENTS_PER_CYLINDER;
@@ -1234,6 +1272,9 @@ impl MechanicalVoice {
         if let Some(s) = &mut self.exhaust_valve {
             clicks += s.process(noise);
         }
+        if let Some(s) = &mut self.piston_slap {
+            clicks += s.process(noise);
+        }
 
         let rumble = self
             .rumble_b
@@ -1249,6 +1290,9 @@ impl MechanicalVoice {
             s.reset();
         }
         if let Some(s) = &mut self.exhaust_valve {
+            s.reset();
+        }
+        if let Some(s) = &mut self.piston_slap {
             s.reset();
         }
         self.click_phase = 0.0;
@@ -1871,11 +1915,8 @@ impl EngineSynth {
         }
         self.variation_depth = self.variation_depth_at(rpm);
         self.block.tune(rpm);
-        self.mechanical.tune(
-            self.snapshot.friction_mep,
-            cycle_hz,
-            self.config.cylinders.len(),
-        );
+        self.mechanical
+            .tune(&self.snapshot, cycle_hz, self.config.cylinders.len());
         self.intake.tune(flow, throttle);
         self.knock
             .tune(self.snapshot.bore, gamma, gas_constant, temperature);
@@ -2161,6 +2202,7 @@ mod tests {
             spark_cut: false,
             knock_intensity: 0.0,
             bore: 0.084,
+            peak_cylinder_pressure: 60.0e5,
             indicated_torque: 250.0,
             inertia: 0.25,
         }
@@ -2396,6 +2438,7 @@ mod tests {
             spark_cut: true,
             knock_intensity: f32::NAN,
             bore: f32::NAN,
+            peak_cylinder_pressure: f32::NAN,
             indicated_torque: f32::NAN,
             inertia: f32::NAN,
         });
@@ -3161,7 +3204,11 @@ mod tests {
         // the rumble path leaves the voice at unity RMS.
         let mut voice = MechanicalVoice::new(FS);
         let mut noise = Noise::new(19);
-        voice.tune(REFERENCE_FMEP, 0.0, 8);
+        let snapshot = EngineSnapshot {
+            friction_mep: REFERENCE_FMEP,
+            ..EngineSnapshot::default()
+        };
+        voice.tune(&snapshot, 0.0, 8);
         voice.rumble_gain.snap(1.0);
         voice.click_gain.snap(0.0);
         voice.event_hz.snap(0.0);
@@ -3256,7 +3303,12 @@ mod tests {
         let mut voice = MechanicalVoice::new(FS);
         let mut noise = Noise::new(5);
         let cycle_hz = 800.0 / 120.0; // 800 rpm
-        voice.tune(1.0e5, cycle_hz, 8);
+        let snapshot = EngineSnapshot {
+            friction_mep: 1.0e5,
+            rpm: 800.0,
+            ..EngineSnapshot::default()
+        };
+        voice.tune(&snapshot, cycle_hz, 8);
         voice
             .event_hz
             .snap(cycle_hz * 8.0 * VALVE_EVENTS_PER_CYLINDER);

@@ -472,8 +472,9 @@ impl SnapshotSource {
         // estimate of what it is spending on itself, and every term in it —
         // bearing shear, ring drag, windage, the valvetrain — is also a noise
         // source, which is what the audio thread uses it for.
+        let peak_pressure = block.ring.peak_pressure();
         let friction_mep = block.friction.fmep(
-            block.ring.peak_pressure(),
+            peak_pressure,
             block.model.geometry.mean_piston_speed(rpm.abs()),
         );
 
@@ -486,6 +487,11 @@ impl SnapshotSource {
 
         let knock_intensity = (block.master.knock_integral - 1.0).max(0.0) as f32;
         let bore = block.model.geometry.bore as f32;
+        let peak_cylinder_pressure = if controls.spark_cut {
+            0.0
+        } else {
+            peak_pressure as f32
+        };
 
         let n_cylinders = block.firing.len().max(1) as f64;
         let cycle_work = block.ring.indicated_work(block.crankcase_pressure) * n_cylinders;
@@ -506,6 +512,7 @@ impl SnapshotSource {
             spark_cut: controls.spark_cut,
             knock_intensity,
             bore,
+            peak_cylinder_pressure,
             indicated_torque: mean_indicated_torque as f32,
             inertia: self.inertia as f32,
         }
@@ -691,6 +698,7 @@ mod tests {
                 spark_cut: false,
                 knock_intensity: 0.0,
                 bore: 0.084,
+                peak_cylinder_pressure: 80.0e5,
                 indicated_torque: 250.0,
                 inertia: 0.25,
             };
