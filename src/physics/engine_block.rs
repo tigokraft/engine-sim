@@ -977,6 +977,8 @@ pub struct BlockOutput {
     pub cylinder_pressures: Vec<f64>,
     /// Per-cylinder instantaneous indicated torque, in cast order [N m].
     pub cylinder_torques: Vec<f64>,
+    /// Per-cylinder blowdown pressure at exhaust valve opening [Pa].
+    pub cylinder_evo_pressures: Vec<f64>,
     /// Manifold mode per bank.
     pub manifold_modes: Vec<ManifoldMode>,
     /// Tuning ratio per bank [-].
@@ -1010,6 +1012,8 @@ pub struct EngineBlock {
     pub crankcase_pressure: f64,
     /// Shaft speed [rad/s].
     pub omega: f64,
+    /// Optional overrides for per-cylinder EVO pressure, for testing cylinder scatter [Pa].
+    pub evo_overrides: Vec<Option<f64>>,
 }
 
 impl EngineBlock {
@@ -1058,6 +1062,7 @@ impl EngineBlock {
             environment,
             crankcase_pressure: environment.pressure,
             omega: 0.0,
+            evo_overrides: Vec::new(),
         }
     }
 
@@ -1097,6 +1102,40 @@ impl EngineBlock {
     /// The master's current phase sample, read straight out of the ring.
     pub fn sample_of(&self, cylinder: usize) -> PhaseSample {
         self.ring.cell(self.phase_index_of(cylinder) - 1)
+    }
+
+    /// Exhaust valve opening cylinder pressure for cylinder `i` [Pa].
+    ///
+    /// Reads the master cylinder trace at the exhaust valve opening angle, or
+    /// returns an override if one has been set for testing cylinder-to-cylinder
+    /// scatter.
+    pub fn cylinder_evo_pressure(&self, cylinder: usize) -> f64 {
+        if let Some(Some(p)) = self.evo_overrides.get(cylinder) {
+            return *p;
+        }
+        self.ring
+            .sample(self.model.valves.exhaust.open_angle)
+            .pressure
+    }
+
+    /// Alias for [`cylinder_evo_pressure`].
+    pub fn evo_pressure_of(&self, cylinder: usize) -> f64 {
+        self.cylinder_evo_pressure(cylinder)
+    }
+
+    /// Exhaust valve opening pressure for every cylinder in cast order [Pa].
+    pub fn evo_pressures(&self) -> Vec<f64> {
+        (0..self.firing.len())
+            .map(|i| self.cylinder_evo_pressure(i))
+            .collect()
+    }
+
+    /// Sets an EVO pressure override for cylinder `i` [Pa].
+    pub fn set_cylinder_evo_pressure(&mut self, cylinder: usize, pressure: f64) {
+        if self.evo_overrides.len() <= cylinder {
+            self.evo_overrides.resize(cylinder + 1, None);
+        }
+        self.evo_overrides[cylinder] = Some(pressure);
     }
 
     /// Port boundary conditions currently seen by the cylinders.
@@ -1272,6 +1311,7 @@ impl EngineBlock {
             knocking: step.knocked,
             cylinder_pressures,
             cylinder_torques,
+            cylinder_evo_pressures: self.evo_pressures(),
             manifold_modes: self.exhaust_banks.iter().map(|b| b.mode).collect(),
             tuning_ratios: self.exhaust_banks.iter().map(|b| b.tuning_ratio).collect(),
             step,
@@ -1743,5 +1783,34 @@ mod tests {
         for (i, off) in offsets.iter().enumerate() {
             approx(*off, i as f64 * 90.0, 1e-9);
         }
+    }
+
+    #[test]
+    fn block_exposes_per_cylinder_evo_pressure() {
+        let env = Environment::default();
+        let mut block = EngineBlock::cross_plane_v8(env);
+        let evo = block.model.valves.exhaust.open_angle;
+        block.ring.record(
+            evo,
+            PhaseSample {
+                pressure: 3.8e5,
+                ..PhaseSample::default()
+            },
+        );
+
+        // Every cylinder defaults to reading the master trace at EVO.
+        for i in 0..8 {
+            approx(block.cylinder_evo_pressure(i), 3.8e5, 1e-6);
+            approx(block.evo_pressure_of(i), 3.8e5, 1e-6);
+        }
+        let pressures = block.evo_pressures();
+        assert_eq!(pressures.len(), 8);
+        assert!(pressures.iter().all(|&p| (p - 3.8e5).abs() < 1e-6));
+
+        // Setting an override changes that cylinder's EVO pressure.
+        block.set_cylinder_evo_pressure(1, 2.5e5);
+        approx(block.cylinder_evo_pressure(0), 3.8e5, 1e-6);
+        approx(block.cylinder_evo_pressure(1), 2.5e5, 1e-6);
+        assert_eq!(block.evo_pressures()[1], 2.5e5);
     }
 }
