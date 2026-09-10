@@ -246,3 +246,94 @@ impl Mouth {
         self.reflection.reset();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::filters::DelayLine;
+    use std::f32::consts::TAU;
+
+    const FS: f32 = 48_000.0;
+
+    /// Ambient air, for tests that care about a number rather than about hot
+    /// gas [m/s].
+    const C: f32 = 343.0;
+
+    /// Steady-state magnitude of a system driven by a sine at `hz` [-].
+    ///
+    /// Settles for a quarter of a second before it starts correlating, so what
+    /// comes back is the response and not the transient on the way to it.
+    fn magnitude_at(
+        hz: f32,
+        settle: usize,
+        measure: usize,
+        mut step: impl FnMut(f32) -> f32,
+    ) -> f32 {
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for i in 0..settle + measure {
+            let phase = TAU * hz * i as f32 / FS;
+            let y = step(phase.sin());
+            if i >= settle {
+                re += y as f64 * phase.sin() as f64;
+                im += y as f64 * phase.cos() as f64;
+            }
+        }
+        (2.0 * (re * re + im * im).sqrt() / measure as f64) as f32
+    }
+
+    #[test]
+    fn end_correction_lowers_the_pipe_fundamental() {
+        // A pipe closed at one end and open at the other, built from nothing
+        // but a round-trip delay and the mouth: no wall loss, no collector, so
+        // the only thing that can move the resonance is the end condition.
+        // The 0.95 is that missing wall loss, flat with frequency so it cannot
+        // shift the peak, present so the loop settles inside the measurement.
+        let length = 0.60;
+        let radius = 0.020;
+        let delta = end_correction(radius as f64, false) as f32;
+        let round_trip = |acoustic: f32| 2.0 * acoustic / C * FS;
+
+        let mut mouth = Mouth::new(FS, radius, false, C);
+        let mut line = DelayLine::with_max_delay(round_trip(length + delta).ceil() as usize + 8);
+        let delay = round_trip(length + delta);
+        let mut resonance = |hz: f32| {
+            mouth.reset();
+            line.reset();
+            magnitude_at(hz, 24_000, 24_000, |x| {
+                let out = line.read(delay);
+                line.push(x + 0.95 * mouth.reflect(out));
+                out
+            })
+        };
+
+        let uncorrected = C / (4.0 * length);
+        let corrected = C / (4.0 * (length + delta));
+        let mut peak = (0.0f32, 0.0f32);
+        let mut hz = uncorrected * 0.85;
+        while hz <= uncorrected * 1.05 {
+            let m = resonance(hz);
+            if m > peak.1 {
+                peak = (hz, m);
+            }
+            hz += 0.1;
+        }
+        let measured = peak.0;
+
+        // The claim: the pipe stands its fundamental where the corrected length
+        // says, not where a tape measure says. Measured against both, the
+        // corrected prediction is the better fit — and it must be, because the
+        // air outside the mouth is part of the resonator.
+        assert!(
+            (measured - corrected).abs() < (measured - uncorrected).abs(),
+            "measured {measured:.2} Hz is nearer c/4L ({uncorrected:.2}) than \
+             c/4(L+delta) ({corrected:.2})"
+        );
+        // Within two percent of the corrected prediction. It sits a shade
+        // below even that: the reflection fit lags as well as attenuates, and
+        // that lag is more length again.
+        assert!(
+            (measured - corrected).abs() / corrected < 0.02,
+            "measured {measured:.2} Hz against {corrected:.2} Hz"
+        );
+    }
+}
