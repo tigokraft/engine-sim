@@ -20,6 +20,9 @@
 //! - [`ui`] — the `ratatui` dashboard: gauges, a live P-V diagram, torque and
 //!   power curves traced as the engine sweeps, and a spectrum of the audio the
 //!   device is actually playing.
+//! - [`analysis`] — the measurement harness: order tracking and resonance peak
+//!   picking over a rendered buffer, so a change in timbre can be read as a
+//!   number rather than argued about.
 //! - [`audio`] — the real-time synthesis engine: blowdown excitation, runner
 //!   delays, Helmholtz muffler filtering, induction noise, backfires, and a
 //!   turbo on the engines that have one, fed over a lock-free queue into a
@@ -32,6 +35,7 @@
 //! Everything is SI unless a name says otherwise: metres, kilograms, seconds,
 //! Kelvin, Pascals, radians.
 
+pub mod analysis;
 pub mod audio;
 pub mod bench;
 pub mod environment;
