@@ -166,7 +166,7 @@ impl BiquadCoeffs {
 /// instead of the step discontinuity a direct-form-I section would emit. That is
 /// what makes [`Biquad::set_coeffs`] safe to call at the control rate while
 /// audio is flowing.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Biquad {
     coeffs: BiquadCoeffs,
     z1: f32,
@@ -1080,6 +1080,87 @@ impl BlockResonator {
 }
 
 // ---------------------------------------------------------------------------
+// Modal resonator bank
+// ---------------------------------------------------------------------------
+
+/// A compact modal resonator bank representing the acoustic modes of a casing,
+/// head, or block excited by mechanical impacts.
+///
+/// Each mode is a constant-peak-gain bandpass [`Biquad`] section with its own
+/// resonant frequency, Q factor, and relative mix weight.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModalBank {
+    modes: [Biquad; 2],
+    weights: [f32; 2],
+    count: usize,
+}
+
+impl Default for ModalBank {
+    fn default() -> Self {
+        Self {
+            modes: [Biquad::default(); 2],
+            weights: [0.0; 2],
+            count: 0,
+        }
+    }
+}
+
+impl ModalBank {
+    /// Builds a modal bank with a single resonant mode.
+    pub fn single(sample_rate: f32, frequency: f32, q: f32) -> Self {
+        Self {
+            modes: [
+                Biquad::new(BiquadCoeffs::bandpass(sample_rate, frequency, q)),
+                Biquad::default(),
+            ],
+            weights: [1.0, 0.0],
+            count: 1,
+        }
+    }
+
+    /// Builds a modal bank with two resonant modes.
+    pub fn dual(sample_rate: f32, mode1: (f32, f32, f32), mode2: (f32, f32, f32)) -> Self {
+        Self {
+            modes: [
+                Biquad::new(BiquadCoeffs::bandpass(sample_rate, mode1.0, mode1.1)),
+                Biquad::new(BiquadCoeffs::bandpass(sample_rate, mode2.0, mode2.1)),
+            ],
+            weights: [mode1.2, mode2.2],
+            count: 2,
+        }
+    }
+
+    /// Number of active resonant modes in the bank.
+    pub fn mode_count(&self) -> usize {
+        self.count
+    }
+
+    /// Retunes one mode's resonant frequency and Q without resetting filter state.
+    pub fn retune(&mut self, sample_rate: f32, index: usize, frequency: f32, q: f32) {
+        if index < self.count {
+            self.modes[index].set_coeffs(BiquadCoeffs::bandpass(sample_rate, frequency, q));
+        }
+    }
+
+    /// Clears internal state of all modes.
+    pub fn reset(&mut self) {
+        for i in 0..self.count {
+            self.modes[i].reset();
+        }
+    }
+
+    /// Filters one excitation sample through the parallel modes.
+    #[inline(always)]
+    pub fn process(&mut self, x: f32) -> f32 {
+        let mut out = 0.0f32;
+        for i in 0..self.count {
+            out += self.modes[i].process(x) * self.weights[i];
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Output conditioning
 // ---------------------------------------------------------------------------
 
@@ -1583,5 +1664,42 @@ mod tests {
         let hot = muffler.centre_frequency();
         // f ~ c ~ sqrt(T), so a 2.2x temperature ratio is a 1.48x pitch ratio.
         approx(hot / cold, (1100.0f32 / 500.0).sqrt(), 0.01);
+    }
+
+    #[test]
+    fn modal_bank_resonates_at_designed_modes() {
+        let fs = 48_000.0;
+        let bank = ModalBank::dual(fs, (1000.0, 4.0, 0.7), (3000.0, 4.0, 0.3));
+        assert_eq!(bank.mode_count(), 2);
+
+        // Correlate response to pure tones at mode 1, mode 2, and an off-resonance frequency.
+        let response_at = |freq: f32| {
+            let mut b = bank;
+            let n = 8192;
+            let (mut re, mut im) = (0.0f32, 0.0f32);
+            for i in 0..n {
+                let t = i as f32 / fs;
+                let y = b.process((TAU * freq * t).sin());
+                if i >= n / 2 {
+                    let phase = TAU * freq * t;
+                    re += y * phase.sin();
+                    im += y * phase.cos();
+                }
+            }
+            let half = (n / 2) as f32;
+            2.0 * (re * re + im * im).sqrt() / half
+        };
+
+        let resp_1k = response_at(1000.0);
+        let resp_3k = response_at(3000.0);
+        let resp_off = response_at(200.0);
+
+        // Peak response near the individual mode weights.
+        approx(resp_1k, 0.7, 0.05);
+        approx(resp_3k, 0.3, 0.05);
+        assert!(
+            resp_off < 0.15,
+            "off-resonance response too high: {resp_off}"
+        );
     }
 }
