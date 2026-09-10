@@ -286,6 +286,34 @@ mod tests {
     }
 
     #[test]
+    fn reflection_falls_monotonically_through_ka_one() {
+        let radius = 0.030;
+        let corner = corner_hz(radius, C);
+        let mut previous = f32::MAX;
+        for octave in [-3i32, -2, -1, 0, 1, 2, 3] {
+            let f = corner * 2.0f32.powi(octave);
+            let mut mouth = Mouth::new(FS, radius, false, C);
+            let magnitude = magnitude_at(f, 4_000, 8_000, |x| mouth.reflect(x));
+            assert!(
+                magnitude < previous,
+                "|R| rose at {f:.0} Hz: {magnitude:.4} after {previous:.4}"
+            );
+            previous = magnitude;
+            // Three octaves below the corner the mouth is a mirror; three
+            // above, a window.
+            match octave {
+                -3 => assert!(magnitude > 0.98, "leaky at ka = 1/8: {magnitude:.4}"),
+                0 => approx(magnitude, 1.0 / 2.0f32.sqrt(), 0.02),
+                3 => assert!(
+                    magnitude < 0.15,
+                    "still reflecting at ka = 8: {magnitude:.4}"
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
     fn end_correction_lowers_the_pipe_fundamental() {
         // A pipe closed at one end and open at the other, built from nothing
         // but a round-trip delay and the mouth: no wall loss, no collector, so
