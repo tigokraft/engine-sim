@@ -1980,6 +1980,11 @@ impl EngineSynth {
         self.cycle_hz.value() * self.config.cylinder_count() as f32
     }
 
+    /// Acoustic round-trip time for a bank's primary runner [s].
+    pub fn runner_round_trip_seconds(&self, bank_idx: usize) -> f32 {
+        self.banks[bank_idx].runner.round_trip_seconds()
+    }
+
     /// Crank angular velocity perturbation from nominal speed [rad/s].
     pub fn crank_omega_delta(&self) -> f32 {
         self.crank_omega_delta

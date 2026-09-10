@@ -931,4 +931,163 @@ mod tests {
         );
         assert!((2.5..2.7).contains(&(wankel.displacement() * 1e3)));
     }
+
+    #[test]
+    fn every_presets_derived_collector_reflection_differs_and_matches_area_ratio() {
+        let catalogue = EnginePreset::catalogue();
+        let mut reflections = Vec::new();
+
+        for preset in &catalogue {
+            let a_primary = preset.exhaust.primary_area();
+            let a_outlet = preset.exhaust.collector.outlet_area;
+            let expected = (a_primary - a_outlet) / (a_primary + a_outlet);
+            let derived = preset.exhaust.collector_reflection();
+
+            assert!(
+                (derived - expected).abs() < 1e-12,
+                "{}: derived reflection {derived} != expected {expected}",
+                preset.name
+            );
+            assert!(
+                derived < 0.0,
+                "{}: primary expands into larger collector, reflection must invert phase",
+                preset.name
+            );
+            reflections.push((preset.name, derived));
+        }
+
+        // Assert all presets derive distinct reflection coefficients.
+        for i in 0..reflections.len() {
+            for j in (i + 1)..reflections.len() {
+                let (name_a, r_a) = reflections[i];
+                let (name_b, r_b) = reflections[j];
+                assert!(
+                    (r_a - r_b).abs() > 1e-4,
+                    "{name_a} and {name_b} share collector reflection {r_a:.4}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn primary_quarter_wave_fundamental_lands_on_hot_gas() {
+        // Hot exhaust gas: gamma = 1.33, R = 287 J/(kg K), T = 900 K
+        let c = (1.33 * 287.0 * 900.0_f64).sqrt();
+
+        for preset in EnginePreset::catalogue() {
+            let length = preset.exhaust.primary_length();
+            let expected = c / (4.0 * length);
+            let derived = preset.exhaust.primary_quarter_wave_hz(c);
+
+            assert!(
+                (derived - expected).abs() < 1e-9,
+                "{}: quarter-wave {derived} Hz != expected {expected} Hz",
+                preset.name
+            );
+            // Sane fundamental frequency bounds for physical exhaust primaries (0.30 - 0.60 m)
+            assert!(
+                (200.0..600.0).contains(&derived),
+                "{}: quarter-wave {derived} Hz is out of plausible range",
+                preset.name
+            );
+        }
+    }
+
+    #[test]
+    fn no_two_presets_share_the_same_derived_acoustic_constants() {
+        use crate::audio::filters::block_resonance_hz;
+
+        let catalogue = EnginePreset::catalogue();
+        let c = (1.33 * 287.0 * 900.0_f64).sqrt();
+
+        for i in 0..catalogue.len() {
+            for j in (i + 1)..catalogue.len() {
+                let a = &catalogue[i];
+                let b = &catalogue[j];
+
+                let r_a = a.exhaust.collector_reflection();
+                let r_b = b.exhaust.collector_reflection();
+                let f_qw_a = a.exhaust.primary_quarter_wave_hz(c);
+                let f_qw_b = b.exhaust.primary_quarter_wave_hz(c);
+                let tau_rt_a = a.exhaust.primary_round_trip_seconds(c);
+                let tau_rt_b = b.exhaust.primary_round_trip_seconds(c);
+                let f_block_a = block_resonance_hz(a.block_mass as f32);
+                let f_block_b = block_resonance_hz(b.block_mass as f32);
+
+                let identical = (r_a - r_b).abs() < 1e-6
+                    && (f_qw_a - f_qw_b).abs() < 1e-3
+                    && (tau_rt_a - tau_rt_b).abs() < 1e-6
+                    && (f_block_a - f_block_b).abs() < 1e-3;
+
+                assert!(
+                    !identical,
+                    "regression: {} and {} share identical derived acoustics",
+                    a.name, b.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn physics_pipe_and_audio_path_round_trip_times_agree() {
+        use crate::audio::dsp::EngineSynth;
+        use crate::audio::filters::round_trip_seconds;
+
+        let fs = 48_000.0;
+        let env = Environment::default();
+
+        for preset in EnginePreset::catalogue() {
+            let block = preset.block(env);
+            let config = preset.synth_config(&block, fs);
+            let synth = EngineSynth::new(config);
+
+            let gamma = block.model.gas.gamma_burned;
+            let gas_constant = block.model.gas.r_burned;
+            let temperature = 900.0;
+            let c = (gamma * gas_constant * temperature).sqrt();
+
+            for (bank_idx, manifold) in block.exhaust_banks.iter().enumerate() {
+                let phys_round_trip = manifold.pipe.transit_time(c);
+                let runner_length = preset
+                    .exhaust
+                    .primary_length_for_bank(bank_idx, block.exhaust_banks.len());
+
+                // Direct analytical calculation in audio filters:
+                let audio_filter_round_trip = round_trip_seconds(
+                    runner_length as f32,
+                    gamma as f32,
+                    gas_constant as f32,
+                    temperature as f32,
+                ) as f64;
+
+                let diff_filter_samples =
+                    (phys_round_trip - audio_filter_round_trip).abs() * fs as f64;
+                assert!(
+                    diff_filter_samples < 1.0,
+                    "{}, bank {}: physics round trip ({:.6} s) and audio filter ({:.6} s) disagree by {:.3} samples",
+                    preset.name,
+                    bank_idx,
+                    phys_round_trip,
+                    audio_filter_round_trip,
+                    diff_filter_samples
+                );
+
+                // Initialized audio synth runner agreement at default ambient conditions:
+                let c_ambient = (1.33 * 287.0 * 300.0_f64).sqrt();
+                let phys_ambient_round_trip = 2.0 * runner_length / c_ambient;
+                let audio_synth_round_trip = synth.runner_round_trip_seconds(bank_idx) as f64;
+                let diff_synth_samples =
+                    (phys_ambient_round_trip - audio_synth_round_trip).abs() * fs as f64;
+                assert!(
+                    diff_synth_samples < 1.0,
+                    "{}, bank {}: physics round trip ({:.6} s) and synth runner ({:.6} s) disagree by {:.3} samples",
+                    preset.name,
+                    bank_idx,
+                    phys_ambient_round_trip,
+                    audio_synth_round_trip,
+                    diff_synth_samples
+                );
+            }
+        }
+    }
 }
