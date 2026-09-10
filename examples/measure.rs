@@ -40,20 +40,26 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use rust_engine_sim::analysis::orders::{self, half_orders, OrderTable, Peak};
-use rust_engine_sim::analysis::render::{Continuity, RenderCost, RenderPlan};
+use rust_engine_sim::analysis::render::{Continuity, Render, RenderCost, RenderPlan, PHYSICS_HZ};
 use rust_engine_sim::analysis::script;
 use rust_engine_sim::bench::EnginePreset;
 
 /// Resonance peaks reported per sweeping render.
 const PEAKS: usize = 12;
 
-/// Speed ratio above which a profile counts as having swept the rev range.
+/// Speed ratio a profile has to cover before its peaks mean anything.
+const SWEPT_RATIO: f64 = 2.0;
+
+/// Share of a render that has to be spent sweeping before its peaks mean
+/// anything.
 ///
 /// A resonance is what stands still while the orders move past it, so peak
-/// picking only says something about the plumbing on a profile that actually
-/// moved the engine. At a held idle the peaks it finds are the order lines
-/// themselves, which would be a resonance table full of firing frequencies.
-const SWEPT_RATIO: f64 = 2.0;
+/// picking only says something about the plumbing on a render the engine spent
+/// moving. Hold one speed for a quarter of a render and its order lines pile up
+/// in the average exactly as a resonance would, and the table fills with firing
+/// frequencies. Of the six profiles only the two sweeps clear this, which is
+/// what they are for.
+const SWEPT_FRACTION: f64 = 0.75;
 
 /// Column width of one profile in the printed order table.
 ///
@@ -109,7 +115,16 @@ fn measure(preset: EnginePreset, scale: f64, wav_dir: Option<&Path>) -> Result<M
         }
 
         let speed = render.rpm.range(0.0, render.seconds());
-        let swept = speed.0 > 0.0 && speed.1 / speed.0 > SWEPT_RATIO;
+        let sweeping = sweeping_span(&render).filter(|&(first, last)| {
+            let frames = mono.len().max(1);
+            let (slow, fast) = render.rpm.range(
+                first as f64 / render.sample_rate,
+                last as f64 / render.sample_rate,
+            );
+            (last - first) as f64 >= SWEPT_FRACTION * frames as f64
+                && slow > 0.0
+                && fast / slow > SWEPT_RATIO
+        });
 
         runs.push(Run {
             script: script.name,
@@ -117,10 +132,11 @@ fn measure(preset: EnginePreset, scale: f64, wav_dir: Option<&Path>) -> Result<M
             seconds: render.seconds(),
             speed,
             orders: orders::track(&mono, render.sample_rate, &render.rpm, &wanted),
-            peaks: if swept {
-                orders::resonances(&mono, render.sample_rate, PEAKS)
-            } else {
-                Vec::new()
+            peaks: match sweeping {
+                Some((first, last)) => {
+                    orders::resonances(&mono[first..last], render.sample_rate, PEAKS)
+                }
+                None => Vec::new(),
             },
             continuity: render.continuity(),
             cost: render.cost,
@@ -128,6 +144,50 @@ fn measure(preset: EnginePreset, scale: f64, wav_dir: Option<&Path>) -> Result<M
     }
 
     Ok(Measured { preset, runs })
+}
+
+/// The longest stretch of a render during which the speed only moved one way.
+///
+/// Returned as frame indices into the mono buffer. A held speed contributes its
+/// own order lines to a long-term average, all at one frequency, which is
+/// exactly what a resonance is supposed to look like — so the average is taken
+/// over the part of the render the engine spent moving and over nothing else.
+fn sweeping_span(render: &Render) -> Option<(usize, usize)> {
+    let h = 1.0 / PHYSICS_HZ;
+    let steps = (render.seconds() / h).floor() as usize;
+    if steps < 2 {
+        return None;
+    }
+
+    // Below a rev a second the engine is being held, whatever the last decimal
+    // place of the ramp says.
+    let deadband = h;
+
+    let (mut best, mut start, mut direction) = ((0usize, 0usize), 0usize, 0i32);
+    for step in 0..steps {
+        let delta = render.rpm.at((step + 1) as f64 * h) - render.rpm.at(step as f64 * h);
+        let moving = if delta > deadband {
+            1
+        } else if delta < -deadband {
+            -1
+        } else {
+            0
+        };
+        if moving != direction {
+            direction = moving;
+            start = step;
+        }
+        if moving != 0 && step + 1 - start > best.1 - best.0 {
+            best = (start, step + 1);
+        }
+    }
+    if best.1 == best.0 {
+        return None;
+    }
+
+    let frames = render.samples.len() / render.channels.max(1);
+    let frame_at = |step: usize| ((step as f64 * h) * render.sample_rate) as usize;
+    Some((frame_at(best.0), frame_at(best.1).min(frames)))
 }
 
 impl Measured {
@@ -378,10 +438,10 @@ fn engine_markdown(measured: &Measured) -> String {
     let _ = writeln!(out, "\n## Resonances\n");
     let _ = writeln!(
         out,
-        "Peaks in the long-term average spectrum of the profiles that swept the \
-         rev range: what stayed still while every order moved past it. These are \
-         the frequencies Stages 3 to 6 have to move when they replace the \
-         plumbing.\n"
+        "Peaks in the long-term average spectrum of the part of a render the \
+         engine spent sweeping: what stayed still while every order moved past \
+         it. These are the frequencies Stages 3 to 6 have to move when they \
+         replace the plumbing.\n"
     );
     for run in &measured.runs {
         if run.peaks.is_empty() {
@@ -434,10 +494,19 @@ fn index_markdown(all: &[Measured]) -> String {
     let _ = writeln!(
         out,
         "**Resonances.** Peaks in the long-term average spectrum, picked by \
-         prominence and interpolated between bins. Only the profiles that swept \
-         the rev range get one: a resonance is defined by standing still while \
-         the orders move, and at a held idle the only peaks are the orders \
-         themselves.\n"
+         prominence and interpolated between bins. A resonance is defined by \
+         standing still while the orders move past it, so only the two sweeping \
+         profiles get a table and only the part of them the engine spent moving \
+         is averaged: a held speed leaves its own order lines in the average, at \
+         one frequency, looking exactly like plumbing.\n"
+    );
+    let _ = writeln!(
+        out,
+        "That is a filter, not a proof. A sweep this length still cannot smear \
+         the lowest orders across more than an analysis bin, so treat a peak as \
+         a resonance only if `sweep_up` and `sweep_down` both put one at the \
+         same frequency — they dwell at opposite ends of the rev range, so their \
+         leftover order lines do not land in the same place.\n"
     );
     let _ = writeln!(
         out,
