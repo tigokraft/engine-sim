@@ -1919,6 +1919,76 @@ mod tests {
     }
 
     #[test]
+    fn chamber_transmission_loss_matches_theory() {
+        // A single-expansion chamber terminated anechoically has a closed-form
+        // transmission loss that depends only on the area ratio and how many
+        // wavelengths fit the cavity:
+        //
+        //   TL = 10 log10[ 1 + (1/4) (m - 1/m)^2 sin^2(kL) ]
+        //
+        // It is zero whenever kL is a multiple of pi — the chamber is
+        // transparent at those frequencies, which is exactly why a single
+        // chamber cannot silence an engine on its own — and peaks at the
+        // quarter-wave points. Nothing in it is tunable, so it is a real check
+        // that the two area steps and the pipe between them scatter correctly.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.4;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 300.0;
+
+        let c = speed_of_sound(GAMMA, R, TEMPERATURE);
+        let pipe_area = std::f64::consts::PI * 0.030 * 0.030;
+        let cavity_length = 0.30f64;
+        let area_ratio = 4.0f64;
+
+        let analytic = |f: f32| {
+            let k = std::f32::consts::TAU * f / c;
+            let m = area_ratio as f32;
+            let s = (k * cavity_length as f32).sin();
+            10.0 * (1.0 + 0.25 * (m - 1.0 / m).powi(2) * s * s).log10()
+        };
+
+        // Quarter-wave point (peak loss), half-wave point (transparent), and a
+        // frequency between the two.
+        let quarter = c / (4.0 * cavity_length as f32);
+        for f in [quarter, 2.0 * quarter, 0.5 * quarter, 1.5 * quarter] {
+            let mut chamber = ExpansionChamber::new(
+                pipe_area,
+                area_ratio,
+                cavity_length,
+                FS,
+                GAMMA,
+                R,
+                TEMPERATURE,
+            );
+
+            // Drive with a sine and read the transmitted wave. Handing the
+            // chamber a zero backward wave from downstream *is* the anechoic
+            // termination the analytic result assumes.
+            let settle = 24_000;
+            let measure = 24_000;
+            let mut transmitted = vec![0.0f32; measure];
+            for i in 0..(settle + measure) {
+                let phase = std::f32::consts::TAU * f * i as f32 / FS;
+                let (_, out) = chamber.step(phase.sin(), 0.0);
+                if i >= settle {
+                    transmitted[i - settle] = out;
+                }
+            }
+
+            let amplitude = magnitude_at(&transmitted, f, FS);
+            let measured = -20.0 * amplitude.max(1e-9).log10();
+            let expected = analytic(f);
+
+            assert!(
+                (measured - expected).abs() < 1.0,
+                "at {f:.0} Hz (kL = {:.2} rad): {measured:.2} dB measured, {expected:.2} dB from theory",
+                std::f32::consts::TAU * f / c * cavity_length as f32
+            );
+        }
+    }
+
+    #[test]
     fn two_pipe_junction_reflects_exact_area_ratio() {
         let test_cases = [
             (0.0010, 0.0020), // expansion: r = (1-2)/(1+2) = -1/3
