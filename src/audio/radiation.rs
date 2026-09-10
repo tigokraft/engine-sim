@@ -237,6 +237,19 @@ impl Mouth {
         end_correction(self.radius as f64, self.flanged) as f32
     }
 
+    /// Delay the reflection filter adds to a wave turning around here
+    /// [samples].
+    ///
+    /// [`end_correction`](Self::end_correction) says how much longer than its
+    /// machined length the pipe behaves; this says how much of that lengthening
+    /// the reflection filter has already supplied on its own, because a
+    /// one-pole lags as well as attenuates. A waveguide that adds the end
+    /// correction to its length has to subtract this from its delay, or the
+    /// mouth is counted twice and the pipe plays flat.
+    pub fn phase_delay_samples(&self) -> f32 {
+        self.reflection.phase_delay_samples()
+    }
+
     /// Mouth area [m^2].
     pub fn area(&self) -> f32 {
         std::f32::consts::PI * self.radius * self.radius
