@@ -1,7 +1,7 @@
 # GitHub Copilot
 
-Canonical working agreement: [AGENTS.md](AGENTS.md).
-Implementation roadmap: [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md).
+Canonical working agreement: [AGENTS.md](../AGENTS.md).
+Implementation roadmap: [docs/IMPLEMENTATION_PLAN.md](../docs/IMPLEMENTATION_PLAN.md).
 
 The rule below is repeated here in full because it is not optional.
 
