@@ -128,7 +128,11 @@ impl<'a> RenderPlan<'a> {
         let mut source = SnapshotSource::with_induction(&block, self.induction);
 
         let frames_per_step = (self.sample_rate as f64 / PHYSICS_HZ).round() as usize;
-        let steps = (self.script.seconds() * PHYSICS_HZ) as usize;
+        // Rounded, not truncated: a script whose legs are scaled to a total
+        // lands a hair either side of it in floating point, and truncating
+        // would silently drop a whole physics step off the end of one render
+        // and not off another it is supposed to be compared with.
+        let steps = (self.script.seconds() * PHYSICS_HZ).round() as usize;
         let mut samples = Vec::with_capacity(steps * frames_per_step * CHANNELS);
         let mut chunk = vec![0.0f32; frames_per_step * CHANNELS];
         let mut speeds = Vec::with_capacity(steps + 1);
@@ -367,4 +371,80 @@ pub fn write_wav(path: &Path, samples: &[f32], channels: u16, sample_rate: u32) 
     }
     file.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::script;
+
+    /// The claim the whole harness rests on: a rerun is the same run.
+    ///
+    /// If this ever fails, every order table in `docs/measurements/` becomes a
+    /// record of the machine it was taken on rather than of the build.
+    #[test]
+    fn two_renders_of_one_script_are_bit_identical() {
+        let preset = EnginePreset::inline_four();
+        let script = script::sweep_up(&preset).scaled_to(1.5);
+
+        let first = RenderPlan::new(&preset, &script).render();
+        let second = RenderPlan::new(&preset, &script).render();
+
+        assert_eq!(first.samples.len(), second.samples.len());
+        assert!(!first.samples.is_empty(), "the render produced nothing");
+
+        // Bit-for-bit, not within a tolerance: a difference of one ulp means
+        // something in the chain is reading state it should not have.
+        let differing = first
+            .samples
+            .iter()
+            .zip(&second.samples)
+            .position(|(a, b)| a.to_bits() != b.to_bits());
+        assert_eq!(
+            differing, None,
+            "two renders diverged at sample {differing:?}"
+        );
+    }
+
+    /// Every engine in the catalogue renders, and renders cleanly.
+    #[test]
+    fn every_preset_renders_without_a_dropout() {
+        for preset in EnginePreset::catalogue() {
+            let script = script::idle_hold(&preset).scaled_to(1.0);
+            let render = RenderPlan::new(&preset, &script).render();
+            let report = render.continuity();
+            assert!(report.is_clean(), "{} rendered {report:?}", preset.name);
+            assert!(report.rms > 0.0, "{} rendered silence", preset.name);
+        }
+    }
+
+    /// A render is as long as the script says, and its speed curve with it.
+    #[test]
+    fn a_render_is_as_long_as_its_script() {
+        let preset = EnginePreset::inline_four();
+        let script = script::tip_in(&preset).scaled_to(2.0);
+        let render = RenderPlan::new(&preset, &script).render();
+
+        assert!((render.seconds() - 2.0).abs() < 1e-3);
+        assert!((render.rpm.seconds() - 2.0).abs() < 0.01);
+        assert!((render.rpm.at(0.0) - preset.idle).abs() < 1.0);
+    }
+
+    /// Mono is the mean of the channels, not their sum.
+    #[test]
+    fn mono_averages_the_channels() {
+        let render = Render {
+            samples: vec![1.0, 0.0, 0.5, 0.5],
+            channels: 2,
+            sample_rate: OFFLINE_RATE as f64,
+            rpm: RpmCurve::constant(1_000.0),
+            cost: RenderCost {
+                audio_seconds: 1.0,
+                wall_seconds: 1.0,
+                synth_seconds: 0.5,
+            },
+        };
+        assert_eq!(render.mono(), vec![0.5, 0.5]);
+        assert!((render.cost.synth_core_load() - 0.5).abs() < 1e-12);
+    }
 }
