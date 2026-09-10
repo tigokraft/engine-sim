@@ -2335,6 +2335,56 @@ mod tests {
     }
 
     #[test]
+    fn cylinders_fire_at_different_amplitudes() {
+        let mut config = SynthConfig::cross_plane_v8(FS);
+        // Turn off stochastic variation so differences are purely deterministic.
+        config.combustion_variation_max = 0.0;
+        config.combustion_variation_min = 0.0;
+        let mut synth = EngineSynth::new(config);
+
+        let mut snapshot = idle_snapshot();
+        // Set distinct blowdown pressures for cylinder 0 and cylinder 2 (both on bank 0).
+        snapshot.blowdown_delta[0] = 1.0e5;
+        snapshot.blowdown_delta[2] = 2.0e5;
+        synth.set_snapshot(&snapshot);
+
+        synth.cycle_hz.snap(800.0 / 120.0);
+        for (i, smoother) in synth.blowdown_pa.iter_mut().enumerate() {
+            smoother.snap(snapshot.blowdown_delta[i]);
+        }
+        synth.cycle_phase = 0.0;
+
+        // Render through 0.30 of a cycle (covering 0 deg and 180 deg, before 270 deg)
+        // to capture cylinder 0 (at 0 deg) and cylinder 2 (at 180 deg).
+        let quarter_cycle_samples = (FS / (800.0 / 120.0) * 0.30) as usize;
+        let mut buffer = [0.0f32; 2];
+        let mut bank0_amplitudes = Vec::new();
+        let mut last_next = synth.banks[0].pulses.next;
+
+        for _ in 0..quarter_cycle_samples {
+            synth.render(&mut buffer, 2);
+            let next = synth.banks[0].pulses.next;
+            if next != last_next {
+                let slots = synth.banks[0].pulses.slots.len();
+                let slot = (next + slots - 1) % slots;
+                bank0_amplitudes.push(synth.banks[0].pulses.slots[slot].amplitude);
+                last_next = next;
+            }
+        }
+
+        assert_eq!(
+            bank0_amplitudes.len(),
+            2,
+            "expected two firings on bank 0 in the first half-cycle"
+        );
+        let ratio = bank0_amplitudes[1] / bank0_amplitudes[0];
+        assert!(
+            (ratio - 2.0).abs() < 1e-3,
+            "amplitude ratio was {ratio}, expected 2.0 (proportional to blowdown delta)"
+        );
+    }
+
+    #[test]
     fn combustion_variation_is_inert_above_the_threshold() {
         // Above CCV_THRESHOLD_RPM no draw is taken, so the whole synth — every
         // layer downstream of the shared noise generator included — must be
