@@ -55,6 +55,7 @@
 pub mod dsp;
 pub mod filters;
 pub mod stream;
+pub mod waveguide;
 
 pub use dsp::{
     CylinderTap, EngineSnapshot, EngineSynth, ImpulsiveSpec, MechanicalSpec, SourceRate,
