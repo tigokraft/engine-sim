@@ -28,6 +28,7 @@ use crate::audio::{
 use crate::environment::Environment;
 use crate::physics::cylinder::{deg, CylinderGeometry};
 use crate::physics::engine_block::{EngineBlock, FiringOrder};
+use crate::physics::plumbing::{Collector, Crossover, ExhaustSystem, PipeSection, Silencer};
 use crate::physics::thermodynamics::{CylinderModel, ValveEvent, ValveTrain, WiebeProfile};
 
 /// Speed below which the engine has stalled [rev/min].
@@ -73,6 +74,8 @@ pub struct EnginePreset {
     pub induction: Induction,
     /// Mechanical noise rig specification: which sources exist, their orders and levels.
     pub mechanical: MechanicalSpec,
+    /// Exhaust system geometry: primaries, collector, crossover, and silencers.
+    pub exhaust: ExhaustSystem,
     /// Speed at which ignition is cut [rev/min].
     pub redline: f64,
     /// Speed the idle governor holds [rev/min].
@@ -159,6 +162,19 @@ impl EnginePreset {
             firing: FiringOrder::inline_four(),
             induction: Induction::NaturallyAspirated,
             mechanical: MechanicalSpec::default(),
+            exhaust: ExhaustSystem {
+                primaries: vec![PipeSection::from_diameter(0.40, 0.038, 850.0); 4],
+                collector: Collector::from_diameter(4, 0.054, 0.12),
+                secondary: vec![],
+                crossover: Crossover::None,
+                silencers: vec![Silencer::ExpansionChamber {
+                    length: 0.45,
+                    area_ratio: 4.5,
+                    stages: 2,
+                }],
+                tailpipe: PipeSection::from_diameter(1.2, 0.054, 600.0),
+                tailpipe_flanged: false,
+            },
             redline: 7_400.0,
             idle: 850.0,
             inertia: 0.22,
@@ -178,6 +194,31 @@ impl EnginePreset {
             firing: FiringOrder::cross_plane_v8(),
             induction: Induction::NaturallyAspirated,
             mechanical: MechanicalSpec::default(),
+            exhaust: ExhaustSystem {
+                primaries: vec![
+                    PipeSection::from_diameter(0.52, 0.044, 850.0),
+                    PipeSection::from_diameter(0.57, 0.044, 850.0),
+                    PipeSection::from_diameter(0.54, 0.044, 850.0),
+                    PipeSection::from_diameter(0.57, 0.044, 850.0),
+                    PipeSection::from_diameter(0.53, 0.044, 850.0),
+                    PipeSection::from_diameter(0.58, 0.044, 850.0),
+                    PipeSection::from_diameter(0.55, 0.044, 850.0),
+                    PipeSection::from_diameter(0.54, 0.044, 850.0),
+                ],
+                collector: Collector::from_diameter(4, 0.060, 0.15),
+                secondary: vec![],
+                crossover: Crossover::HPipe {
+                    position: 0.85,
+                    area: PI * 0.025 * 0.025,
+                },
+                silencers: vec![Silencer::ExpansionChamber {
+                    length: 0.65,
+                    area_ratio: 6.0,
+                    stages: 2,
+                }],
+                tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
+                tailpipe_flanged: false,
+            },
             redline: 7_000.0,
             idle: 750.0,
             inertia: 0.45,
@@ -204,6 +245,15 @@ impl EnginePreset {
                 gear_whine: Some(ImpulsiveSpec::order(36.0, 0.25)),
                 ..MechanicalSpec::default()
             },
+            exhaust: ExhaustSystem {
+                primaries: vec![PipeSection::from_diameter(0.42, 0.041, 880.0); 8],
+                collector: Collector::from_diameter(4, 0.065, 0.18),
+                secondary: vec![],
+                crossover: Crossover::XPipe { position: 0.80 },
+                silencers: vec![Silencer::Straight],
+                tailpipe: PipeSection::from_diameter(0.9, 0.065, 650.0),
+                tailpipe_flanged: false,
+            },
             redline: 8_600.0,
             idle: 900.0,
             inertia: 0.30,
@@ -227,6 +277,30 @@ impl EnginePreset {
                 gear_whine: Some(ImpulsiveSpec::order(35.0, 0.28)),
                 ..MechanicalSpec::default()
             },
+            exhaust: ExhaustSystem {
+                primaries: vec![
+                    PipeSection::from_diameter(0.34, 0.040, 880.0),
+                    PipeSection::from_diameter(0.37, 0.040, 880.0),
+                    PipeSection::from_diameter(0.35, 0.040, 880.0),
+                    PipeSection::from_diameter(0.38, 0.040, 880.0),
+                    PipeSection::from_diameter(0.36, 0.040, 880.0),
+                    PipeSection::from_diameter(0.34, 0.040, 880.0),
+                    PipeSection::from_diameter(0.37, 0.040, 880.0),
+                    PipeSection::from_diameter(0.35, 0.040, 880.0),
+                    PipeSection::from_diameter(0.38, 0.040, 880.0),
+                    PipeSection::from_diameter(0.36, 0.040, 880.0),
+                ],
+                collector: Collector::from_diameter(5, 0.062, 0.14),
+                secondary: vec![],
+                crossover: Crossover::XPipe { position: 0.75 },
+                silencers: vec![Silencer::ExpansionChamber {
+                    length: 0.40,
+                    area_ratio: 3.5,
+                    stages: 2,
+                }],
+                tailpipe: PipeSection::from_diameter(1.1, 0.062, 650.0),
+                tailpipe_flanged: false,
+            },
             redline: 8_500.0,
             idle: 900.0,
             inertia: 0.40,
@@ -249,6 +323,19 @@ impl EnginePreset {
             mechanical: MechanicalSpec {
                 timing_chain: Some(ImpulsiveSpec::order(24.0, 0.20)),
                 ..MechanicalSpec::default()
+            },
+            exhaust: ExhaustSystem {
+                primaries: vec![PipeSection::from_diameter(0.30, 0.035, 900.0); 12],
+                collector: Collector::from_diameter(6, 0.055, 0.15),
+                secondary: vec![],
+                crossover: Crossover::None,
+                silencers: vec![Silencer::ExpansionChamber {
+                    length: 0.35,
+                    area_ratio: 3.0,
+                    stages: 1,
+                }],
+                tailpipe: PipeSection::from_diameter(1.0, 0.055, 650.0),
+                tailpipe_flanged: false,
             },
             redline: 8_500.0,
             idle: 800.0,
@@ -293,6 +380,19 @@ impl EnginePreset {
             firing: FiringOrder::two_rotor_wankel(),
             induction: Induction::NaturallyAspirated,
             mechanical: MechanicalSpec::rotary(),
+            exhaust: ExhaustSystem {
+                primaries: vec![PipeSection::from_diameter(0.60, 0.048, 950.0); 2],
+                collector: Collector::from_diameter(2, 0.060, 0.10),
+                secondary: vec![],
+                crossover: Crossover::None,
+                silencers: vec![Silencer::Absorptive {
+                    length: 0.50,
+                    area: PI * 0.030 * 0.030,
+                    loss_db_per_m: 8.0,
+                }],
+                tailpipe: PipeSection::from_diameter(1.0, 0.060, 700.0),
+                tailpipe_flanged: false,
+            },
             redline: 8_800.0,
             idle: 950.0,
             inertia: 0.20,
@@ -318,6 +418,19 @@ impl EnginePreset {
             firing: FiringOrder::inline_four(),
             induction: Induction::small_single(),
             mechanical: MechanicalSpec::default(),
+            exhaust: ExhaustSystem {
+                primaries: vec![PipeSection::from_diameter(0.35, 0.038, 900.0); 4],
+                collector: Collector::from_diameter(4, 0.050, 0.10),
+                secondary: vec![],
+                crossover: Crossover::None,
+                silencers: vec![Silencer::ExpansionChamber {
+                    length: 0.40,
+                    area_ratio: 4.0,
+                    stages: 1,
+                }],
+                tailpipe: PipeSection::from_diameter(1.2, 0.060, 600.0),
+                tailpipe_flanged: false,
+            },
             redline: 6_900.0,
             idle: 820.0,
             inertia: 0.24,
@@ -343,6 +456,31 @@ impl EnginePreset {
             firing: FiringOrder::cross_plane_v8(),
             induction: Induction::twin(),
             mechanical: MechanicalSpec::default(),
+            exhaust: ExhaustSystem {
+                primaries: vec![
+                    PipeSection::from_diameter(0.43, 0.044, 900.0),
+                    PipeSection::from_diameter(0.47, 0.044, 900.0),
+                    PipeSection::from_diameter(0.44, 0.044, 900.0),
+                    PipeSection::from_diameter(0.46, 0.044, 900.0),
+                    PipeSection::from_diameter(0.43, 0.044, 900.0),
+                    PipeSection::from_diameter(0.47, 0.044, 900.0),
+                    PipeSection::from_diameter(0.44, 0.044, 900.0),
+                    PipeSection::from_diameter(0.46, 0.044, 900.0),
+                ],
+                collector: Collector::from_diameter(4, 0.058, 0.12),
+                secondary: vec![],
+                crossover: Crossover::HPipe {
+                    position: 0.70,
+                    area: PI * 0.022 * 0.022,
+                },
+                silencers: vec![Silencer::ExpansionChamber {
+                    length: 0.55,
+                    area_ratio: 4.5,
+                    stages: 2,
+                }],
+                tailpipe: PipeSection::from_diameter(1.4, 0.065, 600.0),
+                tailpipe_flanged: false,
+            },
             redline: 7_100.0,
             idle: 760.0,
             inertia: 0.44,
@@ -369,6 +507,19 @@ impl EnginePreset {
             firing: FiringOrder::inline_six(),
             induction: Induction::large_single(),
             mechanical: MechanicalSpec::default(),
+            exhaust: ExhaustSystem {
+                primaries: vec![PipeSection::from_diameter(0.48, 0.042, 900.0); 6],
+                collector: Collector::from_diameter(6, 0.064, 0.14),
+                secondary: vec![],
+                crossover: Crossover::None,
+                silencers: vec![Silencer::Absorptive {
+                    length: 0.60,
+                    area: PI * 0.032 * 0.032,
+                    loss_db_per_m: 6.0,
+                }],
+                tailpipe: PipeSection::from_diameter(1.6, 0.070, 600.0),
+                tailpipe_flanged: false,
+            },
             redline: 7_200.0,
             idle: 780.0,
             inertia: 0.33,
