@@ -869,6 +869,167 @@ impl TaperedCollector {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Composed elements: Bank crossover
+// ---------------------------------------------------------------------------
+
+/// Acoustic crossover linking dual exhaust banks.
+///
+/// Implements:
+/// - [`BankCrossover::None`]: isolated banks with no cross-talk.
+/// - [`BankCrossover::XPipe`]: a 4-port scattering junction where pulses from both banks
+///   cross and mix directly.
+/// - [`BankCrossover::HPipe`]: a balance tube linking the banks through two 3-port junctions.
+#[derive(Debug, Clone)]
+pub enum BankCrossover {
+    /// Independent dual exhaust with no link between banks.
+    None,
+    /// 4-port merged junction linking bank 0 and bank 1.
+    XPipe {
+        junction: ScatteringJunction,
+        scatter_buf: [f32; 4],
+    },
+    /// Balance tube between banks with two 3-port scattering junctions.
+    HPipe {
+        junction_bank0: ScatteringJunction,
+        junction_bank1: ScatteringJunction,
+        balance_pipe: WaveguidePipe,
+        buf_bank0: [f32; 3],
+        buf_bank1: [f32; 3],
+    },
+}
+
+impl BankCrossover {
+    /// Constructs a crossover from the geometric specification in [`crate::physics::plumbing::Crossover`].
+    pub fn from_crossover(
+        crossover: &crate::physics::plumbing::Crossover,
+        pipe_area: f64,
+        sample_rate: f32,
+        gamma: f32,
+        gas_constant: f32,
+        temperature: f32,
+    ) -> Self {
+        let ap = pipe_area.max(1e-7);
+        match crossover {
+            crate::physics::plumbing::Crossover::None => Self::None,
+            crate::physics::plumbing::Crossover::XPipe { .. }
+            | crate::physics::plumbing::Crossover::Balance180 => {
+                let junction = ScatteringJunction::from_areas(&[ap, ap, ap, ap]);
+                Self::XPipe {
+                    junction,
+                    scatter_buf: [0.0; 4],
+                }
+            }
+            crate::physics::plumbing::Crossover::HPipe { area, .. } => {
+                let ab = (*area).max(1e-7);
+                let junction_bank0 = ScatteringJunction::from_areas(&[ap, ap, ab]);
+                let junction_bank1 = ScatteringJunction::from_areas(&[ap, ap, ab]);
+                // Typical balance tube span between cylinder banks is ~0.25 m
+                let balance_pipe =
+                    WaveguidePipe::new(0.25, ab, sample_rate, gamma, gas_constant, temperature);
+                Self::HPipe {
+                    junction_bank0,
+                    junction_bank1,
+                    balance_pipe,
+                    buf_bank0: [0.0; 3],
+                    buf_bank1: [0.0; 3],
+                }
+            }
+        }
+    }
+
+    /// Retunes propagation delay and acoustic admittance for current gas state.
+    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
+        if let Self::HPipe { balance_pipe, .. } = self {
+            balance_pipe.tune(gamma, gas_constant, temperature);
+        }
+    }
+
+    /// Steps the crossover by one sample:
+    /// - `bank0_in_plus`: forward wave arriving from bank 0 upstream.
+    /// - `bank1_in_plus`: forward wave arriving from bank 1 upstream.
+    /// - `bank0_out_minus`: backward wave returning from bank 0 downstream.
+    /// - `bank1_out_minus`: backward wave returning from bank 1 downstream.
+    ///
+    /// Returns `(bank0_in_minus, bank1_in_minus, bank0_out_plus, bank1_out_plus)`.
+    #[inline(always)]
+    pub fn step(
+        &mut self,
+        bank0_in_plus: f32,
+        bank1_in_plus: f32,
+        bank0_out_minus: f32,
+        bank1_out_minus: f32,
+    ) -> (f32, f32, f32, f32) {
+        match self {
+            Self::None => (
+                bank0_out_minus,
+                bank1_out_minus,
+                bank0_in_plus,
+                bank1_in_plus,
+            ),
+            Self::XPipe {
+                junction,
+                scatter_buf,
+            } => {
+                let p_plus = [
+                    bank0_in_plus,
+                    bank1_in_plus,
+                    bank0_out_minus,
+                    bank1_out_minus,
+                ];
+                junction.scatter(&p_plus, scatter_buf);
+                (
+                    scatter_buf[0],
+                    scatter_buf[1],
+                    scatter_buf[2],
+                    scatter_buf[3],
+                )
+            }
+            Self::HPipe {
+                junction_bank0,
+                junction_bank1,
+                balance_pipe,
+                buf_bank0,
+                buf_bank1,
+            } => {
+                let (p_bal_0, p_bal_1) = balance_pipe.read_outputs();
+
+                junction_bank0.scatter(&[bank0_in_plus, bank0_out_minus, p_bal_0], buf_bank0);
+                let b0_in_minus = buf_bank0[0];
+                let b0_out_plus = buf_bank0[1];
+                let into_bal_0 = buf_bank0[2];
+
+                junction_bank1.scatter(&[bank1_in_plus, bank1_out_minus, p_bal_1], buf_bank1);
+                let b1_in_minus = buf_bank1[0];
+                let b1_out_plus = buf_bank1[1];
+                let into_bal_1 = buf_bank1[2];
+
+                balance_pipe.push_inputs(into_bal_0, into_bal_1);
+
+                (b0_in_minus, b1_in_minus, b0_out_plus, b1_out_plus)
+            }
+        }
+    }
+
+    /// Clears internal state.
+    pub fn reset(&mut self) {
+        match self {
+            Self::None => {}
+            Self::XPipe { scatter_buf, .. } => *scatter_buf = [0.0; 4],
+            Self::HPipe {
+                balance_pipe,
+                buf_bank0,
+                buf_bank1,
+                ..
+            } => {
+                balance_pipe.reset();
+                *buf_bank0 = [0.0; 3];
+                *buf_bank1 = [0.0; 3];
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
