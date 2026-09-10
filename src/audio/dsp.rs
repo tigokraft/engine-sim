@@ -1286,6 +1286,114 @@ impl BackfireVoice {
 }
 
 // ---------------------------------------------------------------------------
+// Knock resonance voice
+// ---------------------------------------------------------------------------
+
+/// First circumferential cavity acoustic mode constant [-].
+pub const KNOCK_RHO_10: f32 = 1.8412;
+/// Second circumferential cavity acoustic mode constant [-].
+pub const KNOCK_RHO_20: f32 = 3.0542;
+/// First radial cavity acoustic mode constant [-].
+pub const KNOCK_RHO_01: f32 = 3.8317;
+
+/// Sharpness of the cylinder cavity knock resonances [-].
+pub const KNOCK_Q: f32 = 20.0;
+
+/// Resonances of burned gas ringing inside the cylinder bore cavity.
+///
+/// Knock is auto-ignition of the unburnt end-gas ahead of the flame front:
+/// an abrupt volumetric heat release that excites the acoustic modes of the
+/// combustion chamber. The dominant modes are the first circumferential
+/// (rho_10 = 1.8412), second circumferential (rho_20 = 3.0542), and first
+/// radial (rho_01 = 3.8317).
+///
+/// The voice is excited on cylinder firing events by a noise burst whose amplitude
+/// scales with how far past 1.0 the Livengood-Wu knock integral went, decaying
+/// in 2-5 ms. It is routed into the structural path through the block resonator,
+/// because knock is heard ringing through the engine block, not out the exhaust.
+#[derive(Debug, Clone)]
+pub struct KnockVoice {
+    sample_rate: f32,
+    mode_10: Biquad,
+    mode_20: Biquad,
+    mode_01: Biquad,
+    mode_frequencies: [f32; 3],
+    intensity: f32,
+    envelope: f32,
+    decay_coeff: f32,
+}
+
+impl KnockVoice {
+    pub fn new(sample_rate: f32) -> Self {
+        let f10 = 5500.0;
+        let f20 = f10 * (KNOCK_RHO_20 / KNOCK_RHO_10);
+        let f01 = f10 * (KNOCK_RHO_01 / KNOCK_RHO_10);
+
+        // 3 ms exponential decay (within the 2-5 ms physical window).
+        let decay_time = 0.003;
+        let decay_coeff = (-1.0 / (decay_time * sample_rate)).exp();
+
+        Self {
+            sample_rate,
+            mode_10: Biquad::new(BiquadCoeffs::bandpass(sample_rate, f10, KNOCK_Q)),
+            mode_20: Biquad::new(BiquadCoeffs::bandpass(sample_rate, f20, KNOCK_Q)),
+            mode_01: Biquad::new(BiquadCoeffs::bandpass(sample_rate, f01, KNOCK_Q)),
+            mode_frequencies: [f10, f20, f01],
+            intensity: 0.0,
+            envelope: 0.0,
+            decay_coeff,
+        }
+    }
+
+    /// Mode frequencies `[f_10, f_20, f_01]` in Hz.
+    pub fn mode_frequencies(&self) -> [f32; 3] {
+        self.mode_frequencies
+    }
+
+    /// Audio sample rate [Hz].
+    pub fn sample_rate(&self) -> f32 {
+        self.sample_rate
+    }
+
+    /// Sets the knock intensity `(I - 1.0).max(0.0)`.
+    pub fn set_intensity(&mut self, intensity: f32) {
+        self.intensity = intensity.max(0.0);
+    }
+
+    /// Triggers a knock burst on a cylinder firing event.
+    pub fn trigger(&mut self) {
+        if self.intensity > 1e-4 {
+            self.envelope = (self.intensity * 0.8).min(2.0);
+        }
+    }
+
+    /// Clears filter state and envelope.
+    pub fn reset(&mut self) {
+        self.mode_10.reset();
+        self.mode_20.reset();
+        self.mode_01.reset();
+        self.envelope = 0.0;
+    }
+
+    /// Renders one sample of knock ringing.
+    #[inline(always)]
+    pub fn process(&mut self, noise: &mut Noise) -> f32 {
+        if self.envelope < 1e-5 {
+            return 0.0;
+        }
+        let env = self.envelope;
+        self.envelope *= self.decay_coeff;
+
+        let excitation = noise.next_bipolar() * env;
+        let m10 = self.mode_10.process(excitation);
+        let m20 = self.mode_20.process(excitation) * 0.5;
+        let m01 = self.mode_01.process(excitation) * 0.25;
+
+        (m10 + m20 + m01) * 0.35
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The synth
 // ---------------------------------------------------------------------------
 
@@ -1302,6 +1410,7 @@ pub struct EngineSynth {
     turbo: TurboVoice,
     backfire: BackfireVoice,
     mechanical: MechanicalVoice,
+    knock: KnockVoice,
 
     /// Master-cycle phase, `0..1` over 720 crank degrees.
     cycle_phase: f32,
@@ -1381,6 +1490,7 @@ impl EngineSynth {
             turbo: TurboVoice::new(fs),
             backfire: BackfireVoice::new(fs),
             mechanical: MechanicalVoice::new(fs),
+            knock: KnockVoice::new(fs),
             variation: vec![CycleVariation::default(); config.cylinders.len()],
             variation_depth: 0.0,
             cycle_phase: 0.0,
@@ -1424,6 +1534,11 @@ impl EngineSynth {
         &self.snapshot
     }
 
+    /// Knock resonance voice.
+    pub fn knock(&self) -> &KnockVoice {
+        &self.knock
+    }
+
     /// Current fundamental firing frequency, `f = (RPM / 120) * N_cyl` [Hz].
     pub fn firing_frequency(&self) -> f32 {
         self.cycle_hz.value() * self.config.cylinder_count() as f32
@@ -1451,6 +1566,7 @@ impl EngineSynth {
             .set_target(snapshot.exhaust_gas_constant);
         self.intake_flow.set_target(snapshot.intake_mass_flow);
         self.throttle.set_target(snapshot.throttle);
+        self.knock.set_intensity(snapshot.knock_intensity);
     }
 
     /// Clears every filter and delay line without changing parameters.
@@ -1464,6 +1580,7 @@ impl EngineSynth {
         self.intake.reset();
         self.turbo.reset();
         self.mechanical.reset();
+        self.knock.reset();
         self.dc = [DcBlocker::default(); 2];
         self.block.reset();
         self.cycle_phase = 0.0;
@@ -1653,6 +1770,7 @@ impl EngineSynth {
                         age,
                         retard + variation.phase_offset * cycle_samples,
                     );
+                    self.knock.trigger();
                     // Draw this cylinder's next cycle now that this one has
                     // been committed to a slot.
                     self.reroll_variation(index, depth);
@@ -1679,18 +1797,19 @@ impl EngineSynth {
 
         // Intake and turbo are near the listener's centre line and share one
         // mono source; only the exhaust is imaged.
-        // Intake, turbo and the mechanical floor are near the listener's centre
-        // line and share one mono source; only the exhaust is imaged. The
-        // mechanical layer belongs here for a physical reason as well as a
-        // practical one: it radiates from the block, which is a single object
-        // sitting between the banks rather than something with two outlets.
+        // Intake, turbo, the mechanical floor, and cylinder bore knock are near
+        // the listener's centre line and share one mono source; only the exhaust
+        // is imaged. The mechanical and knock layers belong here because they
+        // radiate from the block, which is a single structural object sitting
+        // between the banks rather than something with two outlets.
         let turbo = match self.config.turbo {
             Some(voicing) => self.turbo.process(&mut self.noise) * voicing.level as f32,
             None => 0.0,
         };
         let centre = self.intake.process(&mut self.noise) * self.config.intake_level as f32
             + turbo
-            + self.mechanical.process(&mut self.noise) * self.config.mechanical_level as f32;
+            + self.mechanical.process(&mut self.noise) * self.config.mechanical_level as f32
+            + self.knock.process(&mut self.noise);
         left += centre;
         right += centre;
 
@@ -2394,6 +2513,25 @@ mod tests {
             (ratio - 2.0).abs() < 1e-3,
             "amplitude ratio was {ratio}, expected 2.0 (proportional to blowdown delta)"
         );
+    }
+
+    #[test]
+    fn knock_is_silent_when_integral_below_one() {
+        let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
+        let mut snapshot = loaded_snapshot();
+        snapshot.knock_intensity = 0.0;
+        synth.set_snapshot(&snapshot);
+
+        // Render audio through multiple cycles.
+        let mut buffer = [0.0f32; 2];
+        for _ in 0..1000 {
+            synth.render(&mut buffer, 2);
+        }
+
+        // When knock intensity is 0.0 (knock integral below 1.0), the voice is completely silent.
+        assert_eq!(synth.knock.envelope, 0.0);
+        let mut noise = Noise::new(42);
+        assert_eq!(synth.knock.process(&mut noise), 0.0);
     }
 
     #[test]
