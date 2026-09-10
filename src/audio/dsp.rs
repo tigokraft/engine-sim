@@ -1163,6 +1163,7 @@ pub struct MechanicalVoice {
     pub intake_valve: Option<ImpulsiveSource>,
     pub exhaust_valve: Option<ImpulsiveSource>,
     pub piston_slap: Option<ImpulsiveSource>,
+    pub injector: Option<ImpulsiveSource>,
     rumble_a: OnePole,
     rumble_b: OnePole,
     pub click_gain: Smoothed,
@@ -1211,10 +1212,22 @@ impl MechanicalVoice {
         );
         piston_slap.phase = 0.25;
 
+        let mut injector = ImpulsiveSource::new(
+            sample_rate,
+            SourceRate::PerCylinder,
+            0.25,
+            0.0003,
+            ModalBank::single(sample_rate, 4_200.0, 3.5),
+            LevelLaw::Constant,
+            0.35,
+        );
+        injector.phase = 0.15;
+
         Self {
             intake_valve: Some(intake_valve),
             exhaust_valve: Some(exhaust_valve),
             piston_slap: Some(piston_slap),
+            injector: Some(injector),
             rumble_a: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             rumble_b: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             click_gain: Smoothed::new(0.0, sample_rate, 0.040),
@@ -1236,6 +1249,9 @@ impl MechanicalVoice {
             s.tune(snapshot, cycle_hz, cylinders);
         }
         if let Some(s) = &mut self.piston_slap {
+            s.tune(snapshot, cycle_hz, cylinders);
+        }
+        if let Some(s) = &mut self.injector {
             s.tune(snapshot, cycle_hz, cylinders);
         }
 
@@ -1275,6 +1291,9 @@ impl MechanicalVoice {
         if let Some(s) = &mut self.piston_slap {
             clicks += s.process(noise);
         }
+        if let Some(s) = &mut self.injector {
+            clicks += s.process(noise);
+        }
 
         let rumble = self
             .rumble_b
@@ -1293,6 +1312,9 @@ impl MechanicalVoice {
             s.reset();
         }
         if let Some(s) = &mut self.piston_slap {
+            s.reset();
+        }
+        if let Some(s) = &mut self.injector {
             s.reset();
         }
         self.click_phase = 0.0;
