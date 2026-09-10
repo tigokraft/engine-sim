@@ -256,6 +256,32 @@ impl ExhaustSystem {
     }
 
     /// Primary runner length for a given bank [m].
+    /// Mean primary length of the cylinders that actually feed one bank [m].
+    ///
+    /// Bank membership comes from the firing table, not from position in the
+    /// primary list. A cross-plane V8's left bank is cylinders 1, 3, 4 and 8;
+    /// averaging the first four entries instead describes an engine nobody
+    /// built, and on an unequal-length header the two answers differ by enough
+    /// to move the tuned peak.
+    pub fn primary_length_for_cylinders(&self, cylinders: &[usize]) -> f64 {
+        if self.primaries.is_empty() {
+            return 0.0;
+        }
+        let mut total = 0.0;
+        let mut count = 0usize;
+        for &c in cylinders {
+            if let Some(pipe) = self.primaries.get(c) {
+                total += pipe.length;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            self.primary_length()
+        } else {
+            total / count as f64
+        }
+    }
+
     pub fn primary_length_for_bank(&self, bank: usize, bank_count: usize) -> f64 {
         if self.primaries.is_empty() {
             return 0.0;

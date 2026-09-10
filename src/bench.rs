@@ -1050,7 +1050,7 @@ mod tests {
                 let phys_round_trip = manifold.pipe.transit_time(c);
                 let runner_length = preset
                     .exhaust
-                    .primary_length_for_bank(bank_idx, block.exhaust_banks.len());
+                    .primary_length_for_cylinders(&block.firing.cylinders_on_bank(bank_idx as u8));
 
                 // Direct analytical calculation in audio filters:
                 let audio_filter_round_trip = round_trip_seconds(

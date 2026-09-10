@@ -292,6 +292,16 @@ impl FiringOrder {
             .map_or(0, |m| m + 1)
     }
 
+    /// Indices of the cylinders on one bank, in cylinder order.
+    pub fn cylinders_on_bank(&self, bank: u8) -> Vec<usize> {
+        self.cylinders
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.bank == bank)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Firing offsets on one bank, sorted into cycle order [rad].
     pub fn bank_offsets(&self, bank: u8) -> Vec<f64> {
         let mut offsets: Vec<f64> = self
@@ -1037,7 +1047,8 @@ impl EngineBlock {
 
         let exhaust_banks = (0..banks)
             .map(|bank_idx| {
-                let runner_length = exhaust.primary_length_for_bank(bank_idx, banks);
+                let runner_length =
+                    exhaust.primary_length_for_cylinders(&firing.cylinders_on_bank(bank_idx as u8));
                 ExhaustManifold::new(
                     runner_length,
                     runner_area,
@@ -1087,7 +1098,9 @@ impl EngineBlock {
         let runner_area = self.exhaust.primary_area();
         self.exhaust_banks = (0..banks)
             .map(|bank_idx| {
-                let runner_length = self.exhaust.primary_length_for_bank(bank_idx, banks);
+                let runner_length = self
+                    .exhaust
+                    .primary_length_for_cylinders(&self.firing.cylinders_on_bank(bank_idx as u8));
                 ExhaustManifold::new(
                     runner_length,
                     runner_area,
