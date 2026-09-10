@@ -741,6 +741,134 @@ impl QuarterWaveStub {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Composed elements: Tapered collector
+// ---------------------------------------------------------------------------
+
+/// Exhaust collector junction uniting multiple primary runners into a collector pipe.
+///
+/// Composed of an $(N_{\text{in}} + 1)$-port scattering junction and a transition pipe
+/// section of length $L_{\text{taper}}$.
+///
+/// Accurately models the arithmetic reflection at the collector and the acoustic
+/// wave cross-talk between primary runners: when one cylinder exhausts into the
+/// collector, the area expansion inverts the returning reflection ($r < 0$) while
+/// transmitting positive pressure waves into the other primary runners and downstream.
+#[derive(Debug, Clone)]
+pub struct TaperedCollector {
+    junction: ScatteringJunction,
+    taper_pipe: WaveguidePipe,
+    inlet_count: usize,
+    scatter_in: Vec<f32>,
+    scatter_out: Vec<f32>,
+}
+
+impl TaperedCollector {
+    /// Constructs a collector junction:
+    /// - `inlet_count`: number of primary inlet runners $N_{\text{in}}$.
+    /// - `primary_area`: cross-sectional area of each primary runner [m^2].
+    /// - `outlet_area`: cross-sectional area of collector outlet [m^2].
+    /// - `taper_length`: length of the converging transition section [m].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        inlet_count: usize,
+        primary_area: f64,
+        outlet_area: f64,
+        taper_length: f64,
+        sample_rate: f32,
+        gamma: f32,
+        gas_constant: f32,
+        temperature: f32,
+    ) -> Self {
+        let n = inlet_count.max(1);
+        let a_prim = primary_area.max(1e-7);
+        let a_out = outlet_area.max(1e-7);
+
+        let mut areas = vec![a_prim; n];
+        areas.push(a_out);
+        let junction = ScatteringJunction::from_areas(&areas);
+
+        let l_taper = taper_length.max(0.02);
+        let taper_pipe = WaveguidePipe::new(
+            l_taper,
+            a_out,
+            sample_rate,
+            gamma,
+            gas_constant,
+            temperature,
+        );
+
+        Self {
+            junction,
+            taper_pipe,
+            inlet_count: n,
+            scatter_in: vec![0.0; n + 1],
+            scatter_out: vec![0.0; n + 1],
+        }
+    }
+
+    /// Number of inlet runners.
+    pub fn inlet_count(&self) -> usize {
+        self.inlet_count
+    }
+
+    /// Retunes propagation delay and acoustic admittance for current gas state.
+    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
+        self.taper_pipe.tune(gamma, gas_constant, temperature);
+    }
+
+    /// Steps the collector by one sample:
+    /// - `primaries_plus`: forward waves arriving from each primary runner ($p_i^+$).
+    /// - `downstream_minus`: backward wave returning from downstream ($p^-$).
+    /// - `primaries_minus`: output buffer filled with waves returning up each primary ($p_i^-$).
+    ///
+    /// Returns the transmitted wave continuing downstream.
+    #[inline(always)]
+    pub fn step(
+        &mut self,
+        primaries_plus: &[f32],
+        downstream_minus: f32,
+        primaries_minus: &mut [f32],
+    ) -> f32 {
+        debug_assert_eq!(primaries_plus.len(), self.inlet_count);
+        debug_assert_eq!(primaries_minus.len(), self.inlet_count);
+
+        let (p_taper_upstream, p_taper_downstream) = self.taper_pipe.read_outputs();
+
+        // Assemble incident waves at (N + 1) junction:
+        // Ports 0..N: primaries; Port N: taper inlet
+        for (dst, &src) in self.scatter_in[..self.inlet_count]
+            .iter_mut()
+            .zip(primaries_plus.iter())
+        {
+            *dst = src;
+        }
+        self.scatter_in[self.inlet_count] = p_taper_upstream;
+
+        self.junction
+            .scatter(&self.scatter_in, &mut self.scatter_out);
+
+        for (dst, &src) in primaries_minus
+            .iter_mut()
+            .zip(self.scatter_out[..self.inlet_count].iter())
+        {
+            *dst = src;
+        }
+        let p_into_taper = self.scatter_out[self.inlet_count];
+
+        self.taper_pipe.push_inputs(p_into_taper, downstream_minus);
+
+        p_taper_downstream
+    }
+
+    /// Clears internal state.
+    pub fn reset(&mut self) {
+        self.taper_pipe.reset();
+        self.scatter_in.fill(0.0);
+        self.scatter_out.fill(0.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
