@@ -7,7 +7,9 @@
 //! ```
 //!
 //! Live mode opens the default output device and feeds it from a 240 Hz physics
-//! loop, printing the stream's health once a second. Offline mode runs the same
+//! loop, printing the stream's health once a second. Offline mode hands the same
+//! drive cycle to the measurement harness in
+//! [`analysis::render`](rust_engine_sim::analysis::render), which runs the same
 //! simulation and the same synth against a virtual clock, writes a 32-bit float
 //! WAV, and measures the two things that matter for continuity:
 //!
@@ -24,16 +26,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use rust_engine_sim::analysis::render::write_wav;
-use rust_engine_sim::audio::dsp::EngineSynth;
-use rust_engine_sim::audio::{EngineAudio, EngineControls, Induction, SnapshotSource, SynthConfig};
+use rust_engine_sim::analysis::render::{RenderPlan, PHYSICS_HZ};
+use rust_engine_sim::analysis::script::{RenderScript, Segment};
+use rust_engine_sim::audio::{EngineAudio, Induction, SnapshotSource, SynthConfig};
+use rust_engine_sim::bench::EnginePreset;
 use rust_engine_sim::environment::Environment;
-use rust_engine_sim::physics::engine_block::EngineBlock;
-
-/// Physics updates per second.
-const PHYSICS_HZ: f64 = 240.0;
-/// Sample rate used for offline rendering.
-const OFFLINE_RATE: f32 = 48_000.0;
 
 /// The induction fitted to this example's V8.
 ///
@@ -47,160 +44,38 @@ const DEMO_INDUCTION: Induction = Induction::twin();
 // The drive cycle
 // ---------------------------------------------------------------------------
 
-/// Where the engine is in the scripted run, as a function of elapsed time.
+/// The scripted rev cycle, stretched to fill `seconds`.
 ///
-/// The script is chosen to exercise every acoustic layer in turn rather than to
-/// be a realistic lap: a slow pull for the exhaust and induction, a limiter
-/// bounce for the backfires, and a hard lift for the turbo surge.
-fn drive_cycle(t: f64, total: f64) -> (f64, EngineControls) {
-    let phase = (t / total).clamp(0.0, 1.0);
-    match phase {
-        // Idle: quiet, cold-ish pipe, no boost.
-        p if p < 0.12 => (
-            850.0,
-            EngineControls {
-                throttle: 0.06,
-                spark_cut: false,
-            },
-        ),
-        // Pull to the redline. Throttle leads rpm, so the turbo spools first.
-        p if p < 0.55 => {
-            let u = (p - 0.12) / 0.43;
-            (
-                850.0 + 6_150.0 * u,
-                EngineControls {
-                    throttle: (0.15 + 1.6 * u).min(1.0),
-                    spark_cut: false,
-                },
-            )
-        }
-        // On the limiter: throttle wide, ignition cutting. Unburnt fuel meets a
-        // hot pipe, which is where the pops come from.
-        p if p < 0.70 => {
-            let u = (p - 0.55) / 0.15;
-            (
-                7_000.0 - 120.0 * (u * 24.0).sin().abs(),
-                EngineControls::on_the_limiter(1.0),
-            )
-        }
-        // Lift. The shaft is still turning hard into a shut throttle: surge.
-        p if p < 0.85 => {
-            let u = (p - 0.70) / 0.15;
-            (
-                7_000.0 - 4_500.0 * u,
-                EngineControls {
-                    throttle: 0.0,
-                    spark_cut: false,
-                },
-            )
-        }
-        // Settle back to idle.
-        p => {
-            let u = (p - 0.85) / 0.15;
-            (
-                2_500.0 - 1_650.0 * u,
-                EngineControls {
-                    throttle: 0.05,
-                    spark_cut: false,
-                },
-            )
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Offline rendering
-// ---------------------------------------------------------------------------
-
-/// Renders the drive cycle to a buffer without touching audio hardware.
-fn render_offline(seconds: f64, gain: f64) -> (Vec<f32>, usize) {
-    let mut block = EngineBlock::cross_plane_v8(Environment::default());
-    let dt = 1.0 / PHYSICS_HZ;
-
-    // Prime the phase ring so the first snapshot describes a running engine
-    // rather than a cylinder full of ambient air.
-    for _ in 0..600 {
-        block.update(dt, 850.0);
-    }
-
-    // The catalogue V8 is atmospheric. This example exists partly to
-    // demonstrate the surge on the lift, so it fits a pair of turbos itself.
-    let mut config = SynthConfig::from_block(&block, OFFLINE_RATE).with_induction(DEMO_INDUCTION);
-    config.master_gain *= gain;
-    let mut synth = EngineSynth::new(config);
-    let mut source = SnapshotSource::with_induction(&block, DEMO_INDUCTION);
-
-    let frames_per_step = (OFFLINE_RATE as f64 / PHYSICS_HZ).round() as usize;
-    let steps = (seconds * PHYSICS_HZ) as usize;
-    let mut output = Vec::with_capacity(steps * frames_per_step * 2);
-    let mut chunk = vec![0.0f32; frames_per_step * 2];
-
-    for step in 0..steps {
-        let t = step as f64 * dt;
-        let (rpm, controls) = drive_cycle(t, seconds);
-        block.update(dt, rpm);
-        synth.set_snapshot(&source.sample(&block, rpm, dt, controls));
-        synth.render(&mut chunk, 2);
-        output.extend_from_slice(&chunk);
-    }
-
-    (output, 2)
-}
-
-/// Continuity report for a rendered buffer.
-struct Continuity {
-    peak: f32,
-    rms: f32,
-    max_slew: f32,
-    silent_blocks: usize,
-    non_finite: usize,
-}
-
-/// Measures the things that distinguish clean output from a glitchy one.
-fn analyse(samples: &[f32], channels: usize) -> Continuity {
-    let mut peak = 0.0f32;
-    let mut energy = 0.0f64;
-    let mut non_finite = 0;
-    for s in samples {
-        if !s.is_finite() {
-            non_finite += 1;
-            continue;
-        }
-        peak = peak.max(s.abs());
-        energy += (*s as f64) * (*s as f64);
-    }
-
-    // A pop is a step discontinuity, so measure the largest jump between
-    // consecutive samples of the same channel.
-    let mut max_slew = 0.0f32;
-    for channel in 0..channels {
-        let mut previous = 0.0f32;
-        for (i, frame) in samples.chunks(channels).enumerate() {
-            let value = frame[channel];
-            if i > 0 && value.is_finite() && previous.is_finite() {
-                max_slew = max_slew.max((value - previous).abs());
-            }
-            previous = value;
-        }
-    }
-
-    // A dropout is a run of samples the synth failed to fill. Ignore the first
-    // half-second, which is legitimately near-silent while the fade-in runs and
-    // the engine is idling.
-    let block = 256 * channels;
-    let skip = (OFFLINE_RATE as usize / 2) * channels;
-    let silent_blocks = samples[skip.min(samples.len())..]
-        .chunks(block)
-        .filter(|c| c.len() == block && c.iter().all(|s| s.abs() < 1e-7))
-        .count();
-
-    Continuity {
-        peak,
-        rms: (energy / samples.len().max(1) as f64).sqrt() as f32,
-        max_slew,
-        silent_blocks,
-        non_finite,
-    }
+/// Chosen to exercise every acoustic layer in turn rather than to be a
+/// realistic lap: a slow pull for the exhaust and induction, a limiter bounce
+/// for the backfires, and a hard lift for the turbo surge. The legs are written
+/// as fractions of the whole and scaled at the end, so `--seconds` changes how
+/// long the cycle takes without changing its shape.
+///
+/// It is a [`RenderScript`] like the measurement harness's own fixed profiles,
+/// so this example and `measure` drive the engine through the same machinery.
+fn drive_cycle(seconds: f64) -> RenderScript {
+    let (idle, redline) = (850.0, 7_000.0);
+    RenderScript::new(
+        "demo",
+        "a pull, a limiter bounce and a hard lift",
+        vec![
+            // Idle: quiet, cold-ish pipe, no boost.
+            Segment::hold(0.12, idle, 0.06),
+            // Pull to the redline. Throttle leads rpm, so the turbo spools first.
+            Segment::ramp(0.43, (idle, redline), (0.15, 1.0)),
+            // On the limiter: throttle wide, ignition cutting. Unburnt fuel meets
+            // a hot pipe, which is where the pops come from.
+            Segment::hold(0.15, redline, 1.0)
+                .cutting()
+                .bouncing(120.0, 3.0),
+            // Lift. The shaft is still turning hard into a shut throttle: surge.
+            Segment::ramp(0.15, (redline, 2_500.0), (0.0, 0.0)),
+            // Settle back to idle.
+            Segment::ramp(0.15, (2_500.0, idle), (0.05, 0.05)),
+        ],
+    )
+    .scaled_to(seconds)
 }
 
 // ---------------------------------------------------------------------------
@@ -208,10 +83,12 @@ fn analyse(samples: &[f32], channels: usize) -> Continuity {
 // ---------------------------------------------------------------------------
 
 fn run_live(seconds: f64, gain: f64) -> Result<()> {
-    let mut block = EngineBlock::cross_plane_v8(Environment::default());
+    let preset = EnginePreset::cross_plane_v8();
+    let script = drive_cycle(seconds);
+    let mut block = preset.block(Environment::default());
     let dt = 1.0 / PHYSICS_HZ;
     for _ in 0..600 {
-        block.update(dt, 850.0);
+        block.update(dt, script.start_rpm());
     }
 
     // The sample rate here is provisional: `EngineAudio` overwrites it with
@@ -253,7 +130,7 @@ fn run_live(seconds: f64, gain: f64) -> Result<()> {
             break;
         }
 
-        let (rpm, controls) = drive_cycle(elapsed, seconds);
+        let (rpm, controls) = script.at(elapsed);
         block.update(dt, rpm);
         audio.push(source.sample(&block, rpm, dt, controls));
 
@@ -327,28 +204,27 @@ fn main() -> Result<()> {
     match offline {
         None => run_live(seconds, gain),
         Some(path) => {
-            let started = Instant::now();
-            let (samples, channels) = render_offline(seconds, gain);
-            let render_time = started.elapsed().as_secs_f64();
-            let report = analyse(&samples, channels);
+            let preset = EnginePreset::cross_plane_v8();
+            let script = drive_cycle(seconds);
+            let render = RenderPlan::new(&preset, &script)
+                .with_induction(DEMO_INDUCTION)
+                .with_gain(gain)
+                .render();
+            let report = render.continuity();
 
-            write_wav(
-                Path::new(&path),
-                &samples,
-                channels as u16,
-                OFFLINE_RATE as u32,
-            )?;
+            render.write_wav(Path::new(&path))?;
 
             println!("== offline render ==");
             println!("  file              {path}");
             println!(
                 "  audio             {:.2} s stereo at {} Hz",
-                samples.len() as f64 / (channels as f64 * OFFLINE_RATE as f64),
-                OFFLINE_RATE as u32
+                render.seconds(),
+                render.sample_rate as u32
             );
             println!(
-                "  render time       {render_time:.2} s  ({:.0}x real time)",
-                seconds / render_time.max(1e-9)
+                "  render time       {:.2} s  ({:.0}x real time)",
+                render.cost.wall_seconds,
+                render.cost.realtime_multiple()
             );
             println!("\n== continuity ==");
             println!("  peak              {:.4}", report.peak);
@@ -360,19 +236,15 @@ fn main() -> Result<()> {
             println!("  silent blocks     {}", report.silent_blocks);
             println!("  non-finite        {}", report.non_finite);
 
-            let clean = report.non_finite == 0
-                && report.silent_blocks == 0
-                && report.peak <= 1.0
-                && report.max_slew < 0.5;
             println!(
                 "\n  verdict           {}",
-                if clean {
+                if report.is_clean() {
                     "continuous: no dropouts, no discontinuities"
                 } else {
                     "FAILED continuity checks"
                 }
             );
-            if !clean {
+            if !report.is_clean() {
                 anyhow::bail!("offline render failed its continuity checks");
             }
             Ok(())
