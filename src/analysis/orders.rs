@@ -469,3 +469,198 @@ pub fn track(samples: &[f32], sample_rate: f64, rpm: &RpmCurve, orders: &[f64]) 
         resolution_floor_hz: stft.resolution_floor(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RATE: f64 = 48_000.0;
+
+    /// A steady sinusoid of a given amplitude and frequency.
+    fn tone(hz: f64, amplitude: f64, seconds: f64) -> Vec<f32> {
+        let n = (seconds * RATE) as usize;
+        (0..n)
+            .map(|i| (amplitude * (2.0 * PI * hz * i as f64 / RATE).sin()) as f32)
+            .collect()
+    }
+
+    /// A tone that tracks `order` of an engine sweeping `from` to `to`.
+    ///
+    /// The phase is the running integral of the instantaneous frequency, which
+    /// is what makes this a chirp on that order rather than a tone whose
+    /// frequency is stepped.
+    fn swept_order(order: f64, from: f64, to: f64, amplitude: f64, seconds: f64) -> Vec<f32> {
+        let n = (seconds * RATE) as usize;
+        let mut phase = 0.0f64;
+        (0..n)
+            .map(|i| {
+                let rpm = from + (to - from) * (i as f64 / n as f64);
+                let sample = amplitude * phase.sin();
+                phase += 2.0 * PI * order * rpm / 60.0 / RATE;
+                sample as f32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_full_scale_sine_reads_zero_dbfs() {
+        let samples = tone(200.0, 1.0, 1.0);
+        let table = track(&samples, RATE, &RpmCurve::constant(3_000.0), &[4.0]);
+        let level = table.level(4.0).unwrap();
+        assert!(
+            (level.mean_db - 0.0).abs() < 0.1,
+            "a full-scale sine should be the 0 dB reference, read {:.2} dB",
+            level.mean_db
+        );
+    }
+
+    /// The headline claim: order 4 of a 3000 rpm engine is 200 Hz, and a tone
+    /// there is order 4 and nothing else.
+    #[test]
+    fn a_tone_on_order_four_reads_as_order_four() {
+        let samples = tone(200.0, 0.5, 2.0);
+        let table = track(
+            &samples,
+            RATE,
+            &RpmCurve::constant(3_000.0),
+            &[2.0, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 8.0],
+        );
+
+        let fourth = table.level(4.0).unwrap();
+        assert!(
+            (fourth.mean_db - (-6.02)).abs() < 0.2,
+            "half scale is -6.02 dBFS, read {:.2} dB",
+            fourth.mean_db
+        );
+        assert!(fourth.frames > 0, "order 4 was never resolvable");
+
+        // The whole orders either side are 50 Hz away, eight bins at this
+        // window, and read more than 60 dB down.
+        for order in [2.0, 3.0, 5.0, 6.0, 8.0] {
+            let neighbour = table.level(order).unwrap();
+            assert!(
+                neighbour.mean_db < fourth.mean_db - 50.0,
+                "order {order} read {:.1} dB against order 4's {:.1} dB; \
+                 the tone has leaked out of its own order",
+                neighbour.mean_db,
+                fourth.mean_db
+            );
+        }
+
+        // The half-orders either side are only 25 Hz away — four bins, which is
+        // the width of the window's own main lobe — so they can be shown to be
+        // far down but not to be empty. Separating a half-order at 3000 rpm is
+        // a question about the window, not about the signal.
+        for order in [3.5, 4.5] {
+            let neighbour = table.level(order).unwrap();
+            assert!(
+                neighbour.mean_db < fourth.mean_db - 25.0,
+                "half-order {order} read {:.1} dB against order 4's {:.1} dB",
+                neighbour.mean_db,
+                fourth.mean_db
+            );
+        }
+
+        assert_eq!(table.loudest().map(|l| l.order), Some(4.0));
+    }
+
+    /// The level must not depend on where the component falls between two bins.
+    ///
+    /// Reading the tallest bin instead of summing the main lobe would lose up
+    /// to 1.4 dB here, which is larger than most of the differences these
+    /// tables exist to detect.
+    #[test]
+    fn a_level_is_independent_of_bin_alignment() {
+        let bin = RATE / WINDOW as f64;
+        let on_bin = 34.0 * bin;
+        let between = 34.5 * bin;
+
+        let a = track(
+            &tone(on_bin, 0.5, 1.0),
+            RATE,
+            &RpmCurve::constant(60.0 * on_bin / 4.0),
+            &[4.0],
+        );
+        let b = track(
+            &tone(between, 0.5, 1.0),
+            RATE,
+            &RpmCurve::constant(60.0 * between / 4.0),
+            &[4.0],
+        );
+
+        let (a, b) = (a.level(4.0).unwrap(), b.level(4.0).unwrap());
+        assert!(
+            (a.mean_db - b.mean_db).abs() < 0.2,
+            "scalloping: {:.2} dB on a bin against {:.2} dB between two",
+            a.mean_db,
+            b.mean_db
+        );
+    }
+
+    /// An order that sweeps while the window is open keeps its level.
+    #[test]
+    fn a_swept_order_keeps_its_level() {
+        let seconds = 4.0;
+        let (from, to) = (850.0, 7_000.0);
+        let samples = swept_order(4.0, from, to, 0.5, seconds);
+
+        let dt = 1.0 / 240.0;
+        let steps = (seconds / dt) as usize;
+        let speeds = (0..=steps)
+            .map(|i| from + (to - from) * (i as f64 * dt / seconds))
+            .collect();
+        let table = track(
+            &samples,
+            RATE,
+            &RpmCurve::new(speeds, dt),
+            &[2.0, 3.0, 4.0, 5.0, 6.0, 8.0],
+        );
+
+        let fourth = table.level(4.0).unwrap();
+        assert!(
+            (fourth.mean_db - (-6.02)).abs() < 1.0,
+            "a swept order 4 read {:.2} dB where a steady one reads -6.02",
+            fourth.mean_db
+        );
+        // The neighbours cannot be asserted empty here and it would be dishonest
+        // to try: at the bottom of the pull order 4 is 57 Hz and order 5 is
+        // 71 Hz, two bins apart, and no window this long tells them apart. What
+        // survives the sweep is which order the energy belongs to.
+        assert_eq!(
+            table.loudest().map(|l| l.order),
+            Some(4.0),
+            "the swept tone stopped being order 4"
+        );
+    }
+
+    /// An order under the window's resolution is absent, not zero.
+    #[test]
+    fn an_unresolvable_order_reports_no_frames() {
+        let samples = tone(200.0, 0.5, 1.0);
+        let table = track(&samples, RATE, &RpmCurve::constant(850.0), &[0.5, 4.0]);
+
+        // Order 0.5 of an engine at 850 rpm is 7.1 Hz, under the 17.6 Hz floor.
+        let low = table.level(0.5).unwrap();
+        assert_eq!(low.frames, 0);
+        assert_eq!(low.mean_db, SILENCE_DB);
+        assert!(table.level(4.0).unwrap().frames > 0);
+    }
+
+    #[test]
+    fn a_speed_curve_interpolates_and_clamps() {
+        let curve = RpmCurve::new(vec![1_000.0, 2_000.0, 3_000.0], 0.5);
+        assert_eq!(curve.seconds(), 1.0);
+        assert!((curve.at(0.25) - 1_500.0).abs() < 1e-9);
+        assert!((curve.at(-1.0) - 1_000.0).abs() < 1e-9);
+        assert!((curve.at(99.0) - 3_000.0).abs() < 1e-9);
+    }
+
+    /// A speed excursion wholly inside a window still widens that order's band.
+    #[test]
+    fn a_speed_range_sees_inside_the_window() {
+        let curve = RpmCurve::new(vec![7_000.0, 6_880.0, 7_000.0], 0.05);
+        let (slow, fast) = curve.range(0.0, 0.1);
+        assert!((slow - 6_880.0).abs() < 1e-9, "missed the bounce: {slow}");
+        assert!((fast - 7_000.0).abs() < 1e-9);
+    }
+}
