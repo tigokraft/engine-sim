@@ -210,6 +210,16 @@ impl Measured {
         )
     }
 
+    /// The most prominent resonance found on a named profile.
+    fn top_peak(&self, script: &str) -> Option<&Peak> {
+        self.runs
+            .iter()
+            .find(|r| r.script == script)?
+            .peaks
+            .iter()
+            .max_by(|a, b| a.prominence_db.total_cmp(&b.prominence_db))
+    }
+
     /// Whether every profile rendered without a dropout or a discontinuity.
     fn is_clean(&self) -> bool {
         self.runs.iter().all(|r| r.continuity.is_clean())
@@ -525,20 +535,39 @@ fn index_markdown(all: &[Measured]) -> String {
     );
 
     let _ = writeln!(out, "## Engines\n");
-    let _ = writeln!(out, "| Engine | Spec | Induction | Firing order | Clean |");
-    let _ = writeln!(out, "|---|---|---|---:|---|");
+    let _ = writeln!(
+        out,
+        "| Engine | Spec | Induction | Firing order | Top resonance | Clean |"
+    );
+    let _ = writeln!(out, "|---|---|---|---:|---:|---|");
     for measured in all {
         let _ = writeln!(
             out,
-            "| [{}]({}.md) | {} | {} | {} | {} |",
+            "| [{}]({}.md) | {} | {} | {} | {} | {} |",
             measured.preset.name,
             slug(measured.preset.name),
             measured.preset.spec(),
             measured.preset.induction.label(),
             trim(measured.firing_order()),
+            match measured.top_peak("sweep_up") {
+                Some(peak) => format!("{:.0} Hz", peak.hz),
+                None => "—".into(),
+            },
             if measured.is_clean() { "yes" } else { "**no**" },
         );
     }
+
+    let _ = writeln!(
+        out,
+        "\nEvery engine's strongest resonance lands in the same narrow band, \
+         because every engine is currently breathing through the same muffler: \
+         `SynthConfig::uniform` gives all nine eight litres of chamber behind a \
+         50 mm neck, and `f = (c / 2 pi) sqrt(A_neck / (V L_neck))` puts that at \
+         `0.249 c`. The only thing separating one engine from another here is \
+         the temperature of its own exhaust, through `c = sqrt(gamma R T)`. \
+         Stage 3 is where they stop sharing plumbing, and this column is the \
+         first number it has to pull apart."
+    );
 
     let _ = writeln!(out, "\n## CPU\n");
     let _ = writeln!(
