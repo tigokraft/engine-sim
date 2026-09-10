@@ -2064,6 +2064,70 @@ mod tests {
     }
 
     #[test]
+    fn stub_notches_at_c_over_four_l_stub() {
+        // A closed side branch is a drone killer: the round trip up and back
+        // covers half a wavelength at f = c / 4L, and the rigid end reflects in
+        // phase, so what returns to the junction arrives inverted and cancels.
+        // The notch frequency is set by the branch length and nothing else.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.4;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 300.0;
+
+        let c = speed_of_sound(GAMMA, R, TEMPERATURE);
+        let pipe_area = std::f64::consts::PI * 0.030 * 0.030;
+        let stub_area = std::f64::consts::PI * 0.020 * 0.020;
+
+        for stub_length in [0.25f64, 0.40] {
+            let expected = c / (4.0 * stub_length as f32);
+
+            // Sweep the band around the prediction and find the deepest point.
+            let mut deepest = (0.0f32, f32::MAX);
+            let mut f = expected * 0.75;
+            while f <= expected * 1.25 {
+                let mut stub = QuarterWaveStub::new(
+                    pipe_area,
+                    stub_area,
+                    stub_length,
+                    FS,
+                    GAMMA,
+                    R,
+                    TEMPERATURE,
+                );
+                let settle = 24_000;
+                let measure = 24_000;
+                let mut transmitted = vec![0.0f32; measure];
+                for i in 0..(settle + measure) {
+                    let phase = std::f32::consts::TAU * f * i as f32 / FS;
+                    let (_, out) = stub.step(phase.sin(), 0.0);
+                    if i >= settle {
+                        transmitted[i - settle] = out;
+                    }
+                }
+                let m = magnitude_at(&transmitted, f, FS);
+                if m < deepest.1 {
+                    deepest = (f, m);
+                }
+                f += expected * 0.002;
+            }
+
+            let error = (deepest.0 - expected).abs() / expected;
+            assert!(
+                error < 0.02,
+                "stub of {stub_length} m notched at {:.1} Hz, expected {:.1} Hz ({:.1} % off)",
+                deepest.0,
+                expected,
+                error * 100.0
+            );
+            assert!(
+                deepest.1 < 0.5,
+                "the notch is not a notch: {:.3} of the drive still gets through",
+                deepest.1
+            );
+        }
+    }
+
+    #[test]
     fn two_pipe_junction_reflects_exact_area_ratio() {
         let test_cases = [
             (0.0010, 0.0020), // expansion: r = (1-2)/(1+2) = -1/3
