@@ -44,6 +44,13 @@ pub const EXHAUST_PRANDTL_NUMBER: f32 = 0.71;
 /// Effective turbulent boundary layer enhancement factor in corrugated/hot exhaust pipe.
 const BOUNDARY_LAYER_TURBULENCE_FACTOR: f32 = 16.0;
 
+/// Fraction of the valve-end reflection that survives full damping [-].
+///
+/// Not zero: even wide open, a port is a real area change and does send
+/// something back. It is small enough that the primary's ringdown falls below
+/// one firing interval, which is what stops a comb from forming.
+pub const VALVE_DAMPED_REFLECTION: f32 = 0.35;
+
 // ---------------------------------------------------------------------------
 // Viscothermal wall loss
 // ---------------------------------------------------------------------------
@@ -166,6 +173,7 @@ impl ViscothermalLoss {
 pub struct ValveTermination {
     pipe_area: f32,
     reflection: f32,
+    damping: f32,
 }
 
 impl ValveTermination {
@@ -174,6 +182,7 @@ impl ValveTermination {
         Self {
             pipe_area: pipe_area.max(1e-7) as f32,
             reflection: 1.0,
+            damping: 0.0,
         }
     }
 
@@ -190,7 +199,24 @@ impl ValveTermination {
 
     /// Reflection coefficient currently in effect [-].
     pub fn reflection(&self) -> f32 {
-        self.reflection
+        self.reflection * (1.0 - self.damping * (1.0 - VALVE_DAMPED_REFLECTION))
+    }
+
+    /// Softens the reflection, `0` for the bare boundary and `1` fully damped.
+    ///
+    /// Until the solver's own valve lift reaches the snapshot, a primary's head
+    /// is a rigid closed end at every instant, which is what a real one is for
+    /// most of the cycle but never all of it: while the valve is open the pipe
+    /// is looking into the cylinder and the reflection is far weaker. This
+    /// stands in for that, and it is the same physical quantity a lift curve
+    /// would set — see [`ValveTermination::set_effective_area`].
+    pub fn set_damping(&mut self, damping: f32) {
+        self.damping = damping.clamp(0.0, 1.0);
+    }
+
+    /// Damping currently applied, `0..=1` [-].
+    pub fn damping(&self) -> f32 {
+        self.damping
     }
 
     /// Computes the forward-travelling wave entering the runner:
@@ -198,7 +224,7 @@ impl ValveTermination {
     /// - `returning_wave`: backward wave arriving at the valve boundary ($p^-(0)$) [Pa].
     #[inline(always)]
     pub fn step(&self, excitation: f32, returning_wave: f32) -> f32 {
-        excitation + self.reflection * returning_wave
+        excitation + self.reflection() * returning_wave
     }
 }
 
@@ -1543,6 +1569,14 @@ impl ExhaustNetwork {
     /// Number of banks the network radiates from.
     pub fn bank_count(&self) -> usize {
         self.bank_count
+    }
+
+    /// Damps a cylinder's primary by softening its valve-end reflection, `0` for
+    /// the bare closed valve and `1` for fully damped.
+    pub fn set_valve_damping(&mut self, cylinder: usize, damping: f32) {
+        if let Some(valve) = self.valves.get_mut(cylinder) {
+            valve.set_damping(damping);
+        }
     }
 
     /// Updates valve effective flow areas for all cylinders.
