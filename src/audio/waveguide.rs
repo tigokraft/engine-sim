@@ -2128,6 +2128,40 @@ mod tests {
     }
 
     #[test]
+    fn a_narrow_pipe_is_duller_than_a_wide_one() {
+        // Wall loss goes as sqrt(f) / a, so a narrow pipe swallows its top end
+        // and a wide one does not. This is free differentiation between a bike's
+        // 38 mm primary and a truck's 76 mm pipe — no tone control anywhere.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.4;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 300.0;
+
+        let brightness = |radius: f64| {
+            let area = std::f64::consts::PI * radius * radius;
+            let mut pipe = WaveguidePipe::new(0.6, area, FS, GAMMA, R, TEMPERATURE);
+            // Straight through: impulse in one end, read what leaves the other,
+            // with nothing reflecting at either boundary.
+            let mut out = vec![0.0f32; 4_096];
+            for (i, sample) in out.iter_mut().enumerate() {
+                let (_, p_far) = pipe.read_outputs();
+                pipe.push_inputs(if i == 0 { 1.0 } else { 0.0 }, 0.0);
+                *sample = p_far;
+            }
+            let high = magnitude_at(&out, 6_000.0, FS);
+            let low = magnitude_at(&out, 300.0, FS);
+            high / low.max(1e-9)
+        };
+
+        let narrow = brightness(0.019);
+        let wide = brightness(0.038);
+        assert!(
+            wide > 1.5 * narrow,
+            "the narrow pipe was not measurably duller: {narrow:.3} against {wide:.3} wide"
+        );
+    }
+
+    #[test]
     fn two_pipe_junction_reflects_exact_area_ratio() {
         let test_cases = [
             (0.0010, 0.0020), // expansion: r = (1-2)/(1+2) = -1/3
