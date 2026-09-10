@@ -81,7 +81,7 @@ use std::f32::consts::TAU;
 
 use crate::audio::filters::{
     firing_interval_seconds, soft_clip, waveguide_damping, Biquad, BiquadCoeffs, BlockResonator,
-    DcBlocker, ExhaustRunner, Muffler, MufflerGeometry, Noise, OnePole, Smoothed,
+    DcBlocker, ExhaustRunner, ModalBank, Muffler, MufflerGeometry, Noise, OnePole, Smoothed,
 };
 
 /// Samples between control-rate updates.
@@ -964,6 +964,151 @@ const MECHANICAL_RUMBLE_MAKEUP: f32 = 23.7;
 /// blocker underneath it — headroom spent there is inaudible.
 const MECHANICAL_RUMBLE_HZ: f32 = 380.0;
 
+// ---------------------------------------------------------------------------
+// Impulsive mechanical source primitive
+// ---------------------------------------------------------------------------
+
+/// How an impulsive mechanical source sets its recurrence rate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SourceRate {
+    /// One event per cylinder per four-stroke engine cycle (crank order = cylinders * 0.5).
+    PerCylinder,
+    /// Explicit crankshaft order (events per crank revolution).
+    Order(f32),
+}
+
+/// Control law governing how a mechanical source's gain scales with engine state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LevelLaw {
+    /// Cam lash and spring force: constant base + moderate friction scaling.
+    /// Does not vanish on spark cut.
+    CamLash { base_ratio: f32 },
+    /// Scales directly with friction mean effective pressure.
+    FrictionMep,
+    /// Scales with crankshaft speed: `rpm / reference_rpm`.
+    Speed { reference_rpm: f32 },
+    /// Constant level whenever the engine is turning.
+    Constant,
+}
+
+impl LevelLaw {
+    /// Evaluates the gain multiplier given friction MEP, engine speed, and cycle rate.
+    pub fn compute(&self, friction_mep: f32, rpm: f32, cycle_hz: f32) -> f32 {
+        if cycle_hz < 1e-3 || rpm < 1.0 {
+            return 0.0;
+        }
+        match *self {
+            LevelLaw::Constant => 1.0,
+            LevelLaw::CamLash { base_ratio } => {
+                let drag = (friction_mep / REFERENCE_FMEP).clamp(0.0, 2.0);
+                base_ratio + (1.0 - base_ratio) * drag
+            }
+            LevelLaw::FrictionMep => (friction_mep / REFERENCE_FMEP).clamp(0.0, 3.0),
+            LevelLaw::Speed { reference_rpm } => (rpm / reference_rpm.max(100.0)).clamp(0.0, 3.0),
+        }
+    }
+}
+
+/// One impulsive mechanical source: rate, jitter, envelope, body resonance, level law.
+#[derive(Debug, Clone)]
+pub struct ImpulsiveSource {
+    pub rate: SourceRate,
+    pub jitter: f32,
+    pub decay: f32,
+    pub envelope: f32,
+    pub phase: f32,
+    pub body: ModalBank,
+    pub level_law: LevelLaw,
+    pub base_level: f32,
+    pub gain: Smoothed,
+    pub event_hz: Smoothed,
+    sample_rate: f32,
+}
+
+impl ImpulsiveSource {
+    pub fn new(
+        sample_rate: f32,
+        rate: SourceRate,
+        jitter: f32,
+        decay_time: f32,
+        body: ModalBank,
+        level_law: LevelLaw,
+        base_level: f32,
+    ) -> Self {
+        Self {
+            rate,
+            jitter: jitter.clamp(0.0, 1.0),
+            decay: (-1.0 / (decay_time.max(1e-5) * sample_rate)).exp(),
+            envelope: 0.0,
+            phase: 0.0,
+            body,
+            level_law,
+            base_level,
+            gain: Smoothed::new(0.0, sample_rate, 0.040),
+            event_hz: Smoothed::new(0.0, sample_rate, 0.030),
+            sample_rate,
+        }
+    }
+
+    /// Effective crank order (events per crank revolution).
+    pub fn effective_order(&self, cylinders: usize) -> f32 {
+        match self.rate {
+            SourceRate::PerCylinder => cylinders.max(1) as f32 * 0.5,
+            SourceRate::Order(o) => o,
+        }
+    }
+
+    /// Effective recurrence frequency at a given cycle rate [Hz].
+    pub fn effective_hz(&self, cycle_hz: f32, cylinders: usize) -> f32 {
+        if cycle_hz < 1e-3 {
+            0.0
+        } else {
+            let crank_hz = cycle_hz * 2.0;
+            self.effective_order(cylinders) * crank_hz
+        }
+    }
+
+    /// Retunes recurrence rate and target gain.
+    pub fn tune(&mut self, friction_mep: f32, rpm: f32, cycle_hz: f32, cylinders: usize) {
+        let hz = self.effective_hz(cycle_hz, cylinders);
+        self.event_hz.set_target(hz);
+
+        let law_gain = self.level_law.compute(friction_mep, rpm, cycle_hz);
+        self.gain.set_target(self.base_level * law_gain);
+    }
+
+    /// Renders one audio sample of this impulsive source.
+    #[inline(always)]
+    pub fn process(&mut self, noise: &mut Noise) -> f32 {
+        let gain = self.gain.next_value();
+        let event_hz = self.event_hz.next_value();
+
+        let increment = event_hz / self.sample_rate;
+        if (1e-9..1.0).contains(&increment) {
+            self.phase += increment;
+            if self.phase >= 1.0 {
+                self.phase -= 1.0;
+                let jitter_factor = (1.0 - self.jitter) + self.jitter * noise.next_unit();
+                self.envelope = jitter_factor;
+            }
+        }
+        self.envelope *= self.decay;
+        if self.envelope < 1e-5 {
+            self.envelope = 0.0;
+        }
+
+        let raw = noise.next_bipolar() * self.envelope;
+        self.body.process(raw) * gain
+    }
+
+    /// Resets filter state, phase accumulator, and envelope.
+    pub fn reset(&mut self) {
+        self.body.reset();
+        self.envelope = 0.0;
+        self.phase = 0.0;
+    }
+}
+
 /// The racket an engine makes that has nothing to do with combustion.
 ///
 /// # Why this layer exists
@@ -993,64 +1138,53 @@ const MECHANICAL_RUMBLE_HZ: f32 = 380.0;
 /// close to constant; hydrodynamic and pumping losses grow steeply with speed,
 /// so the rumble follows FMEP directly.
 #[derive(Debug, Clone)]
-struct MechanicalVoice {
-    /// Body resonance the lifter click is heard through — the head and covers.
-    click_body: Biquad,
-    /// Exponentially decaying envelope of the click currently sounding.
-    click_envelope: f32,
-    /// Per-sample decay of that envelope [-].
-    click_decay: f32,
-    /// Phase accumulator over valve events, `0..1` between seatings.
-    click_phase: f32,
-    /// Two-pole rumble path.
+pub struct MechanicalVoice {
+    click: ImpulsiveSource,
     rumble_a: OnePole,
     rumble_b: OnePole,
-    click_gain: Smoothed,
-    rumble_gain: Smoothed,
-    /// Valve events per second at the current speed [Hz].
-    event_hz: Smoothed,
-    sample_rate: f32,
+    pub click_gain: Smoothed,
+    pub rumble_gain: Smoothed,
+    pub event_hz: Smoothed,
+    pub click_phase: f32,
 }
+
+pub type MechanicalRig = MechanicalVoice;
 
 impl MechanicalVoice {
     fn new(sample_rate: f32) -> Self {
+        let click = ImpulsiveSource::new(
+            sample_rate,
+            SourceRate::Order(0.0),
+            0.45,
+            0.0007,
+            ModalBank::single(sample_rate, 3_200.0, 1.1),
+            LevelLaw::CamLash { base_ratio: 0.45 },
+            1.0,
+        );
         Self {
-            // 3.2 kHz is where a seating valve excites the head casting; the
-            // click is a transient, so the Q is low enough to keep it a click
-            // rather than a ping.
-            click_body: Biquad::new(BiquadCoeffs::bandpass(sample_rate, 3_200.0, 1.1)),
-            click_envelope: 0.0,
-            // 0.7 ms: long enough to have a body, short enough that consecutive
-            // events stay separate all the way to the limiter.
-            click_decay: (-1.0 / (0.0007 * sample_rate)).exp(),
-            click_phase: 0.0,
+            click,
             rumble_a: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             rumble_b: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             click_gain: Smoothed::new(0.0, sample_rate, 0.040),
             rumble_gain: Smoothed::new(0.0, sample_rate, 0.040),
             event_hz: Smoothed::new(0.0, sample_rate, 0.030),
-            sample_rate,
+            click_phase: 0.0,
         }
     }
 
     /// Retunes from FMEP [Pa], cycle rate [Hz] and cylinder count.
     fn tune(&mut self, friction_mep: f32, cycle_hz: f32, cylinders: usize) {
         let drag = (friction_mep / REFERENCE_FMEP).clamp(0.0, 1.5);
+        let hz = cycle_hz * cylinders.max(1) as f32 * VALVE_EVENTS_PER_CYLINDER;
+        self.click.rate =
+            SourceRate::Order(cylinders.max(1) as f32 * (VALVE_EVENTS_PER_CYLINDER * 0.5));
+        self.click
+            .tune(friction_mep, cycle_hz * 120.0, cycle_hz, cylinders);
+        self.event_hz.set_target(hz);
 
-        // A cam turns at half crank speed, so the valve event rate is set by the
-        // cycle rate, not the crank rate — which is already what `cycle_hz` is.
-        self.event_hz
-            .set_target(cycle_hz * cylinders.max(1) as f32 * VALVE_EVENTS_PER_CYLINDER);
-
-        // Spring-force dominated: present from the moment the engine turns, and
-        // only moderately louder when it is working hard.
         self.click_gain.set_target(0.45 + 0.55 * drag);
-        // Loss-dominated: straight off FMEP.
         self.rumble_gain.set_target(drag);
 
-        // An engine that is not turning makes no mechanical noise at all, and
-        // the gates above would otherwise leave a rumble bed under a stopped
-        // engine — `friction_mep` is a correlation, and it has a constant term.
         if cycle_hz < 1e-3 {
             self.click_gain.set_target(0.0);
             self.rumble_gain.set_target(0.0);
@@ -1063,27 +1197,11 @@ impl MechanicalVoice {
         let rumble_gain = self.rumble_gain.next_value();
         let event_hz = self.event_hz.next_value();
 
-        // Valve events. The phase test mirrors the crank trigger: cross the
-        // wrap point and a valve has landed.
-        let increment = event_hz / self.sample_rate;
-        if (1e-9..1.0).contains(&increment) {
-            self.click_phase += increment;
-            if self.click_phase >= 1.0 {
-                self.click_phase -= 1.0;
-                // Lash, wear and cam grinding tolerances are not identical
-                // across a head, so no two lifters land equally hard.
-                self.click_envelope = 0.55 + 0.45 * noise.next_unit();
-            }
-        }
-        self.click_envelope *= self.click_decay;
-        if self.click_envelope < 1e-5 {
-            self.click_envelope = 0.0;
-        }
+        self.click.event_hz.snap(event_hz);
+        self.click.gain.snap(click_gain);
 
-        let click = self
-            .click_body
-            .process(noise.next_bipolar() * self.click_envelope)
-            * click_gain;
+        let click = self.click.process(noise);
+        self.click_phase = self.click.phase;
 
         let rumble = self
             .rumble_b
@@ -1091,14 +1209,11 @@ impl MechanicalVoice {
             * MECHANICAL_RUMBLE_MAKEUP
             * rumble_gain;
 
-        // The clicks are the detail and the rumble is the bed; the bed carries
-        // more of the level because it is what fills the gaps.
         click * 0.35 + rumble * 0.65
     }
 
     fn reset(&mut self) {
-        self.click_body.reset();
-        self.click_envelope = 0.0;
+        self.click.reset();
         self.click_phase = 0.0;
         self.rumble_a.reset();
         self.rumble_b.reset();
