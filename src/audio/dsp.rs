@@ -1445,6 +1445,8 @@ pub struct EngineSynth {
 
     /// Master-cycle phase, `0..1` over 720 crank degrees.
     cycle_phase: f32,
+    /// Crank angular velocity perturbation from nominal speed [rad/s].
+    crank_omega_delta: f32,
     /// Samples remaining before the next control-rate update.
     ///
     /// Persists across `render` calls so the control grid is absolute rather
@@ -1525,6 +1527,7 @@ impl EngineSynth {
             variation: vec![CycleVariation::default(); config.cylinders.len()],
             variation_depth: 0.0,
             cycle_phase: 0.0,
+            crank_omega_delta: 0.0,
             control_countdown: 0,
             exhaust_temperature: Smoothed::new(snapshot.exhaust_temperature, fs, 0.080),
             exhaust_gamma: Smoothed::new(snapshot.exhaust_gamma, fs, 0.080),
@@ -1575,6 +1578,16 @@ impl EngineSynth {
         self.cycle_hz.value() * self.config.cylinder_count() as f32
     }
 
+    /// Crank angular velocity perturbation from nominal speed [rad/s].
+    pub fn crank_omega_delta(&self) -> f32 {
+        self.crank_omega_delta
+    }
+
+    /// Instantaneous crank angular velocity `w = w_0 + delta_w` [rad/s].
+    pub fn crank_omega(&self) -> f32 {
+        4.0 * std::f32::consts::PI * self.cycle_hz.value() + self.crank_omega_delta
+    }
+
     /// Accepts a new physics frame.
     ///
     /// Cheap by design — it stores targets and returns. Nothing is recomputed
@@ -1615,6 +1628,7 @@ impl EngineSynth {
         self.dc = [DcBlocker::default(); 2];
         self.block.reset();
         self.cycle_phase = 0.0;
+        self.crank_omega_delta = 0.0;
         self.control_countdown = 0;
         self.variation
             .iter_mut()
@@ -1739,10 +1753,79 @@ impl EngineSynth {
         }
     }
 
+    /// Closed-form antiderivative of the normalized cylinder torque profile:
+    /// `G(phi) = integral_0^phi (g(u) - 1) du`.
+    ///
+    /// At phi = 0 and phi = 1, G = 0 by construction (integral of g is 1.0).
+    /// Subtracting the mean value over the cycle (0.71787) yields zero DC work.
+    #[inline(always)]
+    fn cylinder_excess_work(phi: f32) -> f32 {
+        let int_g = if phi < 0.25 {
+            let x = phi * 4.0;
+            let pi_x = std::f32::consts::PI * x;
+            let (sin_pix, cos_pix) = pi_x.sin_cos();
+            let pi = std::f32::consts::PI;
+            let term = (1.0 - (1.0 - 0.5 * x) * cos_pix) / pi - 0.5 * sin_pix / (pi * pi);
+            2.992 * term
+        } else if phi < 0.75 {
+            1.4286
+        } else {
+            let x = (phi - 0.75) * 4.0;
+            let pi_x = std::f32::consts::PI * x;
+            let (sin_pix, cos_pix) = pi_x.sin_cos();
+            let pi = std::f32::consts::PI;
+            let term = sin_pix / (pi * pi) - x * cos_pix / pi;
+            1.4286 - 1.3464 * term
+        };
+        int_g - phi - 0.71787
+    }
+
     /// Advances crank phase by one sample and fires any cylinder it passes.
     #[inline(always)]
     fn advance_crank(&mut self, cycle_hz: f32) {
-        let increment = cycle_hz / self.config.sample_rate;
+        let nominal_omega = 4.0 * std::f32::consts::PI * cycle_hz;
+        if nominal_omega <= 1e-6 {
+            self.crank_omega_delta = 0.0;
+            return;
+        }
+
+        // Integrate intra-cycle crank speed ripple:
+        // dw/dt = (T_indicated(theta) - T_mean) / I.
+        // In terms of excess indicated work:
+        // delta_w(theta) = delta_E(theta) / (I * w_0).
+        let n_cylinders = self.config.cylinders.len().max(1);
+        let t_mean = self.snapshot.indicated_torque;
+        if t_mean > 0.0 {
+            let mut blowdown_sum = 0.0f32;
+            for smoother in &self.blowdown_pa {
+                blowdown_sum += smoother.value();
+            }
+
+            let mut delta_e = 0.0f32;
+            for (index, tap) in self.config.cylinders.iter().enumerate() {
+                let weight = if blowdown_sum > 1.0 {
+                    (self.blowdown_pa[index].value() / blowdown_sum) * (n_cylinders as f32)
+                } else {
+                    1.0
+                };
+                let t_mean_cyl = (t_mean / n_cylinders as f32) * weight;
+
+                // Cycle angle relative to cylinder combustion TDC (180 deg before EVO).
+                let phi = (self.cycle_phase - (tap.evo_phase - 0.25)).rem_euclid(1.0);
+                delta_e += t_mean_cyl * Self::cylinder_excess_work(phi);
+            }
+
+            let delta_work = 4.0 * std::f32::consts::PI * delta_e;
+            let inertia = self.snapshot.inertia.max(0.010);
+            self.crank_omega_delta = delta_work / (inertia * nominal_omega);
+        } else {
+            self.crank_omega_delta = 0.0;
+        }
+
+        let omega = (nominal_omega + self.crank_omega_delta)
+            .clamp(0.1 * nominal_omega, 3.0 * nominal_omega);
+        let cycle_hz_instant = omega / (4.0 * std::f32::consts::PI);
+        let increment = cycle_hz_instant / self.config.sample_rate;
         // A stopped or impossibly fast engine fires nothing. The upper guard
         // matters: past one cycle per sample the crossing test below would miss
         // events, and the result would be a phantom subharmonic.
@@ -2323,8 +2406,9 @@ mod tests {
             intake_mass_flow: 0.025,
             throttle: 0.04,
             turbo_rpm: 0.0,
-            // Chen-Flynn at a warm idle: ~0.73 bar.
+            // Chen-Flynn at a warm idle: ~0.73 bar (~29 N m friction torque).
             friction_mep: 0.73e5,
+            indicated_torque: 30.0,
             ..loaded_snapshot()
         }
     }
