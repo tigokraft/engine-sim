@@ -19,12 +19,12 @@
 //! Offline mode needs no audio hardware, so it is the mode to run in CI.
 
 use std::env;
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use rust_engine_sim::analysis::render::write_wav;
 use rust_engine_sim::audio::dsp::EngineSynth;
 use rust_engine_sim::audio::{EngineAudio, EngineControls, Induction, SnapshotSource, SynthConfig};
 use rust_engine_sim::environment::Environment;
@@ -204,45 +204,6 @@ fn analyse(samples: &[f32], channels: usize) -> Continuity {
 }
 
 // ---------------------------------------------------------------------------
-// WAV output
-// ---------------------------------------------------------------------------
-
-/// Writes 32-bit IEEE-float WAV, which keeps the signal bit-exact for analysis.
-fn write_wav(path: &str, samples: &[f32], channels: u16, sample_rate: u32) -> Result<()> {
-    let mut file = BufWriter::new(File::create(path).with_context(|| format!("creating {path}"))?);
-    let data_bytes = (samples.len() * 4) as u32;
-    let block_align = channels * 4;
-
-    file.write_all(b"RIFF")?;
-    // 4 ("WAVE") + 8+18 (fmt) + 8+4 (fact) + 8+data
-    file.write_all(&(4 + 26 + 12 + 8 + data_bytes).to_le_bytes())?;
-    file.write_all(b"WAVE")?;
-
-    // WAVE_FORMAT_IEEE_FLOAT requires the 18-byte fmt chunk and a fact chunk.
-    file.write_all(b"fmt ")?;
-    file.write_all(&18u32.to_le_bytes())?;
-    file.write_all(&3u16.to_le_bytes())?; // IEEE float
-    file.write_all(&channels.to_le_bytes())?;
-    file.write_all(&sample_rate.to_le_bytes())?;
-    file.write_all(&(sample_rate * block_align as u32).to_le_bytes())?;
-    file.write_all(&block_align.to_le_bytes())?;
-    file.write_all(&32u16.to_le_bytes())?;
-    file.write_all(&0u16.to_le_bytes())?; // cbSize
-
-    file.write_all(b"fact")?;
-    file.write_all(&4u32.to_le_bytes())?;
-    file.write_all(&(samples.len() as u32 / channels as u32).to_le_bytes())?;
-
-    file.write_all(b"data")?;
-    file.write_all(&data_bytes.to_le_bytes())?;
-    for sample in samples {
-        file.write_all(&sample.to_le_bytes())?;
-    }
-    file.flush()?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Live playback
 // ---------------------------------------------------------------------------
 
@@ -371,7 +332,12 @@ fn main() -> Result<()> {
             let render_time = started.elapsed().as_secs_f64();
             let report = analyse(&samples, channels);
 
-            write_wav(&path, &samples, channels as u16, OFFLINE_RATE as u32)?;
+            write_wav(
+                Path::new(&path),
+                &samples,
+                channels as u16,
+                OFFLINE_RATE as u32,
+            )?;
 
             println!("== offline render ==");
             println!("  file              {path}");

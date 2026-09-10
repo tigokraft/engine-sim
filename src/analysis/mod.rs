@@ -11,6 +11,8 @@
 //! synthesis of its own: nothing here may change what the engine sounds like,
 //! only what can be said about it.
 //!
+//! - [`render`] — the offline render: the physics and the synth stepped by a
+//!   script against a virtual clock, and the WAV it is written to.
 //! - [`script`] — the fixed drive cycles a preset is measured through, each a
 //!   pure function of elapsed time.
 //! - [`orders`] — a Hann-windowed STFT; the level of each engine order read off
@@ -26,4 +28,5 @@
 //! what makes a difference between two builds attributable to the build.
 
 pub mod orders;
+pub mod render;
 pub mod script;
