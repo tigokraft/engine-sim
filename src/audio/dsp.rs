@@ -1375,6 +1375,29 @@ impl KnockVoice {
         self.envelope = 0.0;
     }
 
+    /// Retunes mode frequencies from cylinder bore diameter and gas state.
+    ///
+    /// Frequency of cavity mode m:
+    /// `f_m = rho_m * c / (pi * bore)`
+    /// where `c = sqrt(gamma * R * T)`.
+    pub fn tune(&mut self, bore: f32, gamma: f32, gas_constant: f32, temperature: f32) {
+        let b = bore.max(0.010);
+        let c = (gamma * gas_constant * temperature.max(200.0)).sqrt();
+        let base_f = c / (std::f32::consts::PI * b);
+
+        let f10 = (KNOCK_RHO_10 * base_f).clamp(100.0, 0.48 * self.sample_rate);
+        let f20 = (KNOCK_RHO_20 * base_f).clamp(100.0, 0.48 * self.sample_rate);
+        let f01 = (KNOCK_RHO_01 * base_f).clamp(100.0, 0.48 * self.sample_rate);
+
+        self.mode_frequencies = [f10, f20, f01];
+        self.mode_10
+            .set_coeffs(BiquadCoeffs::bandpass(self.sample_rate, f10, KNOCK_Q));
+        self.mode_20
+            .set_coeffs(BiquadCoeffs::bandpass(self.sample_rate, f20, KNOCK_Q));
+        self.mode_01
+            .set_coeffs(BiquadCoeffs::bandpass(self.sample_rate, f01, KNOCK_Q));
+    }
+
     /// Renders one sample of knock ringing.
     #[inline(always)]
     pub fn process(&mut self, noise: &mut Noise) -> f32 {
@@ -1680,6 +1703,8 @@ impl EngineSynth {
             self.config.cylinders.len(),
         );
         self.intake.tune(flow, throttle);
+        self.knock
+            .tune(self.snapshot.bore, gamma, gas_constant, temperature);
         // Nothing to tune on an atmospheric engine: the voice is left cold and
         // never asked for a sample, rather than run at a level of zero.
         if let Some(voicing) = self.config.turbo {
