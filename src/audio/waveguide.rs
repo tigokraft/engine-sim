@@ -1303,7 +1303,6 @@ pub struct ExhaustNetwork {
     collectors: Vec<TaperedCollector>,
     crossover: BankCrossover,
     pre_cross_pipes: Vec<WaveguidePipe>,
-    post_cross_pipes: Vec<WaveguidePipe>,
     silencers: Vec<Vec<SilencerElement>>,
     tailpipes: Vec<WaveguidePipe>,
     mouths: Vec<MouthTermination>,
@@ -1388,27 +1387,24 @@ impl ExhaustNetwork {
             temp,
         );
 
-        let has_crossover = matches!(
-            exhaust.crossover,
-            crate::physics::plumbing::Crossover::XPipe { .. }
-                | crate::physics::plumbing::Crossover::HPipe { .. }
-                | crate::physics::plumbing::Crossover::Balance180
-        );
+        // Where the banks meet is geometry, not a constant: the crossover sits a
+        // stated distance downstream of the collector, and that run of pipe is
+        // what decides which harmonics arrive at the junction in phase. An X-pipe
+        // 0.4 m back and one 1.2 m back are different exhausts.
+        let cross_position = match exhaust.crossover {
+            crate::physics::plumbing::Crossover::None => None,
+            crate::physics::plumbing::Crossover::XPipe { position }
+            | crate::physics::plumbing::Crossover::HPipe { position, .. } => Some(position),
+            // A 180-degree bundle crosses inside the header itself, so the banks
+            // meet as soon as the collectors do.
+            crate::physics::plumbing::Crossover::Balance180 => Some(0.0),
+        };
 
         let mut pre_cross_pipes = Vec::with_capacity(n_banks);
-        let mut post_cross_pipes = Vec::with_capacity(n_banks);
-        for _ in 0..n_banks {
-            if has_crossover {
+        if let Some(position) = cross_position {
+            for _ in 0..n_banks {
                 pre_cross_pipes.push(WaveguidePipe::new(
-                    0.30,
-                    exhaust.collector.outlet_area,
-                    sample_rate,
-                    gamma,
-                    r,
-                    temp,
-                ));
-                post_cross_pipes.push(WaveguidePipe::new(
-                    0.30,
+                    position,
                     exhaust.collector.outlet_area,
                     sample_rate,
                     gamma,
@@ -1474,7 +1470,6 @@ impl ExhaustNetwork {
             collectors,
             crossover,
             pre_cross_pipes,
-            post_cross_pipes,
             silencers,
             tailpipes,
             mouths,
@@ -1498,9 +1493,6 @@ impl ExhaustNetwork {
         }
         self.crossover.tune(gamma, gas_constant, temperature);
         for p in &mut self.pre_cross_pipes {
-            p.tune(gamma, gas_constant, temperature);
-        }
-        for p in &mut self.post_cross_pipes {
             p.tune(gamma, gas_constant, temperature);
         }
         for chain in &mut self.silencers {
@@ -1605,9 +1597,6 @@ impl ExhaustNetwork {
         }
         self.crossover.reset();
         for p in &mut self.pre_cross_pipes {
-            p.reset();
-        }
-        for p in &mut self.post_cross_pipes {
             p.reset();
         }
         for chain in &mut self.silencers {
