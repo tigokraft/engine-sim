@@ -1989,6 +1989,81 @@ mod tests {
     }
 
     #[test]
+    fn crossover_transfers_energy_between_banks() {
+        // What separates a flat-plane V8 from a cross-plane one at equal firing
+        // order is whether the banks can hear each other. Fire only bank 0 and
+        // listen at bank 1's tailpipe: with an X-pipe, energy arrives; with
+        // `Crossover::None` the banks are two separate exhausts and nothing
+        // does. Nothing here is a mixing coefficient — the transfer is whatever
+        // the 4-port junction scatters.
+        use crate::physics::plumbing::{
+            Collector, Crossover, ExhaustSystem, PipeSection, Silencer,
+        };
+
+        const FS: f32 = 48_000.0;
+
+        let system = |crossover: Crossover| ExhaustSystem {
+            primaries: vec![PipeSection::from_diameter(0.45, 0.040, 850.0); 8],
+            collector: Collector::from_diameter(4, 0.060, 0.15),
+            secondary: vec![],
+            crossover,
+            silencers: vec![Silencer::Straight],
+            tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
+            tailpipe_flanged: false,
+        };
+
+        // A cross-plane V8's banks: cylinders 0, 2, 3, 7 on one, the rest on the other.
+        let cylinders: Vec<crate::audio::dsp::CylinderTap> = [0, 1, 0, 0, 1, 1, 1, 0]
+            .iter()
+            .enumerate()
+            .map(|(i, &bank)| crate::audio::dsp::CylinderTap {
+                evo_phase: i as f32 / 8.0,
+                bank,
+            })
+            .collect();
+
+        let snapshot = crate::audio::dsp::EngineSnapshot::default();
+        let far_bank_energy = |crossover: Crossover| {
+            let exhaust = system(crossover);
+            let mut network = ExhaustNetwork::new(&exhaust, &cylinders, 2, FS, &snapshot);
+            let mut excitations = vec![0.0f32; cylinders.len()];
+            let bank_excitations = vec![0.0f32; 2];
+            let mut radiated = vec![0.0f32; 2];
+
+            let mut near = 0.0f64;
+            let mut far = 0.0f64;
+            for i in 0..48_000 {
+                // Impulse into one cylinder of bank 0 only. Every other port
+                // stays silent, so anything at bank 1's mouth crossed over.
+                excitations.fill(0.0);
+                if i == 0 {
+                    excitations[0] = 1.0;
+                }
+                network.step(&excitations, &bank_excitations, &mut radiated);
+                near += (radiated[0] as f64).powi(2);
+                far += (radiated[1] as f64).powi(2);
+            }
+            (near, far)
+        };
+
+        let (isolated_near, isolated_far) = far_bank_energy(Crossover::None);
+        let (crossed_near, crossed_far) = far_bank_energy(Crossover::XPipe { position: 0.80 });
+
+        assert!(
+            isolated_near > 0.0 && crossed_near > 0.0,
+            "the fired bank radiated nothing at all"
+        );
+        assert_eq!(
+            isolated_far, 0.0,
+            "energy reached the far bank with no crossover fitted: {isolated_far:e}"
+        );
+        assert!(
+            crossed_far > 0.05 * crossed_near,
+            "the X-pipe passed almost nothing across: {crossed_far:e} against {crossed_near:e} on the fired bank"
+        );
+    }
+
+    #[test]
     fn two_pipe_junction_reflects_exact_area_ratio() {
         let test_cases = [
             (0.0010, 0.0020), // expansion: r = (1-2)/(1+2) = -1/3
