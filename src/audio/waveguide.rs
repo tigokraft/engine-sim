@@ -165,3 +165,86 @@ impl WaveguidePipe {
         self.backward_line.reset();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Scattering junction
+// ---------------------------------------------------------------------------
+
+/// N-port acoustic scattering junction.
+///
+/// Joins $N$ waveguide ducts meeting at a single acoustic node.
+/// Given port admittances $Y_i = A_i / (\rho c)$ and incoming pressure waves $p_i^+$,
+/// the acoustic pressure at the junction is:
+///
+/// $$p_J = \frac{2 \sum_i Y_i p_i^+}{\sum_i Y_i}$$
+///
+/// and outgoing scattered pressure waves returning into each duct are:
+///
+/// $$p_i^- = p_J - p_i^+$$
+///
+/// For two pipes of area $A_1$ and $A_2$, the reflection coefficient for a wave
+/// entering from pipe 1 collapses to:
+///
+/// $$r = \frac{A_1 - A_2}{A_1 + A_2}$$
+#[derive(Debug, Clone)]
+pub struct ScatteringJunction {
+    admittances: Vec<f32>,
+    inv_total_admittance: f32,
+}
+
+impl ScatteringJunction {
+    /// Constructs a new N-port junction from port admittances $Y_i$.
+    pub fn new(admittances: &[f32]) -> Self {
+        let total: f32 = admittances.iter().sum();
+        let inv_total = if total > 1e-12 { 1.0 / total } else { 0.0 };
+        Self {
+            admittances: admittances.to_vec(),
+            inv_total_admittance: inv_total,
+        }
+    }
+
+    /// Constructs a junction from port cross-sectional areas [m^2] under uniform gas conditions.
+    pub fn from_areas(areas: &[f64]) -> Self {
+        let admittances: Vec<f32> = areas.iter().map(|&a| a.max(1e-7) as f32).collect();
+        Self::new(&admittances)
+    }
+
+    /// Number of connected ports.
+    pub fn port_count(&self) -> usize {
+        self.admittances.len()
+    }
+
+    /// Returns a slice of the current port admittances.
+    pub fn admittances(&self) -> &[f32] {
+        &self.admittances
+    }
+
+    /// Updates port admittances when gas state or geometry changes.
+    pub fn set_admittances(&mut self, admittances: &[f32]) {
+        assert_eq!(admittances.len(), self.admittances.len());
+        self.admittances.copy_from_slice(admittances);
+        let total: f32 = self.admittances.iter().sum();
+        self.inv_total_admittance = if total > 1e-12 { 1.0 / total } else { 0.0 };
+    }
+
+    /// Computes scattering across all ports:
+    /// - `p_plus`: incident pressure waves arriving at the junction from each connected duct.
+    /// - `p_minus`: buffer filled with outgoing pressure waves returning into each duct.
+    ///
+    /// Returns the junction pressure $p_J$.
+    #[inline(always)]
+    pub fn scatter(&self, p_plus: &[f32], p_minus: &mut [f32]) -> f32 {
+        debug_assert_eq!(p_plus.len(), self.admittances.len());
+        debug_assert_eq!(p_minus.len(), self.admittances.len());
+
+        let mut sum_yp = 0.0f32;
+        for (&y, &p) in self.admittances.iter().zip(p_plus.iter()) {
+            sum_yp += y * p;
+        }
+        let p_j = 2.0 * sum_yp * self.inv_total_admittance;
+        for (out, &p) in p_minus.iter_mut().zip(p_plus.iter()) {
+            *out = p_j - p;
+        }
+        p_j
+    }
+}
