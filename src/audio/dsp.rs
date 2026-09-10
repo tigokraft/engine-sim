@@ -3428,6 +3428,36 @@ mod tests {
             (rms - 1.0).abs() < 0.05,
             "rumble makeup is out of calibration: {rms} (adjust MECHANICAL_RUMBLE_MAKEUP)"
         );
+
+        // The full rig at reference operating conditions also sits at unity RMS,
+        // so `SynthConfig::mechanical_level` keeps its meaning when impulsive
+        // sources and rumble sound together.
+        let mut full_voice = MechanicalVoice::new(FS);
+        let ref_snapshot = EngineSnapshot {
+            rpm: 800.0,
+            friction_mep: REFERENCE_FMEP,
+            peak_cylinder_pressure: REFERENCE_PEAK_PRESSURE,
+            spark_cut: false,
+            ..EngineSnapshot::default()
+        };
+        let cycle_hz = 800.0 / 120.0;
+        full_voice.tune(&ref_snapshot, cycle_hz, 8);
+        // Settle gain smoothers to their steady-state values.
+        for _ in 0..48_000 {
+            full_voice.process(&mut noise);
+        }
+
+        let mut sum_sq_full = 0.0f64;
+        let n_full = 192_000;
+        for _ in 0..n_full {
+            let y = full_voice.process(&mut noise);
+            sum_sq_full += (y as f64) * (y as f64);
+        }
+        let full_rms = (sum_sq_full / n_full as f64).sqrt() as f32;
+        assert!(
+            (full_rms - 1.0).abs() < 0.05,
+            "full mechanical rig RMS is out of calibration: {full_rms}"
+        );
     }
 
     #[test]
