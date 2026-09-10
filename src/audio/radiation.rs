@@ -80,6 +80,27 @@ pub fn corner_hz(radius: f32, speed_of_sound: f32) -> f32 {
     speed_of_sound / (std::f32::consts::TAU * radius.max(1e-4))
 }
 
+/// Geometric part of the radiation gain, relative to a reference mouth [-].
+///
+/// A source small against the wavelength radiates the rate of change of the
+/// volume it pumps, $p(r) = \rho \dot{U} / (4 \pi r)$, and at an open end
+/// $U = 2 A p^+ / (\rho c)$. The differentiation is already carried by the
+/// transmission — see [`Mouth::step`] — which brings a factor $\omega_c = c/a$
+/// with it, so what is left of the geometry is
+///
+/// ```text
+/// A * omega_c / (2 pi r c) = (pi a^2) / (2 pi r a) = a / (2 r)
+/// ```
+///
+/// Radius over distance, and nothing else: the area is in there, divided by the
+/// radius the corner frequency brought along. Quoted against
+/// [`REFERENCE_MOUTH_RADIUS`] at [`REFERENCE_DISTANCE`], for the reason given
+/// there.
+#[inline]
+pub fn radiation_gain(radius: f32, distance: f32) -> f32 {
+    (radius.max(0.0) / distance.max(1e-3)) * (REFERENCE_DISTANCE / REFERENCE_MOUTH_RADIUS)
+}
+
 // ---------------------------------------------------------------------------
 // The mouth
 // ---------------------------------------------------------------------------
@@ -108,12 +129,29 @@ pub fn corner_hz(radius: f32, speed_of_sound: f32) -> f32 {
 /// caller must supply the wall loss and the junction's own reflection
 /// magnitude, both of which are strictly below one — see
 /// [`ExhaustRunner`](crate::audio::filters::ExhaustRunner), which does.
+///
+/// # What escapes
+///
+/// Whatever does not come back has left, so the pressure handed to the outside
+/// world is the transmitted part $(1 + R) p^+$. Written out, that fit is
+///
+/// ```text
+/// 1 + R(s) = (s / omega_c) / (1 + s / omega_c)
+/// ```
+///
+/// — a differentiator below the corner and unity above it. This is not a
+/// coincidence to be improved on by differentiating a second time: the monopole
+/// $\mathrm{d}/\mathrm{d}t$ and the mouth's transmission are the same filter,
+/// because the same $ka$ that decides how much gets out decides how efficiently
+/// what got out couples to the air. Hence +6 dB/octave below $f_c$, flat above,
+/// and a low end that is weak *outside* the pipe however strong it is inside.
 #[derive(Debug, Clone, Copy)]
 pub struct Mouth {
     radius: f32,
     flanged: bool,
     sample_rate: f32,
     corner_hz: f32,
+    gain: f32,
     reflection: OnePole,
 }
 
@@ -131,8 +169,16 @@ impl Mouth {
             flanged,
             sample_rate,
             corner_hz: corner,
+            gain: radiation_gain(radius, REFERENCE_DISTANCE),
             reflection: OnePole::new(sample_rate, corner),
         }
+    }
+
+    /// The same mouth heard from `distance` metres away instead of from
+    /// [`REFERENCE_DISTANCE`].
+    pub fn at_distance(mut self, distance: f32) -> Self {
+        self.gain = radiation_gain(self.radius, distance);
+        self
     }
 
     /// Retunes the corner for the current speed of sound [m/s].
@@ -171,11 +217,28 @@ impl Mouth {
         std::f32::consts::PI * self.radius * self.radius
     }
 
+    /// Radiation gain currently in effect [-].
+    pub fn gain(&self) -> f32 {
+        self.gain
+    }
+
     /// The wave that turns around and goes back down the pipe, given the one
     /// arriving at the mouth.
     #[inline(always)]
     pub fn reflect(&mut self, incident: f32) -> f32 {
         -self.reflection.process(incident)
+    }
+
+    /// Both sides of the mouth at once, given the wave arriving at it.
+    ///
+    /// Returns `(reflected, radiated)`: the wave sent back down the pipe, and
+    /// the sound that leaves it. The second is the first added to the incident
+    /// wave — the transmission $(1 + R) p^+$ of the type docs — scaled by
+    /// [`radiation_gain`].
+    #[inline(always)]
+    pub fn step(&mut self, incident: f32) -> (f32, f32) {
+        let reflected = self.reflect(incident);
+        (reflected, (incident + reflected) * self.gain)
     }
 
     /// Clears the filter state.
