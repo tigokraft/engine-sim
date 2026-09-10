@@ -146,6 +146,63 @@ impl ViscothermalLoss {
 }
 
 // ---------------------------------------------------------------------------
+// Valve-end termination
+// ---------------------------------------------------------------------------
+
+/// Acoustic boundary condition at the exhaust valve end of a primary runner.
+///
+/// Models the interface between the cylinder combustion chamber and the exhaust runner.
+/// When the exhaust valve is shut ($A_v = 0$), the boundary is acoustically rigid
+/// with pressure reflection coefficient $r = +1.0$. As the valve opens with effective
+/// area $A_v$, the reflection coefficient glides according to:
+///
+/// $$r = \frac{A_p - A_v}{A_p + A_v}$$
+///
+/// allowing wave energy to transmit into the cylinder cavity. Blowdown excitation
+/// pulses are injected into the forward path at this boundary:
+///
+/// $$p^+ = p_{\text{excitation}} + r \cdot p^-$$
+#[derive(Debug, Clone, Copy)]
+pub struct ValveTermination {
+    pipe_area: f32,
+    reflection: f32,
+}
+
+impl ValveTermination {
+    /// Constructs a valve termination for a pipe of area $A_p$ [m^2].
+    pub fn new(pipe_area: f64) -> Self {
+        Self {
+            pipe_area: pipe_area.max(1e-7) as f32,
+            reflection: 1.0,
+        }
+    }
+
+    /// Updates the reflection coefficient from the valve effective flow area $A_v$ [m^2].
+    pub fn set_effective_area(&mut self, effective_area: f64) {
+        let av = effective_area.max(0.0) as f32;
+        let ap = self.pipe_area;
+        self.reflection = if av <= 1e-9 {
+            1.0
+        } else {
+            ((ap - av) / (ap + av)).clamp(-1.0, 1.0)
+        };
+    }
+
+    /// Reflection coefficient currently in effect [-].
+    pub fn reflection(&self) -> f32 {
+        self.reflection
+    }
+
+    /// Computes the forward-travelling wave entering the runner:
+    /// - `excitation`: blowdown pressure pulse injected at the port [Pa].
+    /// - `returning_wave`: backward wave arriving at the valve boundary ($p^-(0)$) [Pa].
+    #[inline(always)]
+    pub fn step(&self, excitation: f32, returning_wave: f32) -> f32 {
+        excitation + self.reflection * returning_wave
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Waveguide pipe
 // ---------------------------------------------------------------------------
 
