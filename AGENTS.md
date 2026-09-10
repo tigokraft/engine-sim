@@ -45,6 +45,33 @@ Add knock voice and wire it into the mix, plus tests
 Co-Authored-By: Some Model <noreply@example.com>
 ```
 
+## Finishing a stage (mandatory, applies to every model and every tool)
+
+A stage in [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) is a
+contract, not a suggestion. It is finished when **every commit in its Commits
+list exists and every bullet in its Tests section is a real test that runs**.
+Not when the new module compiles.
+
+- **Tick the list.** Before saying a stage is done, read its Commits list and
+  its Tests list back and check each line against `git log` and the test names.
+  The Tests section is usually longer than the Commits list; both are required.
+- **New code must have a caller.** A type that nothing in the shipping path
+  constructs and calls is not finished work, it is scaffolding. Wiring it in is
+  part of the same stage, and the stage is not done until the old thing it
+  replaces is gone from the path.
+- **No dead ports.** Do not allocate a field, a buffer or a pipe the code never
+  reads, and do not pass a hardcoded `0.0` where a real signal belongs. Either
+  connect it or leave it out.
+- **Handle every variant.** When you match on a geometry enum, handle all of it.
+  Silently dropping a variant makes an engine that has one go quiet, and nothing
+  will fail to tell you.
+- **Every commit builds and tests green.** Stage the files a change actually
+  spans, all of them, in one commit. A commit that only builds once the *next*
+  one lands is a broken commit.
+- **Say what you did not do.** If you stop early, run out of room, or decide a
+  bullet is wrong, say so explicitly in your final message and leave the plan
+  alone. Silence reads as completion, and the next person believes it.
+
 ## Code
 
 - SI units everywhere unless the name says otherwise: metres, kilograms, seconds,
