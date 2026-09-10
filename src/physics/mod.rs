@@ -10,4 +10,7 @@
 pub mod cylinder;
 pub mod engine_block;
 pub mod intake;
+pub mod plumbing;
 pub mod thermodynamics;
+
+pub use plumbing::*;

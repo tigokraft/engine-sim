@@ -19,7 +19,6 @@
 //! they take Kelvin and metres and hand back the seconds and Hz the filters
 //! want.
 
-use std::f32::consts::PI;
 use std::f32::consts::TAU;
 
 /// Anything below this magnitude is flushed to zero.
@@ -659,37 +658,7 @@ pub fn helmholtz_frequency(
 // Composite exhaust elements
 // ---------------------------------------------------------------------------
 
-/// Dimensions of a Helmholtz muffler chamber [SI].
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MufflerGeometry {
-    /// Cross-sectional area of the neck [m^2].
-    pub neck_area: f64,
-    /// Volume of the resonating chamber [m^3].
-    pub chamber_volume: f64,
-    /// Effective length of the neck [m].
-    pub neck_length: f64,
-    /// Sharpness of the cavity resonance [-].
-    pub q: f64,
-    /// How much of the output comes from the resonant path, `0..=1` [-].
-    pub resonant_mix: f64,
-    /// Tailpipe radiation cutoff [Hz].
-    pub tailpipe_cutoff: f64,
-}
-
-impl Default for MufflerGeometry {
-    /// A road-car rear muffler: roughly 8 litres of chamber behind a 50 mm neck,
-    /// which lands the cavity near 120 Hz on hot gas.
-    fn default() -> Self {
-        Self {
-            neck_area: PI as f64 * 0.025f64.powi(2),
-            chamber_volume: 8.0e-3,
-            neck_length: 0.10,
-            q: 1.6,
-            resonant_mix: 0.62,
-            tailpipe_cutoff: 3_200.0,
-        }
-    }
-}
+pub use crate::physics::plumbing::MufflerGeometry;
 
 /// The muffler: a Helmholtz bandpass in parallel with a damped through path.
 ///
