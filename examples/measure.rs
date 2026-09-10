@@ -40,7 +40,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use rust_engine_sim::analysis::orders::{self, half_orders, OrderTable, Peak};
-use rust_engine_sim::analysis::render::{Continuity, Render, RenderCost, RenderPlan, PHYSICS_HZ};
+use rust_engine_sim::analysis::render::{
+    Continuity, Render, RenderCost, RenderPlan, OFFLINE_RATE, PHYSICS_HZ,
+};
 use rust_engine_sim::analysis::script;
 use rust_engine_sim::bench::EnginePreset;
 
@@ -550,7 +552,13 @@ fn index_markdown(all: &[Measured]) -> String {
         out,
         "Unlike everything else here these figures are a property of the machine \
          that ran them, not of the build: compare them within one run, and \
-         re-record them on the same machine when comparing across stages.\n"
+         re-record them on the same machine when comparing across stages. This \
+         set was taken on {} {}, release profile, at {:.0} kHz with the solver \
+         at {:.0} Hz.\n",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        OFFLINE_RATE / 1e3,
+        PHYSICS_HZ,
     );
     let _ = write!(out, "| Engine |");
     if let Some(first) = all.first() {
