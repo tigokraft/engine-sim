@@ -3431,6 +3431,131 @@ mod tests {
     }
 
     #[test]
+    fn mechanical_event_rates_track_their_orders() {
+        let cylinders = 8;
+        let voice = MechanicalVoice::new(FS);
+
+        for rpm in [800.0, 2400.0, 4800.0] {
+            let crank_hz = (rpm / 60.0) as f32;
+            let cycle_hz = (rpm / 120.0) as f32;
+
+            let check_source = |src: &Option<ImpulsiveSource>, expected_order: f32, name: &str| {
+                let s = src.as_ref().unwrap_or_else(|| panic!("missing {name}"));
+                let eff_order = s.effective_order(cylinders);
+                assert!(
+                    (eff_order - expected_order).abs() < 1e-4,
+                    "{name} effective order {eff_order} != expected {expected_order}"
+                );
+                let eff_hz = s.effective_hz(cycle_hz, cylinders);
+                let expected_hz = expected_order * crank_hz;
+                assert!(
+                    (eff_hz - expected_hz).abs() < 1e-3,
+                    "{name} at {rpm} rpm has rate {eff_hz} Hz != expected {expected_hz} Hz"
+                );
+            };
+
+            check_source(&voice.intake_valve, 4.0, "intake_valve");
+            check_source(&voice.exhaust_valve, 4.0, "exhaust_valve");
+            check_source(&voice.piston_slap, 4.0, "piston_slap");
+            check_source(&voice.injector, 4.0, "injector");
+            check_source(&voice.timing_chain, 19.0, "timing_chain");
+            check_source(&voice.gear_whine, 31.0, "gear_whine");
+            check_source(&voice.accessory, 1.37, "accessory");
+        }
+    }
+
+    #[test]
+    fn accessory_order_is_incommensurate_with_crank() {
+        let voice = MechanicalVoice::new(FS);
+        let accessory = voice.accessory.expect("accessory drive must exist");
+        let order = accessory.effective_order(8);
+
+        // An integer or half-integer order repeats after 1 or 2 crank revolutions.
+        // A non-integer order like 1.37 has fractional remainder after 1 and 2 revs.
+        let rev1_events = order;
+        let rev2_events = order * 2.0;
+        assert!(
+            (rev1_events - rev1_events.round()).abs() > 0.05,
+            "accessory order {order} is integer"
+        );
+        assert!(
+            (rev2_events - rev2_events.round()).abs() > 0.05,
+            "accessory order {order} is commensurate with 720 deg cycle"
+        );
+
+        // Within one 720 degree cycle, events occur at distinct crank phases.
+        let dtheta = 360.0 / order;
+        let mut angles = Vec::new();
+        let mut theta = 0.0f32;
+        while theta < 720.0 {
+            angles.push(theta);
+            theta += dtheta;
+        }
+        for i in 0..angles.len() {
+            for j in (i + 1)..angles.len() {
+                let diff = (angles[i] - angles[j]).abs();
+                assert!(
+                    (diff % 360.0) > 1.0,
+                    "accessory events coincided at crank phase: {} and {}",
+                    angles[i],
+                    angles[j]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn piston_slap_scales_with_pressure_and_vanishes_on_spark_cut() {
+        let voice = MechanicalVoice::new(FS);
+        let slap = voice.piston_slap.as_ref().unwrap();
+        let intake = voice.intake_valve.as_ref().unwrap();
+        let cycle_hz = 1000.0 / 120.0;
+
+        let snap_normal = EngineSnapshot {
+            rpm: 1000.0,
+            friction_mep: REFERENCE_FMEP,
+            peak_cylinder_pressure: REFERENCE_PEAK_PRESSURE,
+            spark_cut: false,
+            ..EngineSnapshot::default()
+        };
+        let slap_gain_normal = slap.level_law.compute(&snap_normal, cycle_hz) * slap.base_level;
+        let intake_gain_normal =
+            intake.level_law.compute(&snap_normal, cycle_hz) * intake.base_level;
+        assert!(slap_gain_normal > 0.0, "slap must be live when firing");
+        assert!(intake_gain_normal > 0.0, "intake must be live");
+
+        // High pressure raises piston slap proportionally
+        let snap_high = EngineSnapshot {
+            rpm: 1000.0,
+            friction_mep: REFERENCE_FMEP,
+            peak_cylinder_pressure: REFERENCE_PEAK_PRESSURE * 2.0,
+            spark_cut: false,
+            ..EngineSnapshot::default()
+        };
+        let slap_gain_high = slap.level_law.compute(&snap_high, cycle_hz) * slap.base_level;
+        assert!(
+            (slap_gain_high - 2.0 * slap_gain_normal).abs() < 1e-3,
+            "slap should scale with peak pressure: {slap_gain_high} vs 2 * {slap_gain_normal}"
+        );
+
+        // Spark cut completely silences piston slap, but valves continue seating
+        let snap_cut = EngineSnapshot {
+            rpm: 1000.0,
+            friction_mep: REFERENCE_FMEP,
+            peak_cylinder_pressure: REFERENCE_PEAK_PRESSURE,
+            spark_cut: true,
+            ..EngineSnapshot::default()
+        };
+        let slap_gain_cut = slap.level_law.compute(&snap_cut, cycle_hz) * slap.base_level;
+        let intake_gain_cut = intake.level_law.compute(&snap_cut, cycle_hz) * intake.base_level;
+        assert_eq!(slap_gain_cut, 0.0, "piston slap must vanish on spark cut");
+        assert!(
+            intake_gain_cut > 0.0,
+            "valve seatings must continue on spark cut"
+        );
+    }
+
+    #[test]
     fn mechanical_floor_scales_with_friction() {
         let level_at = |fmep: f32| {
             let mut config = SynthConfig::cross_plane_v8(FS);
