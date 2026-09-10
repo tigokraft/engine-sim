@@ -1540,6 +1540,11 @@ impl ExhaustNetwork {
         }
     }
 
+    /// Number of banks the network radiates from.
+    pub fn bank_count(&self) -> usize {
+        self.bank_count
+    }
+
     /// Updates valve effective flow areas for all cylinders.
     pub fn set_valve_areas(&mut self, valve_areas: &[f64]) {
         for (v, &area) in self.valves.iter_mut().zip(valve_areas.iter()) {
@@ -1547,14 +1552,30 @@ impl ExhaustNetwork {
         }
     }
 
-    /// Steps the entire waveguide network by one audio sample:
-    /// - `excitations`: slice of blowdown pressure pulse injections per cylinder.
-    ///
-    /// Returns stereo radiated pressure `(left_radiated, right_radiated)`.
+    /// Hands a bank's upstream-travelling wave back toward its collector: down
+    /// the pre-crossover pipe where the geometry gave one, and through the
+    /// one-sample connector where it did not.
     #[inline(always)]
-    pub fn step(&mut self, excitations: &[f32]) -> (f32, f32) {
+    fn push_upstream(&mut self, bank: usize, upstream: f32, crossed: bool) {
+        if crossed {
+            let forward = self.bank_trans[bank];
+            self.pre_cross_pipes[bank].push_inputs(forward, upstream);
+        } else {
+            self.collector_returns[bank] = upstream;
+        }
+    }
+
+    /// Steps the entire waveguide network by one audio sample:
+    /// - `excitations`: blowdown pressure pulse injected at each cylinder's port.
+    /// - `radiated`: filled with the pressure radiated from each bank's mouth.
+    ///
+    /// A bank is a tailpipe, so the caller gets one radiated signal per bank and
+    /// decides where each one sits in the image. Imaging is not the network's
+    /// business, and folding it to stereo here would silently drop the outer
+    /// banks of anything with more than two.
+    #[inline(always)]
+    pub fn step(&mut self, excitations: &[f32], radiated: &mut [f32]) {
         let n_cyl = self.primaries.len();
-        let n_banks = self.bank_count.min(2);
         let crossed = !self.pre_cross_pipes.is_empty();
 
         // 1. Read the pipes running from the collectors to the crossover first,
@@ -1604,9 +1625,12 @@ impl ExhaustNetwork {
             }
         }
 
-        // 4. Crossover. The banks that reach it arrive through the pre-crossover
-        //    pipes when there are any; every other bank runs straight through.
-        if self.bank_count > 1 {
+        // 4. Crossover. It links the first two banks; anything beyond them — the
+        //    outer banks of a W engine — has no partner to cross with and runs
+        //    straight through. Either way the wave arrives through the
+        //    pre-crossover pipe when the geometry described one.
+        let linked = if self.bank_count > 1 { 2 } else { 0 };
+        if linked == 2 {
             let (in0, in1) = if crossed {
                 (self.pre_cross_down[0], self.pre_cross_down[1])
             } else {
@@ -1617,23 +1641,23 @@ impl ExhaustNetwork {
                     .step(in0, in1, self.chain_returns[0][0], self.chain_returns[1][0]);
             self.bank_down[0] = b0_down;
             self.bank_down[1] = b1_down;
-            if crossed {
-                self.pre_cross_pipes[0].push_inputs(self.bank_trans[0], b0_up);
-                self.pre_cross_pipes[1].push_inputs(self.bank_trans[1], b1_up);
+            self.push_upstream(0, b0_up, crossed);
+            self.push_upstream(1, b1_up, crossed);
+        }
+        for b in linked..self.bank_count {
+            self.bank_down[b] = if crossed {
+                self.pre_cross_down[b]
             } else {
-                self.collector_returns[0] = b0_up;
-                self.collector_returns[1] = b1_up;
-            }
-        } else {
-            self.bank_down[0] = self.bank_trans[0];
-            self.collector_returns[0] = self.chain_returns[0][0];
+                self.bank_trans[b]
+            };
+            let upstream = self.chain_returns[b][0];
+            self.push_upstream(b, upstream, crossed);
         }
 
         // 5. Silencer chain, tailpipe and mouth. Each element hands its upstream
         //    reflection to the interface above it, so what a silencer or the open
         //    mouth sends back reaches the collector and the primaries beyond it.
-        let mut radiated = [0.0f32; 2];
-        for (b, rad) in radiated[..n_banks].iter_mut().enumerate() {
+        for b in 0..self.bank_count {
             let mut sig = self.bank_down[b];
             let n_sil = self.silencers[b].len();
             for k in 0..n_sil {
@@ -1647,10 +1671,10 @@ impl ExhaustNetwork {
             let (p_mouth_refl, p_mouth_rad) = self.mouths[b].step(p_tail_exit);
             self.tailpipes[b].push_inputs(sig, p_mouth_refl);
             self.chain_returns[b][n_sil] = p_tail_up;
-            *rad = p_mouth_rad;
+            if let Some(slot) = radiated.get_mut(b) {
+                *slot = p_mouth_rad;
+            }
         }
-
-        (radiated[0], radiated[1])
     }
 
     /// Clears internal state across the entire network.
