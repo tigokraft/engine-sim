@@ -23,7 +23,7 @@
 //! Audio processing runs in `f32` at the stream sample rate without heap allocation
 //! in the audio callback.
 
-use crate::audio::filters::{runner_delay_seconds, speed_of_sound, DelayLine, Smoothed};
+use crate::audio::filters::{runner_delay_seconds, speed_of_sound, DelayLine, OnePole, Smoothed};
 
 /// Coldest gas temperature used to size delay line buffers [K].
 ///
@@ -34,6 +34,120 @@ pub const COLDEST_EXHAUST_TEMPERATURE_K: f32 = 250.0;
 
 /// Reference atmospheric pressure for gas density estimation [Pa].
 pub const REFERENCE_PRESSURE_PA: f32 = 101_325.0;
+
+/// Typical kinematic viscosity of exhaust gas at reference conditions [m^2 / s].
+pub const EXHAUST_KINEMATIC_VISCOSITY: f32 = 8.4e-5;
+
+/// Prandtl number of air and lean combustion gas [-].
+pub const EXHAUST_PRANDTL_NUMBER: f32 = 0.71;
+
+/// Effective turbulent boundary layer enhancement factor in corrugated/hot exhaust pipe.
+const BOUNDARY_LAYER_TURBULENCE_FACTOR: f32 = 16.0;
+
+// ---------------------------------------------------------------------------
+// Viscothermal wall loss
+// ---------------------------------------------------------------------------
+
+/// Analytic viscothermal acoustic attenuation per metre [Np/m]:
+///
+/// $$\alpha(f) = \frac{1}{a c} \sqrt{\pi f \nu} \left(1 + \frac{\gamma - 1}{\sqrt{Pr}}\right)$$
+#[inline]
+pub fn viscothermal_alpha(
+    frequency: f64,
+    radius: f64,
+    speed_of_sound: f64,
+    kinematic_viscosity: f64,
+    gamma: f64,
+    prandtl: f64,
+) -> f64 {
+    let num = (std::f64::consts::PI * frequency.max(0.0) * kinematic_viscosity.max(1e-9)).sqrt();
+    let thermal = 1.0 + (gamma - 1.0) / prandtl.max(0.1).sqrt();
+    (1.0 / (radius.max(1e-4) * speed_of_sound.max(1.0))) * num * thermal
+}
+
+/// Derives the one-pole lowpass loss cutoff [Hz] for a pipe segment of length $L$ and radius $a$.
+///
+/// Equating the total boundary layer attenuation $\alpha(f_c) L$ to the filter's
+/// $-3\text{ dB}$ point ($\ln\sqrt{2} \approx 0.3466$) yields a cutoff scaling as:
+///
+/// $$f_c \propto \frac{a^2 c^2}{L^2}$$
+///
+/// Under this scaling, a 38 mm primary runner has its loss cutoff two octaves
+/// below an equivalent 76 mm pipe, making the narrow pipe substantially duller.
+#[inline]
+pub fn viscothermal_loss_cutoff_hz(
+    radius: f32,
+    length: f32,
+    speed_of_sound: f32,
+    gamma: f32,
+) -> f32 {
+    let nu_eff = EXHAUST_KINEMATIC_VISCOSITY * BOUNDARY_LAYER_TURBULENCE_FACTOR;
+    let thermal = 1.0 + (gamma - 1.0) / EXHAUST_PRANDTL_NUMBER.sqrt();
+    let denom = length.max(0.02) * (std::f32::consts::PI * nu_eff).sqrt() * thermal;
+    let sqrt_fc = (0.3466 * radius.max(1e-4) * speed_of_sound) / denom.max(1e-6);
+    let fc = sqrt_fc * sqrt_fc;
+    fc.clamp(150.0, 18_000.0)
+}
+
+/// Viscothermal boundary layer loss filter.
+///
+/// Implemented as a one-pole lowpass filter inside each waveguide directional path.
+#[derive(Debug, Clone, Copy)]
+pub struct ViscothermalLoss {
+    filter: OnePole,
+    cutoff_hz: f32,
+}
+
+impl ViscothermalLoss {
+    /// Creates a new loss filter for a pipe of given radius $a$ and length $L$.
+    pub fn new(
+        radius: f32,
+        length: f32,
+        speed_of_sound: f32,
+        gamma: f32,
+        sample_rate: f32,
+    ) -> Self {
+        let cutoff_hz = viscothermal_loss_cutoff_hz(radius, length, speed_of_sound, gamma);
+        Self {
+            filter: OnePole::new(sample_rate, cutoff_hz),
+            cutoff_hz,
+        }
+    }
+
+    /// Retunes the loss cutoff for current sound speed and specific heat ratio.
+    pub fn tune(
+        &mut self,
+        radius: f32,
+        length: f32,
+        speed_of_sound: f32,
+        gamma: f32,
+        sample_rate: f32,
+    ) {
+        let cutoff_hz = viscothermal_loss_cutoff_hz(radius, length, speed_of_sound, gamma);
+        self.cutoff_hz = cutoff_hz;
+        self.filter.set_cutoff(sample_rate, cutoff_hz);
+    }
+
+    /// Filters one travelling sample.
+    #[inline(always)]
+    pub fn process(&mut self, x: f32) -> f32 {
+        self.filter.process(x)
+    }
+
+    /// Current filter cutoff frequency [Hz].
+    pub fn cutoff_hz(&self) -> f32 {
+        self.cutoff_hz
+    }
+
+    /// Clears internal state.
+    pub fn reset(&mut self) {
+        self.filter.reset();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Waveguide pipe
+// ---------------------------------------------------------------------------
 
 /// A bidirectional cylindrical acoustic pipe section.
 ///
@@ -47,6 +161,8 @@ pub struct WaveguidePipe {
     area: f32,
     forward_line: DelayLine,
     backward_line: DelayLine,
+    forward_loss: ViscothermalLoss,
+    backward_loss: ViscothermalLoss,
     delay_samples: Smoothed,
     admittance: f32,
     sample_rate: f32,
@@ -67,6 +183,7 @@ impl WaveguidePipe {
     ) -> Self {
         let length_f32 = length.max(0.001) as f32;
         let area_f32 = area.max(1e-7) as f32;
+        let radius_f32 = (area_f32 / std::f32::consts::PI).sqrt();
 
         let max_delay_sec = runner_delay_seconds(
             length_f32,
@@ -83,11 +200,16 @@ impl WaveguidePipe {
         let rho = REFERENCE_PRESSURE_PA / (gas_constant * temperature.max(1.0));
         let admittance = area_f32 / (rho * c).max(1e-4);
 
+        let forward_loss = ViscothermalLoss::new(radius_f32, length_f32, c, gamma, sample_rate);
+        let backward_loss = ViscothermalLoss::new(radius_f32, length_f32, c, gamma, sample_rate);
+
         Self {
             length: length_f32,
             area: area_f32,
             forward_line: DelayLine::with_max_delay(max_delay_samples),
             backward_line: DelayLine::with_max_delay(max_delay_samples),
+            forward_loss,
+            backward_loss,
             // 40 ms time constant matches the engine temperature glide: fast enough
             // to follow throttle snaps, slow enough that fractional interpolation
             // never produces audible doppler pitch clicks.
@@ -97,7 +219,7 @@ impl WaveguidePipe {
         }
     }
 
-    /// Retunes propagation delay and acoustic admittance for current gas state.
+    /// Retunes propagation delay, acoustic admittance, and wall losses for current gas state.
     pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
         let delay_sec = runner_delay_seconds(self.length, gamma, gas_constant, temperature);
         let samples = delay_sec * self.sample_rate;
@@ -107,6 +229,12 @@ impl WaveguidePipe {
         let c = speed_of_sound(gamma, gas_constant, temperature);
         let rho = REFERENCE_PRESSURE_PA / (gas_constant * temperature.max(1.0));
         self.admittance = self.area / (rho * c).max(1e-4);
+
+        let r = self.radius();
+        self.forward_loss
+            .tune(r, self.length, c, gamma, self.sample_rate);
+        self.backward_loss
+            .tune(r, self.length, c, gamma, self.sample_rate);
     }
 
     /// Length of the pipe section [m].
@@ -139,14 +267,21 @@ impl WaveguidePipe {
         self.delay_samples.value() / self.sample_rate
     }
 
-    /// Reads waves arriving at the boundaries from inside the pipe:
+    /// Wall loss filter cutoff [Hz].
+    pub fn loss_cutoff_hz(&self) -> f32 {
+        self.forward_loss.cutoff_hz()
+    }
+
+    /// Reads waves arriving at the boundaries from inside the pipe with viscothermal wall loss applied:
     /// - `out_port0`: wave emerging at port 0 from the backward delay line ($p^-(0)$).
     /// - `out_port1`: wave emerging at port 1 from the forward delay line ($p^+(L)$).
     #[inline(always)]
     pub fn read_outputs(&mut self) -> (f32, f32) {
         let d = self.delay_samples.next_value();
-        let out0 = self.backward_line.read(d);
-        let out1 = self.forward_line.read(d);
+        let raw0 = self.backward_line.read(d);
+        let raw1 = self.forward_line.read(d);
+        let out0 = self.backward_loss.process(raw0);
+        let out1 = self.forward_loss.process(raw1);
         (out0, out1)
     }
 
@@ -163,6 +298,8 @@ impl WaveguidePipe {
     pub fn reset(&mut self) {
         self.forward_line.reset();
         self.backward_line.reset();
+        self.forward_loss.reset();
+        self.backward_loss.reset();
     }
 }
 
