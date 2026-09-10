@@ -1224,3 +1224,351 @@ test a dead cylinder lopes at the cycle rate
 > limiter must produce no backfires while a spark-cut limiter does; decel fuel
 > cut-off must silence combustion while the mechanical floor continues; a dead
 > cylinder must show as a missing order and a lope at the cycle rate.
+
+---
+
+# Stage 13 — Induction hardware beyond the turbo
+
+**Goal.** The other compressors, and the valves that make noise.
+
+**Why.** `Induction` has exactly two variants, and `TurboVoice` is the only
+compressor in the crate. Several very recognisable sounds are simply absent.
+
+**Files.** `src/audio/mod.rs` (`Induction`), `src/audio/dsp.rs` (new voices),
+`src/bench.rs` (fit them to presets).
+
+**Design.**
+
+- **Roots / twin-screw supercharger.** Its whine is a **crank** order — belt ratio
+  times rotor lobe count — not a shaft order. No lag, rises perfectly with rpm: a
+  completely different sound from a turbo, but the same code shape as `TurboVoice`.
+- **Centrifugal supercharger.** Shaft-order like a turbo, but belt-locked, so it
+  has a turbo's pitch behaviour with none of its lag.
+- **Blow-off / dump valve.** A broadband whoosh on lift, distinct from the surge
+  flutter that exists today, and triggered by the same closed-throttine-with-boost
+  condition.
+- **Wastegate chatter.** A rattling flutter at high boost as the gate hunts.
+- **Exhaust cutout / active valve flap.** A step change in the silencer chain —
+  trivial once Stage 5's network is geometry-driven, since it is a bypass junction
+  opening.
+- **Anti-lag**, once Stage 12's retard exists: fuel and spark into the exhaust,
+  keeping the turbine lit. Loud, and it falls out of two existing mechanisms.
+
+**Tests.**
+
+- Supercharger whine tracks crank speed exactly and shows no spool lag.
+- A turbo's whistle still lags; the two are distinguishable in an order analysis.
+- The dump valve fires on lift with boost present and never without boost.
+- Opening the cutout raises high-order content and lowers back pressure.
+
+**Commits.**
+
+```
+add roots supercharger voice at crank order
+add centrifugal supercharger voice
+add blow-off valve
+add wastegate chatter
+add exhaust cutout as a bypass junction
+add anti-lag from spark retard
+fit induction hardware to the presets
+test supercharger whine has no lag
+```
+
+**Prompt.**
+
+> Implement Stage 13 of `docs/IMPLEMENTATION_PLAN.md`. Read it and `AGENTS.md`;
+> one-line granular commits, no trailers.
+>
+> `Induction` in `src/audio/mod.rs` has only naturally-aspirated and turbocharged
+> variants. Add the rest: a Roots/twin-screw supercharger whose whine is locked to
+> a **crank** order (belt ratio times lobe count) with no spool lag — structurally
+> like `TurboVoice` but driven from engine speed, not shaft speed — a centrifugal
+> supercharger (shaft-order but belt-locked), a blow-off valve as a broadband
+> whoosh on lift distinct from the existing surge flutter, wastegate chatter, and
+> an exhaust cutout implemented as a bypass junction in the Stage 5 network. If
+> Stage 12 is in, add anti-lag from spark retard plus exhaust fuelling.
+>
+> The test that separates them: order analysis must show the supercharger tracking
+> crank speed with no lag while the turbo lags. Fit each to the presets that would
+> plausibly carry it.
+
+---
+
+# Stage 14 — Diesel and other combustion topologies
+
+**Goal.** An engine whose sound is dominated by the structural path rather than
+the pipe.
+
+**Why.** The catalogue is six petrol engines. A diesel is a genuinely different
+acoustic object: no spark, compression ignition with a premixed spike giving a
+very high `dP/dtheta`, and the characteristic clatter comes from that pressure
+rise exciting the structure — not from the exhaust. It is the best possible test
+that Stage 8's structural path is real.
+
+**Files.** `src/physics/thermodynamics.rs` (two-stage heat release),
+`src/bench.rs` (presets), `src/audio/structure.rs` (already the mechanism).
+
+**Design.**
+
+- **Two-stage Wiebe**: a short premixed burn superimposed on a long diffusion
+  burn, with an ignition-delay period computed rather than assumed — the knock
+  model's Arrhenius integral is the same physics.
+- Injector noise dominant (Stage 2), high compression ratio, turbocharged
+  (Stage 13), low redline, huge mass.
+- Worth adding alongside: **two-stroke** (port timing, no valve events, expansion
+  chamber that genuinely works acoustically) and a **big single or twin** where
+  the crank ripple of Stage 1c becomes the dominant character.
+
+**Tests.**
+
+- Two-stage heat release produces a pressure trace with the premixed spike ahead
+  of the diffusion hump.
+- Ignition delay lengthens with lower compression temperature.
+- Radiated sound is dominated by the structural path, unlike a petrol preset
+  measured the same way.
+
+**Commits.**
+
+```
+add two-stage diesel heat release
+compute ignition delay from arrhenius integral
+add diesel preset
+add two-stroke port timing
+add big single preset
+test diesel radiates mostly through the structure
+```
+
+**Prompt.**
+
+> Implement Stage 14 of `docs/IMPLEMENTATION_PLAN.md`. Read it, Stage 8 and
+> `AGENTS.md`. Granular one-line commits, no trailers.
+>
+> Add compression ignition: a two-stage Wiebe (short premixed spike plus long
+> diffusion burn) with an ignition delay computed from an Arrhenius integral rather
+> than assumed — the same physics `KnockModel` already uses. Then add a diesel
+> preset with high compression, a turbo, a low redline, a heavy block and dominant
+> injector noise, and if the effort is small, a two-stroke with port timing and a
+> real expansion chamber plus a big single where Stage 1's crank ripple dominates.
+>
+> The test that validates Stage 8 as much as this stage: measure the radiated
+> output with the exhaust network muted and with the structural path muted, and
+> show the diesel is structure-dominated where a petrol preset is pipe-dominated.
+
+---
+
+# Stage 15 — Physics-grade pipe solver
+
+**Goal.** Replace the linear-acoustic wave splitter in the physics with a solver
+valid at the amplitudes an exhaust actually reaches.
+
+**Why.** `AcousticPipe::integrate` injects `p' = rho c u` and propagates with a
+scalar damping factor. At blowdown the pressure ratio exceeds 2 and Mach reaches
+0.3–0.6, where that is the wrong equation. This is the reference-grade answer, and
+it is deliberately last: Stages 5 and 10 already capture most of what is audible,
+so this is for correctness of the *boundary condition* the solver feeds back into
+the cylinder.
+
+**Files.** `src/physics/engine_block.rs` (`AcousticPipe`), possibly a new
+`src/physics/gasdyn.rs`.
+
+**Design.** Method of Characteristics on Riemann variables, or a TVD
+finite-volume Euler solver — what GT-Power and Ricardo WAVE do. What it buys:
+shock formation, mean-flow convection as a consequence rather than a correction,
+temperature stratification along the pipe, and correct partial reflection at
+junctions under flow. Keep unit-CFL stepping and the existing accumulator idiom so
+frame-rate independence survives.
+
+Keep the audio-rate waveguide separate. The two have different jobs: the physics
+pipe is a boundary condition at control rate in `f64`; the audio network is
+radiation at sample rate in `f32`. They must read **one** geometry (Stage 3) and
+should be asserted against each other, not merged.
+
+**Tests.**
+
+- A Sod shock-tube problem matches the analytic solution.
+- Linear-amplitude behaviour reproduces the current model within tolerance —
+  the new solver must not lose the old correct case.
+- A finite-amplitude pulse steepens into a shock over the predicted distance.
+- Mass, momentum and energy are conserved to solver tolerance over 10^4 steps.
+- The audio network and the physics solver agree on a pipe's fundamental within
+  a percent at low amplitude.
+
+**Commits.**
+
+```
+add riemann variable gas dynamics
+solve the pipe by method of characteristics
+test sod shock tube against theory
+reproduce linear acoustics at low amplitude
+convect junction reflection with mean flow
+test the audio and physics pipes agree
+```
+
+**Prompt.**
+
+> Implement Stage 15 of `docs/IMPLEMENTATION_PLAN.md`. Read it and `AGENTS.md`.
+> Granular one-line commits, no trailers.
+>
+> `AcousticPipe::integrate` (`src/physics/engine_block.rs:683`) is linear
+> acoustics — it injects `p' = rho c u` and propagates with a scalar damping
+> factor. Exhaust blowdown runs at pressure ratios above 2 and Mach 0.3–0.6, where
+> that model does not hold. Replace it with Method of Characteristics on Riemann
+> variables (or a TVD finite-volume Euler solver), keeping the unit-CFL stepping
+> and the accumulator so frame-rate independence survives.
+>
+> Two hard requirements. First, it must reproduce the present model at low
+> amplitude — do not lose the case that was already right. Second, verify against
+> a Sod shock tube with the analytic solution. Also assert conservation over 10^4
+> steps and that a finite-amplitude pulse steepens over the predicted distance.
+>
+> Do **not** merge this with the audio-rate waveguide. They have different jobs:
+> `f64` control-rate boundary condition versus `f32` sample-rate radiation. They
+> share the Stage 3 geometry and should be cross-checked against each other on a
+> low-amplitude pipe fundamental.
+
+---
+
+# Stage 16 — Calibration against recordings
+
+**Goal.** Turn "physically motivated" into "measured against reality".
+
+**Why.** `engine.wav` exists in this repo only as an *output* target. The
+strongest available realism tool is to use real recordings as *input*: order-track
+a reference sweep, and compare.
+
+**Files.** `src/analysis/orders.rs` (from Stage 0), new
+`examples/calibrate.rs`, `docs/measurements/`.
+
+**Design.**
+
+- Order-track a reference recording with a known rpm curve: extract each engine
+  order's amplitude in dB versus rpm, plus the long-term average spectrum to find
+  where the pipe resonances actually sit.
+- Compare against the synth on the same script. The comparison metrics that
+  matter: **order balance** (is order 4 dominant where it should be, is the
+  half-order content right), **resonance placement**, and **noise-floor tilt**.
+- Where they disagree, the fix is a *geometry* correction — a primary length, a
+  chamber volume, a mouth radius — never a new gain constant. That constraint is
+  what keeps the model physical.
+- Record every calibration in `docs/measurements/` with the recording it came
+  from, so a later regression is attributable.
+
+**Tests.**
+
+- Synth order spectrum matches a reference within a stated dB tolerance across
+  the sweep.
+- Resonance placement matches within a stated percentage.
+- A CI-friendly fixed sweep per preset regresses timbre, not just crashes.
+
+**Commits.**
+
+```
+add reference order extraction
+add calibrate example
+record reference measurements
+calibrate primary lengths against the reference
+calibrate chamber volumes against the reference
+add timbre regression to the test suite
+```
+
+**Prompt.**
+
+> Implement Stage 16 of `docs/IMPLEMENTATION_PLAN.md`. Read it, Stage 0 and
+> `AGENTS.md`. Granular one-line commits, no trailers.
+>
+> Build the calibration loop. Extend `src/analysis/orders.rs` to order-track a
+> *reference recording* with a supplied rpm curve, add `examples/calibrate.rs` that
+> renders the matching synth script and prints a per-order dB comparison plus
+> resonance placement, and record the results under `docs/measurements/`.
+>
+> One rule, and it is the point of the stage: when the synth disagrees with the
+> reference, fix a **geometric** parameter — primary length, chamber volume, mouth
+> radius — never add a gain or EQ constant. If a disagreement cannot be explained
+> geometrically, write that down in the measurement notes as an open question
+> instead of papering over it.
+>
+> Finish by adding a fixed-sweep timbre regression to the test suite so future
+> changes are caught as spectral drift, not just as crashes.
+
+---
+
+# Appendix A — Formula reference
+
+Everything the stages assert against, in one place.
+
+```
+speed of sound            c = sqrt(gamma R T)
+pipe fundamental          f1 = c / (4 L)                      (closed-open)
+with end correction       f1 = c / (4 (L + delta))
+  unflanged               delta = 0.6133 a
+  flanged                 delta = 0.8216 a
+with mean flow            f1 = c (1 - M^2) / (4 L)            M = u/c
+temperature scaling       f2/f1 = sqrt(T2/T1)
+
+junction (N pipes)        Y_i = A_i / (rho c)
+                          p_J = 2 sum(Y_i p_i+) / sum(Y_i)
+                          p_i- = p_J - p_i+
+two-pipe reflection       r = (A1 - A2) / (A1 + A2)
+
+expansion chamber TL      TL = 10 log10[1 + (1/4)(m - 1/m)^2 sin^2(kL)]
+                          m = A2 / A1
+quarter-wave stub notch   f = c / (4 L_stub)
+helmholtz resonance       f = (c / 2pi) sqrt(A_neck / (V L_neck))
+
+viscothermal loss         alpha = (1/(a c)) sqrt(pi f nu) (1 + (gamma-1)/sqrt(Pr))
+                          alpha ~ sqrt(f) / a
+mouth radiation corner    f_c = c / (2 pi a)                  (ka = 1)
+monopole radiation        p ~ dQ/dt                           (+6 dB/octave)
+
+knock cavity modes        f = rho_mn c / (pi B)
+                          rho_10 = 1.8412  (first circumferential)
+                          rho_20 = 3.0542
+                          rho_01 = 3.8317  (first radial)
+
+firing frequency          f = (rpm / 120) N_cyl               (four-stroke)
+engine order of firing    n = N_cyl / 2                       (four-stroke)
+firing interval per bank  tau = (120 / rpm) / N_cyl_in_bank
+crank dynamics            dw/dt = (T_ind - T_load - T_fric) / I
+torsional resonance       f = (1/2pi) sqrt(k (1/I1 + 1/I2))
+
+orifice noise (dipole)    power ~ u^6, amplitude ~ u^3
+water hammer at IVC       p' ~ d(mdot)/dt                     (column inertia)
+induction rarefaction     p' = -c mdot / A
+
+doppler                   f' = f c / (c - v_r)
+ground path difference    delta = sqrt((hs+hr)^2 + d^2) - sqrt((hs-hr)^2 + d^2)
+distance                  p ~ 1/r
+```
+
+# Appendix B — Budgets and invariants
+
+**CPU.** Record the real-time multiple per preset at Stage 0 and check it after
+every stage that adds DSP. Target: the whole synth under 5 % of one core at
+48 kHz for the largest preset. Stage 5 is the one that will cost — ~17 delay lines
+for a V8 — and Stage 10d's oversampling roughly doubles the nonlinear stages.
+
+**Real-time safety.** No allocation, no lock, no `panic!`, no unbounded loop in
+the audio callback, ever. Every buffer allocated at construction; every new
+`Vec` in a voice is a bug. `EngineSnapshot` stays `Copy` with no indirection
+however many tables Stage 7 adds.
+
+**Numerical safety.** Keep the NaN discipline: `EngineSnapshot::sanitized` guards
+every field, filter loops stay contractions at all frequencies, and any new state
+gets the same treatment. A NaN in a delay line is permanent and renders as
+full-scale noise.
+
+**No tone knobs.** Every stage removes more hand-tuned acoustic constants than it
+adds. If a stage ends with a new coefficient that has no physical name, that is a
+finding to write down, not a value to tune.
+
+# Appendix C — Running things
+
+```bash
+cargo run --release                                    # interactive dashboard
+cargo run --release --example v8_bench                 # pressure and torque profile
+cargo run --release --example engine_audio             # live audio
+cargo run --release --example engine_audio -- --offline out.wav   # deterministic render
+cargo test --release                                   # 183 tests at plan start
+cargo run --release --example measure                  # Stage 0 onward: order tables and CPU
+cargo run --release --example calibrate                # Stage 16 onward: compare to a reference
+```
