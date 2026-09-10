@@ -203,6 +203,110 @@ impl ValveTermination {
 }
 
 // ---------------------------------------------------------------------------
+// Mouth termination (Stage 4 open end)
+// ---------------------------------------------------------------------------
+
+/// End correction for an open circular pipe [m].
+///
+/// Acoustically, an open pipe behaves as if it extends beyond its physical edge
+/// by $\delta$: $0.6133 a$ for an unflanged pipe, $0.8216 a$ for a flanged pipe.
+#[inline]
+pub fn mouth_end_correction(radius: f64, flanged: bool) -> f64 {
+    let factor = if flanged { 0.8216 } else { 0.6133 };
+    factor * radius.max(0.0)
+}
+
+/// Radiation cutoff corner frequency for an open mouth [Hz]:
+///
+/// $$f_c = \frac{c}{2 \pi a}$$
+///
+/// Below $f_c$ ($k a < 1$), sound reflects strongly off the open boundary ($|R| \to 1$).
+/// Above $f_c$ ($k a > 1$), sound beams out and reflection drops toward zero.
+#[inline]
+pub fn mouth_corner_hz(radius: f32, speed_of_sound: f32) -> f32 {
+    speed_of_sound / (std::f32::consts::TAU * radius.max(1e-4))
+}
+
+/// Acoustic open-end mouth termination with Levine–Schwinger reflection fit and monopole radiation.
+///
+/// Implements three acoustic properties derived purely from mouth geometry:
+/// 1. **Reflection**: First-order Levine-Schwinger fit with DC gain $-1$ (pressure release)
+///    and corner frequency $f_c = c / (2 \pi a)$:
+///    $$p^- = - H_{LP}(z) p^+$$
+/// 2. **End correction**: Pipe length is augmented by $\delta = 0.6133 a$ (or $0.8216 a$ flanged).
+/// 3. **Radiated field**: Transmitted component $(1 + R) p^+ = p^+ + p^-$, which naturally
+///    differentiates the low frequencies (+6 dB/octave monopole tilt below $f_c$) and flattens
+///    above $f_c$, scaled by mouth cross-sectional area.
+#[derive(Debug, Clone, Copy)]
+pub struct MouthTermination {
+    radius: f32,
+    area: f32,
+    flanged: bool,
+    filter: OnePole,
+    corner_hz: f32,
+}
+
+impl MouthTermination {
+    /// Constructs a mouth termination for an open pipe of radius $a$ [m].
+    pub fn new(radius: f64, flanged: bool, speed_of_sound: f32, sample_rate: f32) -> Self {
+        let r = radius.max(1e-4) as f32;
+        let area = std::f32::consts::PI * r * r;
+        let corner_hz = mouth_corner_hz(r, speed_of_sound);
+        Self {
+            radius: r,
+            area,
+            flanged,
+            filter: OnePole::new(sample_rate, corner_hz),
+            corner_hz,
+        }
+    }
+
+    /// Acoustic end correction length $\delta$ to add to the attached pipe section [m].
+    pub fn end_correction(&self) -> f64 {
+        mouth_end_correction(self.radius as f64, self.flanged)
+    }
+
+    /// Retunes the reflection filter for current speed of sound.
+    pub fn tune(&mut self, speed_of_sound: f32, sample_rate: f32) {
+        self.corner_hz = mouth_corner_hz(self.radius, speed_of_sound);
+        self.filter.set_cutoff(sample_rate, self.corner_hz);
+    }
+
+    /// Corner frequency $f_c = c / (2 \pi a)$ [Hz].
+    pub fn corner_hz(&self) -> f32 {
+        self.corner_hz
+    }
+
+    /// Mouth cross-sectional area [m^2].
+    pub fn area(&self) -> f32 {
+        self.area
+    }
+
+    /// Steps the termination with incident forward wave $p^+$ from the pipe:
+    /// Returns `(p_minus, p_radiated)`:
+    /// - `p_minus`: reflected backward wave returning down the pipe ($p^-$) [Pa].
+    /// - `p_radiated`: sound pressure radiated into free space [Pa].
+    #[inline(always)]
+    pub fn step(&mut self, p_plus: f32) -> (f32, f32) {
+        // Lowpass reflection magnitude: H_LP -> 1 at DC, -> 0 at high frequencies
+        let lp = self.filter.process(p_plus);
+        // Pressure-release reflection: R(0) = -1
+        let p_minus = -lp;
+        // Transmitted pressure: (1 + R) p^+ = p^+ + p^-
+        // Since p^- = -lp, this is (p^+ - lp), a differentiator (+6 dB/octave below fc)
+        // Scaled by mouth area
+        let p_trans = p_plus + p_minus;
+        let p_rad = p_trans * (self.area * 500.0);
+        (p_minus, p_rad)
+    }
+
+    /// Clears internal filter state.
+    pub fn reset(&mut self) {
+        self.filter.reset();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Waveguide pipe
 // ---------------------------------------------------------------------------
 
