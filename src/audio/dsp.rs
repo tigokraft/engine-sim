@@ -915,6 +915,7 @@ impl ExhaustBank {
                 config
                     .exhaust
                     .primary_length_for_bank(index, config.bank_count) as f32,
+                (config.exhaust.primary_area() / std::f64::consts::PI).sqrt() as f32,
                 config.exhaust.collector_reflection().abs() as f32,
                 snapshot.exhaust_gamma,
                 snapshot.exhaust_gas_constant,
@@ -923,6 +924,8 @@ impl ExhaustBank {
             muffler: Muffler::new(
                 fs,
                 config.exhaust.muffler_geometry(),
+                (config.exhaust.tailpipe.area / std::f64::consts::PI).sqrt() as f32,
+                config.exhaust.tailpipe_flanged,
                 snapshot.exhaust_gamma,
                 snapshot.exhaust_gas_constant,
                 snapshot.exhaust_temperature,

@@ -35,8 +35,6 @@ pub struct MufflerGeometry {
     pub q: f64,
     /// How much of the output comes from the resonant path, `0..=1` [-].
     pub resonant_mix: f64,
-    /// Tailpipe radiation cutoff [Hz].
-    pub tailpipe_cutoff: f64,
 }
 
 impl Default for MufflerGeometry {
@@ -49,7 +47,6 @@ impl Default for MufflerGeometry {
             neck_length: 0.10,
             q: 1.6,
             resonant_mix: 0.62,
-            tailpipe_cutoff: 3_200.0,
         }
     }
 }
@@ -331,7 +328,6 @@ impl ExhaustSystem {
                         neck_length: (length / (2.0 * st)).max(0.04),
                         q: 1.2 + 0.3 * st,
                         resonant_mix: (0.35 + 0.10 * st).clamp(0.0, 0.85),
-                        tailpipe_cutoff: (3500.0 / st.sqrt()).clamp(1500.0, 5000.0),
                     };
                 }
                 Silencer::Absorptive {
@@ -345,7 +341,6 @@ impl ExhaustSystem {
                         neck_length: length * 0.2,
                         q: 0.8,
                         resonant_mix: 0.20,
-                        tailpipe_cutoff: 5500.0,
                     };
                 }
                 Silencer::QuarterWaveStub { length, area } => {
@@ -355,7 +350,6 @@ impl ExhaustSystem {
                         neck_length: 0.05,
                         q: 2.2,
                         resonant_mix: 0.35,
-                        tailpipe_cutoff: 4000.0,
                     };
                 }
                 Silencer::Straight => continue,
@@ -368,7 +362,6 @@ impl ExhaustSystem {
             neck_length: 0.0,
             q: 1.0,
             resonant_mix: 0.0,
-            tailpipe_cutoff: 8000.0,
         }
     }
 }

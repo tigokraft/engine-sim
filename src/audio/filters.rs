@@ -21,6 +21,8 @@
 
 use std::f32::consts::TAU;
 
+use crate::audio::radiation::Mouth;
+
 /// Anything below this magnitude is flushed to zero.
 ///
 /// Recursive filters fed silence decay toward zero geometrically and spend a
@@ -660,27 +662,45 @@ pub fn helmholtz_frequency(
 
 pub use crate::physics::plumbing::MufflerGeometry;
 
-/// The muffler: a Helmholtz bandpass in parallel with a damped through path.
+/// The muffler: a Helmholtz bandpass in parallel with a through path, and the
+/// tailpipe mouth both of them leave by.
 ///
 /// A pure bandpass is what the cavity does, but it is not what a muffler
 /// *sounds* like — all of the transient energy that gives an exhaust note its
-/// edge lives outside the resonance. Real mufflers pass that energy through with
-/// loss, so the output here is a mix: `resonant_mix` of the cavity, the rest
-/// lowpassed by the tailpipe.
+/// edge lives outside the resonance. Real mufflers pass that energy through, so
+/// what arrives at the tailpipe is a mix: `resonant_mix` of the cavity, the rest
+/// straight through.
+///
+/// What leaves the tailpipe is then not that mixture but its radiated field.
+/// The old model lowpassed here, which is the tilt backwards: inside the pipe
+/// the low end dominates, outside it is the part that never got out. See
+/// [`Mouth`] — below the mouth corner the radiated field rises at 6 dB/octave,
+/// above it, it is flat.
+///
+/// The mouth's reflected wave is dropped rather than fed back, because there is
+/// nothing here to feed it into: this muffler is a pair of lumped filters, not
+/// a waveguide with a `p^-` to carry it. In the pipe network the same
+/// termination loads the tailpipe properly.
 #[derive(Debug, Clone)]
 pub struct Muffler {
     geometry: MufflerGeometry,
     cavity: Biquad,
-    tailpipe: OnePole,
+    mouth: Mouth,
     sample_rate: f32,
     centre_hz: f32,
 }
 
 impl Muffler {
-    /// Builds a muffler and tunes it for `temperature` [K].
+    /// Builds a muffler discharging through a tailpipe of `tailpipe_radius`
+    /// metres, and tunes it for `temperature` [K].
+    ///
+    /// `flanged` is whether the tailpipe exits through a panel or hangs free;
+    /// it changes the end correction, not the radiation.
     pub fn new(
         sample_rate: f32,
         geometry: MufflerGeometry,
+        tailpipe_radius: f32,
+        flanged: bool,
         gamma: f32,
         gas_constant: f32,
         temperature: f32,
@@ -688,7 +708,12 @@ impl Muffler {
         let mut muffler = Self {
             geometry,
             cavity: Biquad::default(),
-            tailpipe: OnePole::new(sample_rate, geometry.tailpipe_cutoff as f32),
+            mouth: Mouth::new(
+                sample_rate,
+                tailpipe_radius,
+                flanged,
+                speed_of_sound(gamma, gas_constant, temperature),
+            ),
             sample_rate,
             centre_hz: 0.0,
         };
@@ -696,12 +721,15 @@ impl Muffler {
         muffler
     }
 
-    /// Retunes the cavity for the current exhaust temperature [K].
+    /// Retunes the cavity and the mouth for the current exhaust temperature
+    /// [K].
     ///
     /// Called at the control rate, not per sample: the transcendentals in the
     /// coefficient design are the expensive part of this whole module, and the
     /// temperature that drives them is already smoothed.
     pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
+        self.mouth
+            .tune(speed_of_sound(gamma, gas_constant, temperature));
         self.centre_hz = helmholtz_frequency(
             gamma,
             gas_constant,
@@ -722,19 +750,25 @@ impl Muffler {
         self.centre_hz
     }
 
-    /// Filters one sample.
+    /// Frequency above which the tailpipe radiates rather than reflects [Hz].
+    pub fn mouth_corner_hz(&self) -> f32 {
+        self.mouth.corner_hz()
+    }
+
+    /// Radiates one sample: in at the muffler inlet, out at the tailpipe mouth.
     #[inline(always)]
     pub fn process(&mut self, x: f32) -> f32 {
         let mix = self.geometry.resonant_mix as f32;
         let resonant = self.cavity.process(x);
-        let through = self.tailpipe.process(x);
-        through * (1.0 - mix) + resonant * mix
+        let at_tailpipe = x * (1.0 - mix) + resonant * mix;
+        let (_reflected, radiated) = self.mouth.step(at_tailpipe);
+        radiated
     }
 
     /// Clears state.
     pub fn reset(&mut self) {
         self.cavity.reset();
-        self.tailpipe.reset();
+        self.mouth.reset();
     }
 }
 
@@ -751,15 +785,20 @@ impl Muffler {
 /// line.push(excitation[n] - reflection * lowpass(y[n]))
 /// ```
 ///
-/// The sign inversion is the open-end (pressure-release) boundary at the
-/// collector, which is what puts the pipe's fundamental at a *quarter* wave
-/// rather than a half — `c / 4L`. The lowpass in the return path is wall and
-/// viscous loss, and it also guarantees the loop is a contraction at every
-/// frequency, so the resonance cannot run away no matter how the temperature
-/// modulates the delay.
+/// The end that closes the loop is a real mouth — [`Mouth`], from
+/// [`radiation`](crate::audio::radiation) — rather than a bare sign flip. It
+/// carries the pressure-release inversion, which is what puts the pipe's
+/// fundamental at a *quarter* wave rather than a half; it carries the
+/// frequency-dependent `|R|`, so the top of each echo leaves through the
+/// collector instead of coming back; and it lengthens the pipe by its end
+/// correction, so the fundamental sits at `c / (4 (L + delta))`. The lowpass in
+/// the return path is separately wall and viscous loss, and between the two of
+/// them the loop is a contraction at every frequency, so the resonance cannot
+/// run away no matter how the temperature modulates the delay.
 #[derive(Debug, Clone)]
 pub struct ExhaustRunner {
     line: DelayLine,
+    mouth: Mouth,
     loss: OnePole,
     delay_samples: Smoothed,
     /// Collector reflection the geometry alone implies, before damping.
@@ -768,7 +807,8 @@ pub struct ExhaustRunner {
     reflection: Smoothed,
     /// Current damping, `0` for the bare pipe and `1` for fully damped [-].
     damping: f32,
-    length: f32,
+    /// Physical length plus the mouth's end correction [m].
+    acoustic_length: f32,
     sample_rate: f32,
 }
 
@@ -792,27 +832,46 @@ pub const RUNNER_DAMPED_CUTOFF_HZ: f32 = 700.0;
 pub const RUNNER_DAMPED_REFLECTION: f32 = 0.35;
 
 impl ExhaustRunner {
-    /// A runner of `length` metres, tuned for `temperature` [K].
+    /// A runner of `length` metres and internal `radius` metres, tuned for
+    /// `temperature` [K].
     ///
     /// `reflection` is the magnitude of the collector reflection coefficient and
     /// is clamped below unity; at 1.0 the loop would be lossless at DC and the
     /// pipe would never stop ringing.
+    ///
+    /// The radius is not decoration: it sets both the end correction that
+    /// lengthens the pipe and the corner above which the mouth stops sending
+    /// echoes back. A wide primary is flatter and darker than a narrow one of
+    /// the same length.
     pub fn new(
         sample_rate: f32,
         length: f32,
+        radius: f32,
         reflection: f32,
         gamma: f32,
         gas_constant: f32,
         temperature: f32,
     ) -> Self {
+        // The collector end is taken unflanged: a primary running into a merge
+        // cone is a pipe stopping in open space, not one cut into a wall.
+        let mouth = Mouth::new(
+            sample_rate,
+            radius,
+            false,
+            speed_of_sound(gamma, gas_constant, temperature),
+        );
+        let acoustic_length = length + mouth.end_correction();
         // Size for the coldest gas the runner will ever see. Sound travels
         // slowest when cold, so that is the longest the delay can get; 250 K is
         // comfortably below any exhaust that has ever fired.
-        let longest = runner_delay_seconds(length, gamma, gas_constant, 250.0) * sample_rate;
-        let initial = runner_delay_seconds(length, gamma, gas_constant, temperature) * sample_rate;
+        let longest =
+            runner_delay_seconds(acoustic_length, gamma, gas_constant, 250.0) * sample_rate;
+        let initial =
+            runner_delay_seconds(acoustic_length, gamma, gas_constant, temperature) * sample_rate;
         let nominal_reflection = reflection.clamp(0.0, 0.92);
         Self {
             line: DelayLine::with_max_delay(longest.ceil() as usize + 8),
+            mouth,
             loss: OnePole::new(sample_rate, RUNNER_LOSS_CUTOFF_HZ),
             // 40 ms of glide: fast enough to track a throttle transient, slow
             // enough that the interpolator never audibly pitches.
@@ -823,17 +882,25 @@ impl ExhaustRunner {
             // would push a discontinuity straight into the feedback path.
             reflection: Smoothed::new(nominal_reflection, sample_rate, 0.060),
             damping: 0.0,
-            length,
+            acoustic_length,
             sample_rate,
         }
     }
 
-    /// Retunes the transit delay for the current exhaust temperature [K].
+    /// Retunes the transit delay and the mouth for the current exhaust
+    /// temperature [K].
     pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
-        let samples =
-            runner_delay_seconds(self.length, gamma, gas_constant, temperature) * self.sample_rate;
+        let samples = runner_delay_seconds(self.acoustic_length, gamma, gas_constant, temperature)
+            * self.sample_rate;
         self.delay_samples
             .set_target(samples.clamp(1.0, self.line.max_delay()));
+        self.mouth
+            .tune(speed_of_sound(gamma, gas_constant, temperature));
+    }
+
+    /// Length the pipe resonates as, physical plus end correction [m].
+    pub fn acoustic_length(&self) -> f32 {
+        self.acoustic_length
     }
 
     /// Transit delay currently in use [samples].
@@ -894,14 +961,18 @@ impl ExhaustRunner {
         let delay = self.delay_samples.next_value();
         let reflection = self.reflection.next_value();
         let out = self.line.read(delay);
-        let returned = self.loss.process(out);
-        self.line.push(excitation - reflection * returned);
+        // The mouth carries the inversion, so what comes back is *added*: the
+        // sign that used to sit in this expression is now the physics of a
+        // pressure-release end rather than a minus somebody typed.
+        let returned = self.loss.process(self.mouth.reflect(out));
+        self.line.push(excitation + reflection * returned);
         out
     }
 
     /// Clears state.
     pub fn reset(&mut self) {
         self.line.reset();
+        self.mouth.reset();
         self.loss.reset();
     }
 }
@@ -1263,7 +1334,7 @@ mod tests {
 
     #[test]
     fn runner_loop_is_stable_under_delay_modulation() {
-        let mut runner = ExhaustRunner::new(48_000.0, 0.5, 0.9, 1.33, 287.0, 900.0);
+        let mut runner = ExhaustRunner::new(48_000.0, 0.5, 0.019, 0.9, 1.33, 287.0, 900.0);
         let mut noise = Noise::default();
         for i in 0..96_000 {
             // Sweep the temperature across the whole plausible range while
@@ -1427,7 +1498,7 @@ mod tests {
     fn damping_shortens_the_runner_ringdown() {
         // Kick the loop once and measure how long it takes to fall 40 dB.
         let ringdown = |damping: f32| {
-            let mut runner = ExhaustRunner::new(48_000.0, 0.45, 0.85, 1.33, 287.0, 900.0);
+            let mut runner = ExhaustRunner::new(48_000.0, 0.45, 0.019, 0.85, 1.33, 287.0, 900.0);
             runner.set_damping(damping);
             // Let the glided reflection reach its target before the kick.
             for _ in 0..12_000 {
@@ -1473,7 +1544,7 @@ mod tests {
         let (mut lo, mut hi) = (f32::MAX, 0.0f32);
         let mut f = 200.0f32;
         while f <= 2_000.0 {
-            let mut runner = ExhaustRunner::new(fs, 0.45, 0.55, 1.33, 287.0, 700.0);
+            let mut runner = ExhaustRunner::new(fs, 0.45, 0.019, 0.55, 1.33, 287.0, 700.0);
             runner.set_damping(damping);
             // Settle the glided reflection, then the tone's own transient.
             for _ in 0..12_000 {
@@ -1518,7 +1589,7 @@ mod tests {
 
     #[test]
     fn damping_lowers_reflection_and_darkens_the_return_path() {
-        let mut runner = ExhaustRunner::new(48_000.0, 0.45, 0.80, 1.33, 287.0, 900.0);
+        let mut runner = ExhaustRunner::new(48_000.0, 0.45, 0.019, 0.80, 1.33, 287.0, 900.0);
         let nominal = runner.reflection();
         approx(nominal, 0.80, 1e-6);
         assert_eq!(runner.damping(), 0.0);
@@ -1627,7 +1698,15 @@ mod tests {
 
     #[test]
     fn muffler_tracks_temperature() {
-        let mut muffler = Muffler::new(48_000.0, MufflerGeometry::default(), 1.33, 287.0, 500.0);
+        let mut muffler = Muffler::new(
+            48_000.0,
+            MufflerGeometry::default(),
+            0.030,
+            false,
+            1.33,
+            287.0,
+            500.0,
+        );
         let cold = muffler.centre_frequency();
         muffler.tune(1.33, 287.0, 1100.0);
         let hot = muffler.centre_frequency();
