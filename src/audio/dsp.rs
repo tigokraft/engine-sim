@@ -2560,6 +2560,58 @@ mod tests {
     }
 
     #[test]
+    fn knock_pitch_scales_inversely_with_bore() {
+        let mut voice_small = KnockVoice::new(FS);
+        let mut voice_large = KnockVoice::new(FS);
+
+        let bore_small = 0.078;
+        let bore_large = 0.078 * 2.0;
+        let gamma = 1.33;
+        let gas_constant = 287.0;
+        let temperature = 1150.0;
+
+        voice_small.tune(bore_small, gamma, gas_constant, temperature);
+        voice_large.tune(bore_large, gamma, gas_constant, temperature);
+
+        let modes_small = voice_small.mode_frequencies();
+        let modes_large = voice_large.mode_frequencies();
+
+        for i in 0..3 {
+            let ratio = modes_small[i] / modes_large[i];
+            assert!(
+                (ratio - 2.0).abs() < 1e-4,
+                "mode {i} ratio {ratio} != 2.0: doubling bore must halve mode frequency"
+            );
+        }
+
+        // Also verify through EngineSynth update_control.
+        let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
+        let mut snapshot1 = loaded_snapshot();
+        snapshot1.bore = 0.078;
+        synth
+            .exhaust_temperature
+            .snap(snapshot1.exhaust_temperature);
+        synth.set_snapshot(&snapshot1);
+        synth.update_control();
+        let f_small = synth.knock().mode_frequencies()[0];
+
+        let mut snapshot2 = loaded_snapshot();
+        snapshot2.bore = 0.078 * 2.0;
+        synth
+            .exhaust_temperature
+            .snap(snapshot2.exhaust_temperature);
+        synth.set_snapshot(&snapshot2);
+        synth.update_control();
+        let f_large = synth.knock().mode_frequencies()[0];
+
+        let ratio = f_small / f_large;
+        assert!(
+            (ratio - 2.0).abs() < 1e-4,
+            "EngineSynth knock mode ratio {ratio} != 2.0"
+        );
+    }
+
+    #[test]
     fn combustion_variation_is_inert_above_the_threshold() {
         // Above CCV_THRESHOLD_RPM no draw is taken, so the whole synth — every
         // layer downstream of the shared noise generator included — must be
