@@ -1506,7 +1506,10 @@ impl EngineSynth {
             return;
         }
         let spacing = 1.0 / self.config.cylinders.len().max(1) as f32;
-        let amplitude = 1.0 + depth * self.noise.next_gaussian();
+        // The thermodynamic solver carries per-cylinder blowdown pressure,
+        // so deterministic cylinder differences are physical. The synthetic
+        // amplitude variation is reduced to the genuinely stochastic remainder.
+        let amplitude = 1.0 + (0.5 * depth) * self.noise.next_gaussian();
         let phase = depth * spacing * self.noise.next_gaussian();
         self.variation[index] = CycleVariation {
             amplitude_scale: amplitude.clamp(
@@ -2241,19 +2244,19 @@ mod tests {
             (mean as f32, var.sqrt() as f32)
         };
 
-        // Amplitude: unbiased around nominal, with the requested spread. The
-        // tolerance on the mean is three standard errors of the estimator
-        // itself, sigma/sqrt(n) — tighter than that and the test would fail on
-        // an unlucky seed rather than on a bug.
-        let standard_error = depth / (n as f32).sqrt();
+        // Amplitude: unbiased around nominal, with the requested spread (reduced
+        // to the stochastic remainder, half the total depth). The tolerance on
+        // the mean is three standard errors of the estimator itself, sigma/sqrt(n).
+        let amplitude_sigma = 0.5 * depth;
+        let standard_error = amplitude_sigma / (n as f32).sqrt();
         let (mean, sigma) = stats(&amplitudes);
         assert!(
             (mean - 1.0).abs() < 3.0 * standard_error,
             "amplitude draw is biased: {mean}"
         );
         assert!(
-            (sigma - depth).abs() < 0.004,
-            "amplitude sigma {sigma}, want {depth}"
+            (sigma - amplitude_sigma).abs() < 0.004,
+            "amplitude sigma {sigma}, want {amplitude_sigma}"
         );
 
         // Phase: sigma is the depth as a fraction of the firing interval, so at
