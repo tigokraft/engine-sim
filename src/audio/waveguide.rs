@@ -248,3 +248,84 @@ impl ScatteringJunction {
         p_j
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_pipe_junction_reflects_exact_area_ratio() {
+        let test_cases = [
+            (0.0010, 0.0020), // expansion: r = (1-2)/(1+2) = -1/3
+            (0.0030, 0.0010), // contraction: r = (3-1)/(3+1) = +0.5
+            (0.0025, 0.0025), // matched: r = 0
+            (0.0012, 0.0060), // large expansion: r = (1.2-6)/(1.2+6) = -4.8/7.2 = -2/3
+        ];
+
+        for (a1, a2) in test_cases {
+            let junction = ScatteringJunction::from_areas(&[a1, a2]);
+            let expected_r = ((a1 - a2) / (a1 + a2)) as f32;
+            let expected_t = (2.0 * a1 / (a1 + a2)) as f32;
+
+            let p_plus = [1.0f32, 0.0f32];
+            let mut p_minus = [0.0f32, 0.0f32];
+            let p_j = junction.scatter(&p_plus, &mut p_minus);
+
+            assert!(
+                (p_minus[0] - expected_r).abs() < 1e-6,
+                "expected reflection {expected_r}, got {}",
+                p_minus[0]
+            );
+            assert!(
+                (p_minus[1] - expected_t).abs() < 1e-6,
+                "expected transmission {expected_t}, got {}",
+                p_minus[1]
+            );
+            assert!(
+                (p_j - expected_t).abs() < 1e-6,
+                "junction pressure should match transmitted pressure"
+            );
+        }
+    }
+
+    #[test]
+    fn n_port_junction_conserves_volume_flow_and_power() {
+        // 4-1 collector junction: 4 primaries of 40 mm bore meeting 60 mm outlet
+        let a_primary = std::f64::consts::PI * 0.020 * 0.020;
+        let a_outlet = std::f64::consts::PI * 0.030 * 0.030;
+        let junction =
+            ScatteringJunction::from_areas(&[a_primary, a_primary, a_primary, a_primary, a_outlet]);
+
+        let p_plus = [1.0f32, 0.3f32, -0.2f32, 0.0f32, -0.5f32];
+        let mut p_minus = [0.0f32; 5];
+        junction.scatter(&p_plus, &mut p_minus);
+
+        let y = junction.admittances();
+
+        // 1. Volume flow conservation: sum_i Y_i (p_i^+ - p_i^-) == 0
+        let mut net_flow = 0.0f32;
+        for i in 0..5 {
+            net_flow += y[i] * (p_plus[i] - p_minus[i]);
+        }
+        assert!(
+            net_flow.abs() < 1e-6,
+            "volume flow not conserved: net_flow = {net_flow}"
+        );
+
+        // 2. Power conservation: sum_i Y_i (p_i^+)^2 == sum_i Y_i (p_i^-)^2
+        let mut power_in = 0.0f32;
+        let mut power_out = 0.0f32;
+        for i in 0..5 {
+            power_in += y[i] * p_plus[i] * p_plus[i];
+            power_out += y[i] * p_minus[i] * p_minus[i];
+        }
+        assert!(
+            (power_out - power_in).abs() < 1e-6 * power_in,
+            "power not conserved: in={power_in}, out={power_out}"
+        );
+        assert!(
+            power_out <= power_in + 1e-7,
+            "outgoing energy exceeds incoming"
+        );
+    }
+}
