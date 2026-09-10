@@ -1846,6 +1846,78 @@ impl ExhaustNetwork {
 mod tests {
     use super::*;
 
+    /// Amplitude of `signal` at `frequency`, by Goertzel-style projection.
+    fn magnitude_at(signal: &[f32], frequency: f32, sample_rate: f32) -> f32 {
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (i, &x) in signal.iter().enumerate() {
+            let phase = std::f32::consts::TAU * frequency * i as f32 / sample_rate;
+            re += x as f64 * phase.sin() as f64;
+            im += x as f64 * phase.cos() as f64;
+        }
+        (2.0 * (re * re + im * im).sqrt() / signal.len() as f64) as f32
+    }
+
+    #[test]
+    fn closed_open_pipe_resonates_at_c_over_four_l() {
+        // A pipe shut at one end and open at the other is a quarter-wave
+        // resonator: the closed end forces a pressure antinode, the open end a
+        // node, and the lowest mode that fits is f = c / 4L. This is the single
+        // claim the whole network rests on — every tuned length in an exhaust is
+        // some version of it.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.4;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 300.0;
+
+        for (length, radius) in [(0.5f64, 0.025f64), (0.9, 0.030), (0.35, 0.020)] {
+            let area = std::f64::consts::PI * radius * radius;
+            let mouth =
+                MouthTermination::new(radius, false, speed_of_sound(GAMMA, R, TEMPERATURE), FS);
+            // The open end acts as if the pipe ran on past its edge; the network
+            // adds the same correction, so the resonance is set by the effective
+            // length rather than the machined one.
+            let effective = length + mouth.end_correction();
+            let mut pipe = WaveguidePipe::new(effective, area, FS, GAMMA, R, TEMPERATURE);
+            pipe.set_boundary_phase_delay(mouth.phase_delay_samples());
+            pipe.tune(GAMMA, R, TEMPERATURE);
+            let mut mouth = mouth;
+
+            // Impulse in at the closed end, radiated pressure out at the mouth.
+            let mut radiated = vec![0.0f32; 1 << 16];
+            for (i, out) in radiated.iter_mut().enumerate() {
+                let (p_at_closed, p_at_mouth) = pipe.read_outputs();
+                let (p_reflected, p_rad) = mouth.step(p_at_mouth);
+                // A rigid closed end reflects in phase: r = +1.
+                let excitation = if i == 0 { 1.0 } else { 0.0 };
+                pipe.push_inputs(excitation + p_at_closed, p_reflected);
+                *out = p_rad;
+            }
+
+            let c = speed_of_sound(GAMMA, R, TEMPERATURE);
+            let expected = c / (4.0 * effective as f32);
+
+            // Sweep a band around the prediction and take the peak.
+            let mut best = (0.0f32, 0.0f32);
+            let mut f = expected * 0.7;
+            while f <= expected * 1.3 {
+                let m = magnitude_at(&radiated[1..], f, FS);
+                if m > best.1 {
+                    best = (f, m);
+                }
+                f += 0.05;
+            }
+
+            let error = (best.0 - expected).abs() / expected;
+            assert!(
+                error < 0.01,
+                "L = {length} m: resonance at {:.2} Hz, expected {:.2} Hz ({:.2} % off)",
+                best.0,
+                expected,
+                error * 100.0
+            );
+        }
+    }
+
     #[test]
     fn two_pipe_junction_reflects_exact_area_ratio() {
         let test_cases = [
