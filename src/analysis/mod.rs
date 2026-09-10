@@ -11,8 +11,10 @@
 //! synthesis of its own: nothing here may change what the engine sounds like,
 //! only what can be said about it.
 //!
-//! - [`orders`] — a Hann-windowed STFT, and the level of each engine order read
-//!   off it against the speed curve the render was driven by.
+//! - [`orders`] — a Hann-windowed STFT; the level of each engine order read off
+//!   it against the speed curve the render was driven by, and peak picking on
+//!   the long-term average spectrum for the pipe resonances that stay put while
+//!   the orders sweep past them.
 //!
 //! The harness is worth something only if a rerun is comparable to the run
 //! before it, so every part of it is deterministic. The drive scripts are fixed

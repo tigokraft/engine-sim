@@ -288,6 +288,23 @@ impl Stft {
     /// all of a component's energy inside its own main lobe, so
     /// `sum|X|^2 = (A^2 / 4) * N * sum(w^2)`.
     pub fn amplitude_in_band(&self, lo_hz: f64, hi_hz: f64) -> Option<f64> {
+        self.amplitude_in_band_of(&self.power, lo_hz, hi_hz)
+    }
+
+    /// One bin's power on the same amplitude scale as a whole component.
+    ///
+    /// A single bin holds only the part of a component that landed in it, so
+    /// this is not the level of anything on its own; it is the scale on which
+    /// two neighbouring bins can be compared.
+    pub fn bin_amplitude(&self, power: f64) -> f64 {
+        2.0 * (power.max(0.0) / (self.size as f64 * self.taper_energy)).sqrt()
+    }
+
+    /// The same reading, taken from a power spectrum held elsewhere.
+    ///
+    /// A long-term average is the same transform accumulated over many frames,
+    /// and has to be calibrated by the same window energy as a single one.
+    pub fn amplitude_in_band_of(&self, power: &[f64], lo_hz: f64, hi_hz: f64) -> Option<f64> {
         let (lo_hz, hi_hz) = if lo_hz <= hi_hz {
             (lo_hz, hi_hz)
         } else {
@@ -304,8 +321,10 @@ impl Stft {
             return None;
         }
 
-        let power: f64 = self.power[first..=last].iter().sum();
-        Some(2.0 * (power / (self.size as f64 * self.taper_energy)).sqrt())
+        let summed: f64 = power[first..=last.min(power.len().saturating_sub(1))]
+            .iter()
+            .sum();
+        Some(2.0 * (summed / (self.size as f64 * self.taper_energy)).sqrt())
     }
 }
 
@@ -468,6 +487,188 @@ pub fn track(samples: &[f32], sample_rate: f64, rpm: &RpmCurve, orders: &[f64]) 
         window: stft.size(),
         resolution_floor_hz: stft.resolution_floor(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Resonances
+// ---------------------------------------------------------------------------
+
+/// Smallest rise above the surrounding spectrum that counts as a peak [dB].
+///
+/// Averaging many frames of a running engine leaves about a decibel of scatter
+/// per bin, so anything under about three is the noise floor's own shape rather
+/// than a resonance.
+pub const MIN_PROMINENCE_DB: f64 = 3.0;
+
+/// A peak in a render's long-term average spectrum.
+///
+/// This is the shape the *plumbing* puts on the sound: a quarter-wave runner,
+/// an expansion chamber, a Helmholtz volume and a block mode all sit at a fixed
+/// frequency while the orders sweep past them, so they are what survives
+/// averaging a whole rev range together.
+#[derive(Debug, Clone, Copy)]
+pub struct Peak {
+    /// Centre frequency [Hz], interpolated between bins.
+    pub hz: f64,
+    /// Level of the component at that frequency [dBFS].
+    pub db: f64,
+    /// How far the peak stands above the higher of the two valleys around it
+    /// [dB].
+    ///
+    /// Prominence rather than absolute level is what separates a resonance from
+    /// a bump on the side of a louder one: a shoulder 40 dB up on the noise
+    /// floor but only 1 dB above its own surroundings is not a mode.
+    pub prominence_db: f64,
+}
+
+/// The long-term average spectrum of a render.
+///
+/// Welch's method: the power spectra of every overlapping frame, averaged.
+/// Averaging power rather than a single long transform is what turns the
+/// engine's swept orders into a smooth background and leaves the fixed
+/// resonances standing up out of it.
+pub struct AverageSpectrum {
+    /// The transform that produced it, kept for its calibration.
+    stft: Stft,
+    /// Mean power per bin, `0..=size / 2`.
+    power: Vec<f64>,
+    /// Frames averaged.
+    frames: usize,
+}
+
+impl AverageSpectrum {
+    /// Averages every whole window in `samples`.
+    pub fn of(samples: &[f32], sample_rate: f64) -> Self {
+        let mut stft = Stft::new(WINDOW, sample_rate);
+        let hop = stft.hop();
+        let mut power = vec![0.0f64; stft.size() / 2 + 1];
+        let mut frames = 0usize;
+
+        let mut start = 0usize;
+        while start + stft.size() <= samples.len() {
+            stft.analyse(&samples[start..start + stft.size()]);
+            for (sum, bin) in power.iter_mut().zip(stft.power()) {
+                *sum += bin;
+            }
+            frames += 1;
+            start += hop;
+        }
+
+        if frames > 0 {
+            for bin in &mut power {
+                *bin /= frames as f64;
+            }
+        }
+        Self {
+            stft,
+            power,
+            frames,
+        }
+    }
+
+    /// Frames averaged; zero if the render was shorter than one window.
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+
+    /// Width of one bin [Hz].
+    pub fn bin_hz(&self) -> f64 {
+        self.stft.bin_hz()
+    }
+
+    /// Level of a component at `hz` [dBFS], on the same reference as an order.
+    pub fn db_at(&self, hz: f64) -> Option<f64> {
+        self.stft.amplitude_in_band_of(&self.power, hz, hz).map(db)
+    }
+
+    /// Per-bin level [dB], for finding peaks and measuring how far they stand up.
+    ///
+    /// Not the level of a *component* — a single bin holds only the part of one
+    /// that landed in it — but on a fixed scale, which is all a comparison
+    /// between neighbouring bins needs. Reported levels come from
+    /// [`Self::db_at`], which sums the whole lobe.
+    fn bin_db(&self, k: usize) -> f64 {
+        db(self.stft.bin_amplitude(self.power[k]))
+    }
+
+    /// The `count` most prominent peaks, in frequency order.
+    ///
+    /// Frequencies are interpolated by fitting a parabola through the peak bin
+    /// and its two neighbours in decibels, which is what recovers a resonance to
+    /// a fraction of a bin instead of to the nearest one.
+    pub fn peaks(&self, count: usize, min_prominence_db: f64) -> Vec<Peak> {
+        if self.frames == 0 || count == 0 {
+            return Vec::new();
+        }
+
+        let bins = self.power.len();
+        let first = (self.stft.resolution_floor() / self.bin_hz()).ceil() as usize;
+        if first + 1 >= bins {
+            return Vec::new();
+        }
+
+        let curve: Vec<f64> = (0..bins).map(|k| self.bin_db(k)).collect();
+        let mut found = Vec::new();
+
+        for k in (first.max(1))..bins - 1 {
+            if curve[k] <= curve[k - 1] || curve[k] < curve[k + 1] {
+                continue;
+            }
+
+            // Walk out to each side until the spectrum climbs back above this
+            // peak; the deepest point reached on the way is that side's valley.
+            let mut left = curve[k];
+            for j in (first..k).rev() {
+                if curve[j] > curve[k] {
+                    break;
+                }
+                left = left.min(curve[j]);
+            }
+            let mut right = curve[k];
+            for &value in curve.iter().take(bins).skip(k + 1) {
+                if value > curve[k] {
+                    break;
+                }
+                right = right.min(value);
+            }
+
+            let prominence = curve[k] - left.max(right);
+            if prominence < min_prominence_db {
+                continue;
+            }
+
+            // Quadratic interpolation on the decibel curve. The denominator is
+            // the curvature at the peak and is negative there; a flat top would
+            // make it zero, and then the bin centre is the best answer there is.
+            let (a, b, c) = (curve[k - 1], curve[k], curve[k + 1]);
+            let curvature = a - 2.0 * b + c;
+            let offset = if curvature.abs() > 1e-12 {
+                (0.5 * (a - c) / curvature).clamp(-0.5, 0.5)
+            } else {
+                0.0
+            };
+            let hz = (k as f64 + offset) * self.bin_hz();
+
+            found.push(Peak {
+                hz,
+                db: self.db_at(hz).unwrap_or(SILENCE_DB),
+                prominence_db: prominence,
+            });
+        }
+
+        found.sort_by(|a, b| b.prominence_db.total_cmp(&a.prominence_db));
+        found.truncate(count);
+        found.sort_by(|a, b| a.hz.total_cmp(&b.hz));
+        found
+    }
+}
+
+/// The `count` strongest resonances in a rendered buffer, in frequency order.
+///
+/// The counterpart of [`track`]: that one follows what moves with the engine,
+/// this one finds what stays put while it moves.
+pub fn resonances(samples: &[f32], sample_rate: f64, count: usize) -> Vec<Peak> {
+    AverageSpectrum::of(samples, sample_rate).peaks(count, MIN_PROMINENCE_DB)
 }
 
 #[cfg(test)]
