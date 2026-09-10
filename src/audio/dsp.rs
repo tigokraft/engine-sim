@@ -1166,6 +1166,7 @@ pub struct MechanicalVoice {
     pub injector: Option<ImpulsiveSource>,
     pub timing_chain: Option<ImpulsiveSource>,
     pub gear_whine: Option<ImpulsiveSource>,
+    pub accessory: Option<ImpulsiveSource>,
     rumble_a: OnePole,
     rumble_b: OnePole,
     pub click_gain: Smoothed,
@@ -1249,6 +1250,19 @@ impl MechanicalVoice {
         );
         gear_whine.phase = 0.45;
 
+        let mut accessory = ImpulsiveSource::new(
+            sample_rate,
+            SourceRate::Order(1.37),
+            0.20,
+            0.0020,
+            ModalBank::single(sample_rate, 1_100.0, 2.8),
+            LevelLaw::Speed {
+                reference_rpm: 1_000.0,
+            },
+            0.20,
+        );
+        accessory.phase = 0.60;
+
         Self {
             intake_valve: Some(intake_valve),
             exhaust_valve: Some(exhaust_valve),
@@ -1256,6 +1270,7 @@ impl MechanicalVoice {
             injector: Some(injector),
             timing_chain: Some(timing_chain),
             gear_whine: Some(gear_whine),
+            accessory: Some(accessory),
             rumble_a: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             rumble_b: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             click_gain: Smoothed::new(0.0, sample_rate, 0.040),
@@ -1286,6 +1301,9 @@ impl MechanicalVoice {
             s.tune(snapshot, cycle_hz, cylinders);
         }
         if let Some(s) = &mut self.gear_whine {
+            s.tune(snapshot, cycle_hz, cylinders);
+        }
+        if let Some(s) = &mut self.accessory {
             s.tune(snapshot, cycle_hz, cylinders);
         }
 
@@ -1334,6 +1352,9 @@ impl MechanicalVoice {
         if let Some(s) = &mut self.gear_whine {
             clicks += s.process(noise);
         }
+        if let Some(s) = &mut self.accessory {
+            clicks += s.process(noise);
+        }
 
         let rumble = self
             .rumble_b
@@ -1361,6 +1382,9 @@ impl MechanicalVoice {
             s.reset();
         }
         if let Some(s) = &mut self.gear_whine {
+            s.reset();
+        }
+        if let Some(s) = &mut self.accessory {
             s.reset();
         }
         self.click_phase = 0.0;
