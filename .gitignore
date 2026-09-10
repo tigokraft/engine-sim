@@ -1,0 +1,5 @@
+/target
+.DS_Store
+
+# Rendered by `cargo run --release --example engine_audio -- --offline engine.wav`
+*.wav
