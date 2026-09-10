@@ -1164,6 +1164,7 @@ pub struct MechanicalVoice {
     pub exhaust_valve: Option<ImpulsiveSource>,
     pub piston_slap: Option<ImpulsiveSource>,
     pub injector: Option<ImpulsiveSource>,
+    pub timing_chain: Option<ImpulsiveSource>,
     rumble_a: OnePole,
     rumble_b: OnePole,
     pub click_gain: Smoothed,
@@ -1223,11 +1224,23 @@ impl MechanicalVoice {
         );
         injector.phase = 0.15;
 
+        let mut timing_chain = ImpulsiveSource::new(
+            sample_rate,
+            SourceRate::Order(19.0),
+            0.15,
+            0.0010,
+            ModalBank::single(sample_rate, 1_600.0, 2.2),
+            LevelLaw::FrictionMep,
+            0.25,
+        );
+        timing_chain.phase = 0.35;
+
         Self {
             intake_valve: Some(intake_valve),
             exhaust_valve: Some(exhaust_valve),
             piston_slap: Some(piston_slap),
             injector: Some(injector),
+            timing_chain: Some(timing_chain),
             rumble_a: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             rumble_b: OnePole::new(sample_rate, MECHANICAL_RUMBLE_HZ),
             click_gain: Smoothed::new(0.0, sample_rate, 0.040),
@@ -1252,6 +1265,9 @@ impl MechanicalVoice {
             s.tune(snapshot, cycle_hz, cylinders);
         }
         if let Some(s) = &mut self.injector {
+            s.tune(snapshot, cycle_hz, cylinders);
+        }
+        if let Some(s) = &mut self.timing_chain {
             s.tune(snapshot, cycle_hz, cylinders);
         }
 
@@ -1294,6 +1310,9 @@ impl MechanicalVoice {
         if let Some(s) = &mut self.injector {
             clicks += s.process(noise);
         }
+        if let Some(s) = &mut self.timing_chain {
+            clicks += s.process(noise);
+        }
 
         let rumble = self
             .rumble_b
@@ -1315,6 +1334,9 @@ impl MechanicalVoice {
             s.reset();
         }
         if let Some(s) = &mut self.injector {
+            s.reset();
+        }
+        if let Some(s) = &mut self.timing_chain {
             s.reset();
         }
         self.click_phase = 0.0;
