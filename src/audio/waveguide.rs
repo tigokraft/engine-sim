@@ -870,6 +870,258 @@ impl TaperedCollector {
 }
 
 // ---------------------------------------------------------------------------
+// Composed elements: Absorptive silencer
+// ---------------------------------------------------------------------------
+
+/// Straight-through packed silencer: a perforated core inside acoustic packing.
+///
+/// The core is a duct like any other, so it is a [`WaveguidePipe`] with area
+/// steps at each end. What the packing adds is resistive attenuation, quoted by
+/// the geometry as a loss in decibels per metre. Over a body of length $L$ the
+/// surviving amplitude is
+///
+/// $$g = 10^{-\frac{\alpha_{dB} L}{20}}$$
+///
+/// applied to each direction of travel, so a wave that goes in and comes back
+/// pays for the length twice — which is exactly why a packed silencer kills the
+/// returning reflection harder than it kills the through path.
+#[derive(Debug, Clone)]
+pub struct AbsorptiveSilencer {
+    junction_in: ScatteringJunction,
+    core: WaveguidePipe,
+    junction_out: ScatteringJunction,
+    /// Amplitude surviving one pass through the packing [-].
+    pass: f32,
+    scatter_buf_in: [f32; 2],
+    scatter_buf_out: [f32; 2],
+}
+
+impl AbsorptiveSilencer {
+    /// Constructs a packed silencer:
+    /// - `pipe_area`: area of the ducts either side of the body [m^2].
+    /// - `core_area`: flow area through the perforated core [m^2].
+    /// - `length`: length of the packed body [m].
+    /// - `loss_db_per_m`: attenuation of the packing [dB/m].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        pipe_area: f64,
+        core_area: f64,
+        length: f64,
+        loss_db_per_m: f64,
+        sample_rate: f32,
+        gamma: f32,
+        gas_constant: f32,
+        temperature: f32,
+    ) -> Self {
+        let a1 = pipe_area.max(1e-7);
+        let a2 = core_area.max(1e-7);
+        let l = length.max(0.001);
+        let core = WaveguidePipe::new(l, a2, sample_rate, gamma, gas_constant, temperature);
+        let pass = 10f64.powf(-loss_db_per_m.max(0.0) * l / 20.0) as f32;
+
+        Self {
+            junction_in: ScatteringJunction::from_areas(&[a1, a2]),
+            core,
+            junction_out: ScatteringJunction::from_areas(&[a2, a1]),
+            pass,
+            scatter_buf_in: [0.0; 2],
+            scatter_buf_out: [0.0; 2],
+        }
+    }
+
+    /// Amplitude surviving one pass through the packing [-].
+    pub fn pass_gain(&self) -> f32 {
+        self.pass
+    }
+
+    /// Retunes propagation delay and acoustic admittance for current gas state.
+    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
+        self.core.tune(gamma, gas_constant, temperature);
+    }
+
+    /// Steps the silencer by one sample; see [`ExpansionChamber::step`] for the
+    /// port convention.
+    #[inline(always)]
+    pub fn step(&mut self, p_in_plus: f32, p_out_minus: f32) -> (f32, f32) {
+        let (p_core_0, p_core_1) = self.core.read_outputs();
+        let p_core_0 = p_core_0 * self.pass;
+        let p_core_1 = p_core_1 * self.pass;
+
+        self.junction_in
+            .scatter(&[p_in_plus, p_core_0], &mut self.scatter_buf_in);
+        let p_in_minus = self.scatter_buf_in[0];
+        let p_into_core_0 = self.scatter_buf_in[1];
+
+        self.junction_out
+            .scatter(&[p_core_1, p_out_minus], &mut self.scatter_buf_out);
+        let p_into_core_1 = self.scatter_buf_out[0];
+        let p_out_plus = self.scatter_buf_out[1];
+
+        self.core.push_inputs(p_into_core_0, p_into_core_1);
+
+        (p_in_minus, p_out_plus)
+    }
+
+    /// Clears internal state.
+    pub fn reset(&mut self) {
+        self.core.reset();
+        self.scatter_buf_in = [0.0; 2];
+        self.scatter_buf_out = [0.0; 2];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Composed elements: the silencer chain
+// ---------------------------------------------------------------------------
+
+/// Side branch length that puts a quarter-wave notch on a Helmholtz resonance [m].
+///
+/// A Helmholtz chamber of volume $V$ behind a neck of area $A_n$ and length
+/// $L_n$ resonates at $f_H = \frac{c}{2\pi}\sqrt{A_n / (V L_n)}$, and a closed
+/// side branch of length $L$ notches at $c / 4L$. Equating the two,
+///
+/// $$L = \frac{\pi}{2} \sqrt{\frac{V L_n}{A_n}}$$
+///
+/// and the speed of sound cancels: the equivalent length is pure geometry, so
+/// the branch tracks temperature exactly the way the chamber it stands in for
+/// does. That is what lets a Helmholtz muffler be a side branch on the same
+/// 3-port junction as every other side branch rather than a special case.
+#[inline]
+pub fn helmholtz_equivalent_stub_length(
+    neck_area: f64,
+    chamber_volume: f64,
+    neck_length: f64,
+) -> f64 {
+    let ratio = chamber_volume.max(1e-9) * neck_length.max(1e-6) / neck_area.max(1e-9);
+    std::f64::consts::FRAC_PI_2 * ratio.sqrt()
+}
+
+/// One silencing element in a bank's chain, composed from the primitives.
+///
+/// Every variant of [`crate::physics::plumbing::Silencer`] lands here, so the
+/// network never has to ask what kind of silencer it is holding — a straight
+/// pipe is simply a chain with nothing in it.
+#[derive(Debug, Clone)]
+pub enum SilencerElement {
+    /// A sudden expansion and the contraction back, one stage.
+    Chamber(ExpansionChamber),
+    /// A packed straight-through body.
+    Absorptive(AbsorptiveSilencer),
+    /// A closed side branch, either a drone-killer stub or a Helmholtz chamber
+    /// standing in as one; see [`helmholtz_equivalent_stub_length`].
+    SideBranch(QuarterWaveStub),
+}
+
+impl SilencerElement {
+    /// Appends the elements a geometric silencer is made of to `chain`.
+    ///
+    /// A [`crate::physics::plumbing::Silencer::Straight`] appends nothing, and a
+    /// multi-stage expansion chamber appends one [`ExpansionChamber`] per stage,
+    /// which is what a stage *is*.
+    pub fn extend_chain(
+        chain: &mut Vec<Self>,
+        silencer: &crate::physics::plumbing::Silencer,
+        pipe_area: f64,
+        sample_rate: f32,
+        gamma: f32,
+        gas_constant: f32,
+        temperature: f32,
+    ) {
+        use crate::physics::plumbing::Silencer;
+        match silencer {
+            Silencer::Straight => {}
+            Silencer::ExpansionChamber {
+                length,
+                area_ratio,
+                stages,
+            } => {
+                for _ in 0..(*stages).max(1) {
+                    chain.push(Self::Chamber(ExpansionChamber::new(
+                        pipe_area,
+                        *area_ratio,
+                        *length,
+                        sample_rate,
+                        gamma,
+                        gas_constant,
+                        temperature,
+                    )));
+                }
+            }
+            Silencer::Absorptive {
+                length,
+                area,
+                loss_db_per_m,
+            } => chain.push(Self::Absorptive(AbsorptiveSilencer::new(
+                pipe_area,
+                *area,
+                *length,
+                *loss_db_per_m,
+                sample_rate,
+                gamma,
+                gas_constant,
+                temperature,
+            ))),
+            Silencer::QuarterWaveStub { length, area } => {
+                chain.push(Self::SideBranch(QuarterWaveStub::new(
+                    pipe_area,
+                    *area,
+                    *length,
+                    sample_rate,
+                    gamma,
+                    gas_constant,
+                    temperature,
+                )))
+            }
+            Silencer::Helmholtz(geometry) => {
+                let length = helmholtz_equivalent_stub_length(
+                    geometry.neck_area,
+                    geometry.chamber_volume,
+                    geometry.neck_length,
+                );
+                chain.push(Self::SideBranch(QuarterWaveStub::new(
+                    pipe_area,
+                    geometry.neck_area,
+                    length,
+                    sample_rate,
+                    gamma,
+                    gas_constant,
+                    temperature,
+                )))
+            }
+        }
+    }
+
+    /// Retunes propagation delay and acoustic admittance for current gas state.
+    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
+        match self {
+            Self::Chamber(c) => c.tune(gamma, gas_constant, temperature),
+            Self::Absorptive(a) => a.tune(gamma, gas_constant, temperature),
+            Self::SideBranch(s) => s.tune(gamma, gas_constant, temperature),
+        }
+    }
+
+    /// Steps the element by one sample; see [`ExpansionChamber::step`] for the
+    /// port convention.
+    #[inline(always)]
+    pub fn step(&mut self, p_in_plus: f32, p_out_minus: f32) -> (f32, f32) {
+        match self {
+            Self::Chamber(c) => c.step(p_in_plus, p_out_minus),
+            Self::Absorptive(a) => a.step(p_in_plus, p_out_minus),
+            Self::SideBranch(s) => s.step(p_in_plus, p_out_minus),
+        }
+    }
+
+    /// Clears internal state.
+    pub fn reset(&mut self) {
+        match self {
+            Self::Chamber(c) => c.reset(),
+            Self::Absorptive(a) => a.reset(),
+            Self::SideBranch(s) => s.reset(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Composed elements: Bank crossover
 // ---------------------------------------------------------------------------
 
