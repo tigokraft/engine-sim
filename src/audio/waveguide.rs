@@ -547,6 +547,98 @@ impl ScatteringJunction {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Composed elements: Expansion chamber
+// ---------------------------------------------------------------------------
+
+/// Acoustic expansion chamber silencer composed from area steps.
+///
+/// Models a sudden expansion to area $A_2 = m A_1$ over length $L$, followed by
+/// a contraction back to $A_1$. Built from two 2-port scattering junctions
+/// separated by a bidirectional waveguide pipe.
+///
+/// Classical transmission loss for an expansion chamber of length $L$ and area ratio $m$:
+///
+/// $$TL = 10 \log_{10} \left[ 1 + \frac{1}{4} \left(m - \frac{1}{m}\right)^2 \sin^2(k L) \right]$$
+#[derive(Debug, Clone)]
+pub struct ExpansionChamber {
+    junction_in: ScatteringJunction,
+    cavity: WaveguidePipe,
+    junction_out: ScatteringJunction,
+    scatter_buf_in: [f32; 2],
+    scatter_buf_out: [f32; 2],
+}
+
+impl ExpansionChamber {
+    /// Constructs a single-stage expansion chamber:
+    /// - `pipe_area`: cross-sectional area of inlet and outlet pipes ($A_1$) [m^2].
+    /// - `area_ratio`: expansion ratio $m = A_2 / A_1$ [-].
+    /// - `length`: length of the expansion cavity $L$ [m].
+    pub fn new(
+        pipe_area: f64,
+        area_ratio: f64,
+        length: f64,
+        sample_rate: f32,
+        gamma: f32,
+        gas_constant: f32,
+        temperature: f32,
+    ) -> Self {
+        let a1 = pipe_area.max(1e-7);
+        let a2 = a1 * area_ratio.max(1.0);
+        let junction_in = ScatteringJunction::from_areas(&[a1, a2]);
+        let cavity = WaveguidePipe::new(length, a2, sample_rate, gamma, gas_constant, temperature);
+        let junction_out = ScatteringJunction::from_areas(&[a2, a1]);
+
+        Self {
+            junction_in,
+            cavity,
+            junction_out,
+            scatter_buf_in: [0.0; 2],
+            scatter_buf_out: [0.0; 2],
+        }
+    }
+
+    /// Retunes propagation delay and acoustic admittance for current gas state.
+    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
+        self.cavity.tune(gamma, gas_constant, temperature);
+    }
+
+    /// Steps the expansion chamber by one sample:
+    /// - `p_in_plus`: forward wave entering the chamber from upstream ($p^+$).
+    /// - `p_out_minus`: backward wave incident on the chamber exit from downstream ($p^-$).
+    ///
+    /// Returns `(p_in_minus, p_out_plus)`:
+    /// - `p_in_minus`: reflected wave returning upstream.
+    /// - `p_out_plus`: transmitted wave continuing downstream.
+    #[inline(always)]
+    pub fn step(&mut self, p_in_plus: f32, p_out_minus: f32) -> (f32, f32) {
+        let (p_cav_0, p_cav_1) = self.cavity.read_outputs();
+
+        // Upstream junction: inlet duct (0) and cavity inlet (1)
+        self.junction_in
+            .scatter(&[p_in_plus, p_cav_0], &mut self.scatter_buf_in);
+        let p_in_minus = self.scatter_buf_in[0];
+        let p_into_cav_0 = self.scatter_buf_in[1];
+
+        // Downstream junction: cavity exit (0) and outlet duct (1)
+        self.junction_out
+            .scatter(&[p_cav_1, p_out_minus], &mut self.scatter_buf_out);
+        let p_into_cav_1 = self.scatter_buf_out[0];
+        let p_out_plus = self.scatter_buf_out[1];
+
+        self.cavity.push_inputs(p_into_cav_0, p_into_cav_1);
+
+        (p_in_minus, p_out_plus)
+    }
+
+    /// Clears internal state.
+    pub fn reset(&mut self) {
+        self.cavity.reset();
+        self.scatter_buf_in = [0.0; 2];
+        self.scatter_buf_out = [0.0; 2];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
