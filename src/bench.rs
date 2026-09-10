@@ -109,7 +109,12 @@ impl EnginePreset {
 
     /// Builds a block on this preset in a given environment.
     pub fn block(&self, environment: Environment) -> EngineBlock {
-        EngineBlock::new(self.model, self.firing.clone(), environment)
+        let mut block = EngineBlock::new(self.model, self.firing.clone(), environment);
+        block.exhaust = self.exhaust.clone();
+        block.intake_system = self.intake.clone();
+        block.block_mass = self.block_mass;
+        block.rebuild_exhaust_banks();
+        block
     }
 
     /// The snapshot source for this engine, with its turbo shaft if it has one.

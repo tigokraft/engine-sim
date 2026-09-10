@@ -418,6 +418,53 @@ impl IntakeSystem {
             None
         }
     }
+
+    /// Default intake system geometry for a given cylinder count.
+    pub fn default_for_cylinders(cylinders: usize) -> Self {
+        let n = cylinders.max(1);
+        Self {
+            runners: vec![PipeSection::from_diameter(0.30, 0.042, 310.0); n],
+            plenum_volume: 0.5e-3 * n as f64,
+            throttle: ThrottleLayout::Single {
+                bore: (0.040 + 0.005 * n as f64).min(0.085),
+            },
+            airbox: Some(PipeSection::from_diameter(0.20, 0.070, 300.0)),
+            snorkel: Some(PipeSection::from_diameter(0.35, 0.065, 300.0)),
+            trumpet_flanged: true,
+        }
+    }
+}
+
+impl ExhaustSystem {
+    /// Default exhaust system geometry for a given cylinder count and bank count.
+    pub fn default_for_cylinders(cylinders: usize, banks: usize) -> Self {
+        let n = cylinders.max(1);
+        let b = banks.max(1);
+        let per_bank = (n / b).max(1);
+        let primary = PipeSection::from_diameter(0.45, 0.040, 850.0);
+        let collector_outlet_d = match per_bank {
+            1 | 2 => 0.050,
+            3 | 4 => 0.060,
+            5 | 6 => 0.065,
+            _ => 0.070,
+        };
+        Self {
+            primaries: vec![primary; n],
+            collector: Collector::from_diameter(per_bank, collector_outlet_d, 0.15),
+            secondary: vec![],
+            crossover: if b > 1 {
+                Crossover::HPipe {
+                    position: 0.80,
+                    area: PI * 0.022 * 0.022,
+                }
+            } else {
+                Crossover::None
+            },
+            silencers: vec![Silencer::Helmholtz(MufflerGeometry::default())],
+            tailpipe: PipeSection::from_diameter(1.2, collector_outlet_d, 600.0),
+            tailpipe_flanged: false,
+        }
+    }
 }
 
 #[cfg(test)]

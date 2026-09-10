@@ -83,6 +83,7 @@ use crate::audio::filters::{
     firing_interval_seconds, soft_clip, waveguide_damping, Biquad, BiquadCoeffs, BlockResonator,
     DcBlocker, ExhaustRunner, ModalBank, Muffler, MufflerGeometry, Noise, OnePole, Smoothed,
 };
+use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
 
 /// Samples between control-rate updates.
 ///
@@ -426,6 +427,10 @@ pub struct SynthConfig {
     pub cylinders: Vec<CylinderTap>,
     /// Number of exhaust banks; every [`CylinderTap::bank`] must be below this.
     pub bank_count: usize,
+    /// Exhaust system geometry: primaries, collector, crossover, and silencers.
+    pub exhaust: ExhaustSystem,
+    /// Intake system geometry: runners, plenum, throttle, airbox, and snorkel.
+    pub intake: IntakeSystem,
     /// Primary runner length from valve to collector [m].
     pub runner_length: f64,
     /// Magnitude of the collector reflection coefficient, `0..1` [-].
@@ -515,10 +520,14 @@ impl SynthConfig {
                 bank: i % banks,
             })
             .collect();
+        let exhaust = ExhaustSystem::default_for_cylinders(n, banks);
+        let intake = IntakeSystem::default_for_cylinders(n);
         Self {
             sample_rate,
             cylinders: taps,
             bank_count: banks,
+            exhaust,
+            intake,
             runner_length: 0.45,
             runner_reflection: 0.55,
             muffler: MufflerGeometry::default(),

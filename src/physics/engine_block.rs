@@ -31,6 +31,7 @@ use std::f64::consts::PI;
 
 use crate::environment::Environment;
 use crate::physics::cylinder::{wrap_cycle, CylinderGeometry, GasProperties, CYCLE_ANGLE};
+use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
 use crate::physics::thermodynamics::{
     CycleLatch, CylinderModel, PortConditions, Rk4Solver, StepReport, ThermoState,
 };
@@ -1014,6 +1015,12 @@ pub struct EngineBlock {
     pub omega: f64,
     /// Optional overrides for per-cylinder EVO pressure, for testing cylinder scatter [Pa].
     pub evo_overrides: Vec<Option<f64>>,
+    /// Exhaust system geometry: primaries, collector, crossover, and silencers.
+    pub exhaust: ExhaustSystem,
+    /// Intake system geometry: runners, plenum, throttle, airbox, and snorkel.
+    pub intake_system: IntakeSystem,
+    /// Dressed mass of the engine block [kg].
+    pub block_mass: f64,
 }
 
 impl EngineBlock {
@@ -1024,12 +1031,15 @@ impl EngineBlock {
         // Collector sized to roughly one bank's worth of displacement: big
         // enough to smooth the pulses, small enough to still breathe.
         let collector = model.geometry.displacement() * per_bank as f64 * 1.5;
-        let runner_area = PI * model.valves.exhaust.diameter.powi(2) / 4.0 * 1.4;
+        let exhaust = ExhaustSystem::default_for_cylinders(firing.len(), banks);
+        let intake_system = IntakeSystem::default_for_cylinders(firing.len());
+        let runner_area = exhaust.primary_area();
 
         let exhaust_banks = (0..banks)
-            .map(|_| {
+            .map(|bank_idx| {
+                let runner_length = exhaust.primary_length_for_bank(bank_idx, banks);
                 ExhaustManifold::new(
-                    0.75,
+                    runner_length,
                     runner_area,
                     24,
                     collector,
@@ -1063,7 +1073,32 @@ impl EngineBlock {
             crankcase_pressure: environment.pressure,
             omega: 0.0,
             evo_overrides: Vec::new(),
+            exhaust,
+            intake_system,
+            block_mass: 180.0,
         }
+    }
+
+    /// Re-sizes the exhaust manifolds from the block's current exhaust geometry.
+    pub fn rebuild_exhaust_banks(&mut self) {
+        let banks = self.firing.bank_count().max(1);
+        let per_bank = (self.firing.len() / banks).max(1);
+        let collector = self.model.geometry.displacement() * per_bank as f64 * 1.5;
+        let runner_area = self.exhaust.primary_area();
+        self.exhaust_banks = (0..banks)
+            .map(|bank_idx| {
+                let runner_length = self.exhaust.primary_length_for_bank(bank_idx, banks);
+                ExhaustManifold::new(
+                    runner_length,
+                    runner_area,
+                    24,
+                    collector,
+                    self.environment.pressure,
+                    900.0,
+                    &self.model.gas,
+                )
+            })
+            .collect();
     }
 
     /// A 4.0 litre cross-plane V8 on the default cylinder model.
