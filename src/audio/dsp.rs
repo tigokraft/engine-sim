@@ -1313,7 +1313,7 @@ pub struct EngineSynth {
     exhaust_gas_constant: Smoothed,
     intake_flow: Smoothed,
     throttle: Smoothed,
-    blowdown_pa: Smoothed,
+    blowdown_pa: Vec<Smoothed>,
 
     /// Per-cylinder draw for the next firing; parallel to `config.cylinders`.
     ///
@@ -1363,6 +1363,9 @@ impl EngineSynth {
         let banks = (0..config.bank_count)
             .map(|i| ExhaustBank::new(&config, i, &snapshot))
             .collect();
+        let blowdown_pa = (0..config.cylinders.len())
+            .map(|_| Smoothed::new(0.0, fs, 0.005))
+            .collect();
 
         let mut synth = Self {
             banks,
@@ -1379,7 +1382,7 @@ impl EngineSynth {
             exhaust_gas_constant: Smoothed::new(snapshot.exhaust_gas_constant, fs, 0.080),
             intake_flow: Smoothed::new(0.0, fs, 0.020),
             throttle: Smoothed::new(0.0, fs, 0.020),
-            blowdown_pa: Smoothed::new(0.0, fs, 0.015),
+            blowdown_pa,
             cycle_hz: Smoothed::new(0.0, fs, 0.030),
             exhaust_level: Smoothed::new(config.exhaust_level as f32, fs, 0.050),
             snapshot,
@@ -1430,7 +1433,9 @@ impl EngineSynth {
 
         // RPM / 120 is the four-stroke cycle rate: two revolutions per cycle.
         self.cycle_hz.set_target(snapshot.rpm / 120.0);
-        self.blowdown_pa.set_target(snapshot.blowdown_delta[0]);
+        for (i, smoother) in self.blowdown_pa.iter_mut().enumerate() {
+            smoother.set_target(snapshot.blowdown_delta[i]);
+        }
         self.exhaust_temperature
             .set_target(snapshot.exhaust_temperature);
         self.exhaust_gamma.set_target(snapshot.exhaust_gamma);
@@ -1444,6 +1449,9 @@ impl EngineSynth {
     pub fn reset(&mut self) {
         for bank in self.banks.iter_mut() {
             bank.reset();
+        }
+        for smoother in self.blowdown_pa.iter_mut() {
+            smoother.snap(0.0);
         }
         self.intake.reset();
         self.turbo.reset();
@@ -1520,7 +1528,9 @@ impl EngineSynth {
         let gas_constant = self.exhaust_gas_constant.advance(block);
         let flow = self.intake_flow.advance(block);
         let throttle = self.throttle.advance(block);
-        self.blowdown_pa.advance(block);
+        for smoother in self.blowdown_pa.iter_mut() {
+            smoother.advance(block);
+        }
 
         // The smoothed speed, not the snapshot's: every schedule below has to
         // move with the same glide the rest of the synth is on, or a throttle
@@ -1580,47 +1590,46 @@ impl EngineSynth {
         }
 
         let previous = self.cycle_phase;
-        let blowdown = self.blowdown_pa.value();
-        // Strictly linear in the pressure difference, per the excitation model.
-        let amplitude = (blowdown / REFERENCE_BLOWDOWN).min(2.0);
+        // Blowdown lasts a roughly fixed number of crank degrees, so its
+        // duration in seconds is inversely proportional to engine speed.
+        // Holding it fixed in time instead would smear the pulses into each
+        // other at high rpm and leave the note hollow at low rpm.
+        let cycle_seconds = 1.0 / cycle_hz.max(1e-3);
+        let decay =
+            (self.config.blowdown_degrees as f32 / 720.0 * cycle_seconds).clamp(0.0004, 0.020);
+        // Attack and noise content are deliberately *not* functions of
+        // amplitude. Making the pulse shape vary with loudness would leave
+        // the radiated level only roughly proportional to the pressure
+        // difference, and strict proportionality is the excitation model's
+        // one quantitative claim. Everything that shapes the pulse is a
+        // function of engine speed, which is orthogonal to it.
+        let attack = 0.00016;
+        let noise_depth = 0.5;
+        let depth = self.variation_depth;
+        // Firing jitter is a delay in samples, so it needs the cycle in
+        // samples. Zero above CCV_THRESHOLD_RPM, where the mean retard
+        // switches off with the variation it exists to carry.
+        let cycle_samples = cycle_seconds * self.config.sample_rate;
+        let retard = if depth > 0.0 {
+            CCV_MEAN_RETARD_FRACTION / self.config.cylinders.len() as f32 * cycle_samples
+        } else {
+            0.0
+        };
 
-        if amplitude > 1e-5 {
-            // Blowdown lasts a roughly fixed number of crank degrees, so its
-            // duration in seconds is inversely proportional to engine speed.
-            // Holding it fixed in time instead would smear the pulses into each
-            // other at high rpm and leave the note hollow at low rpm.
-            let cycle_seconds = 1.0 / cycle_hz.max(1e-3);
-            let decay =
-                (self.config.blowdown_degrees as f32 / 720.0 * cycle_seconds).clamp(0.0004, 0.020);
-            // Attack and noise content are deliberately *not* functions of
-            // amplitude. Making the pulse shape vary with loudness would leave
-            // the radiated level only roughly proportional to the pressure
-            // difference, and strict proportionality is the excitation model's
-            // one quantitative claim. Everything that shapes the pulse is a
-            // function of engine speed, which is orthogonal to it.
-            let attack = 0.00016;
-            let noise_depth = 0.5;
-            let depth = self.variation_depth;
-            // Firing jitter is a delay in samples, so it needs the cycle in
-            // samples. Zero above CCV_THRESHOLD_RPM, where the mean retard
-            // switches off with the variation it exists to carry.
-            let cycle_samples = cycle_seconds * self.config.sample_rate;
-            let retard = if depth > 0.0 {
-                CCV_MEAN_RETARD_FRACTION / self.config.cylinders.len() as f32 * cycle_samples
-            } else {
-                0.0
-            };
-
-            for index in 0..self.config.cylinders.len() {
-                let tap = self.config.cylinders[index];
-                let variation = self.variation[index];
-                // Distance from the previous phase forward to this cylinder's
-                // trigger, wrapped into [0, 1). The trigger is the firing table
-                // and nothing else — jitter is applied to the pulse, not to the
-                // angle, so this test still fires each cylinder exactly once per
-                // cycle no matter what was drawn.
-                let ahead = (tap.evo_phase - previous).rem_euclid(1.0);
-                if ahead < increment {
+        for index in 0..self.config.cylinders.len() {
+            let tap = self.config.cylinders[index];
+            let variation = self.variation[index];
+            // Distance from the previous phase forward to this cylinder's
+            // trigger, wrapped into [0, 1). The trigger is the firing table
+            // and nothing else — jitter is applied to the pulse, not to the
+            // angle, so this test still fires each cylinder exactly once per
+            // cycle no matter what was drawn.
+            let ahead = (tap.evo_phase - previous).rem_euclid(1.0);
+            if ahead < increment {
+                let blowdown = self.blowdown_pa[index].value();
+                // Strictly linear in the pressure difference, per the excitation model.
+                let amplitude = (blowdown / REFERENCE_BLOWDOWN).min(2.0);
+                if amplitude > 1e-5 {
                     // Fraction of this sample that has elapsed since the pulse
                     // began, which is how far into its envelope it already is.
                     let age = 1.0 - ahead / increment;
@@ -2291,7 +2300,9 @@ mod tests {
         // Start exactly on a cycle boundary at a settled speed, so the count is
         // a whole number of cycles by construction.
         synth.cycle_hz.snap(800.0 / 120.0);
-        synth.blowdown_pa.snap(idle_snapshot().blowdown_delta[0]);
+        for (i, smoother) in synth.blowdown_pa.iter_mut().enumerate() {
+            smoother.snap(idle_snapshot().blowdown_delta[i]);
+        }
         synth.cycle_phase = 0.0;
 
         let cycles = 5usize;
