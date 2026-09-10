@@ -332,6 +332,8 @@ pub struct SnapshotSource {
     evo_angle: f64,
     /// The audio-side turbo shaft, if the engine has one.
     turbo: Option<TurboModel>,
+    /// Rotating assembly inertia [kg m^2].
+    inertia: f64,
 }
 
 impl SnapshotSource {
@@ -349,7 +351,19 @@ impl SnapshotSource {
         Self {
             evo_angle: block.model.valves.exhaust.open_angle,
             turbo: induction.shaft(),
+            inertia: 0.25,
         }
+    }
+
+    /// Sets the rotating assembly inertia [kg m^2].
+    pub fn with_inertia(mut self, inertia: f64) -> Self {
+        self.inertia = inertia.max(1e-3);
+        self
+    }
+
+    /// Rotating assembly inertia [kg m^2].
+    pub fn inertia(&self) -> f64 {
+        self.inertia
     }
 
     /// The exhaust valve opening angle this source samples at [rad].
@@ -473,6 +487,10 @@ impl SnapshotSource {
         let knock_intensity = (block.master.knock_integral - 1.0).max(0.0) as f32;
         let bore = block.model.geometry.bore as f32;
 
+        let n_cylinders = block.firing.len().max(1) as f64;
+        let cycle_work = block.ring.indicated_work(block.crankcase_pressure) * n_cylinders;
+        let mean_indicated_torque = cycle_work / crate::physics::cylinder::CYCLE_ANGLE;
+
         EngineSnapshot {
             rpm: rpm as f32,
             blowdown_delta,
@@ -488,6 +506,8 @@ impl SnapshotSource {
             spark_cut: controls.spark_cut,
             knock_intensity,
             bore,
+            indicated_torque: mean_indicated_torque as f32,
+            inertia: self.inertia as f32,
         }
         .sanitized()
     }
@@ -671,6 +691,8 @@ mod tests {
                 spark_cut: false,
                 knock_intensity: 0.0,
                 bore: 0.084,
+                indicated_torque: 250.0,
+                inertia: 0.25,
             };
             snapshot = snapshot.sanitized();
 

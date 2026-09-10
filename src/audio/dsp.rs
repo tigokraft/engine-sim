@@ -184,6 +184,10 @@ pub struct EngineSnapshot {
     pub knock_intensity: f32,
     /// Cylinder bore diameter [m].
     pub bore: f32,
+    /// Mean indicated torque over the cycle [N m].
+    pub indicated_torque: f32,
+    /// Rotating assembly inertia [kg m^2].
+    pub inertia: f32,
 }
 
 impl Default for EngineSnapshot {
@@ -205,6 +209,8 @@ impl Default for EngineSnapshot {
             spark_cut: false,
             knock_intensity: 0.0,
             bore: 0.084,
+            indicated_torque: 0.0,
+            inertia: 0.25,
         }
     }
 }
@@ -245,6 +251,8 @@ impl EngineSnapshot {
         guard!(friction_mep, 0.0, 2.0e6);
         guard!(knock_intensity, 0.0, 50.0);
         guard!(bore, 0.010, 0.500);
+        guard!(indicated_torque, -500.0, 50_000.0);
+        guard!(inertia, 0.010, 100.0);
         self
     }
 }
@@ -1918,6 +1926,8 @@ mod tests {
             spark_cut: false,
             knock_intensity: 0.0,
             bore: 0.084,
+            indicated_torque: 250.0,
+            inertia: 0.25,
         }
     }
 
@@ -2151,6 +2161,8 @@ mod tests {
             spark_cut: true,
             knock_intensity: f32::NAN,
             bore: f32::NAN,
+            indicated_torque: f32::NAN,
+            inertia: f32::NAN,
         });
         let out = render(&mut synth, 48_000);
         assert!(out.iter().all(|s| s.is_finite()), "NaN reached the device");
