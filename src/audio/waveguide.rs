@@ -639,6 +639,108 @@ impl ExpansionChamber {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Composed elements: Quarter-wave stub (drone killer)
+// ---------------------------------------------------------------------------
+
+/// Acoustic quarter-wave side-branch resonator (destructive interference notch).
+///
+/// Composed of a 3-port scattering junction joining the main duct with a closed-end
+/// side branch. At the quarter-wave frequency:
+///
+/// $$f_{\text{notch}} = \frac{c}{4 L_{\text{stub}}}$$
+///
+/// the round-trip through the stub covers $\lambda / 2$ ($\pi$ phase delay).
+/// Combined with the in-phase rigid reflection ($r = +1.0$) at the closed end,
+/// the returning wave arrives in anti-phase at the junction, producing a deep
+/// transmission notch.
+#[derive(Debug, Clone)]
+pub struct QuarterWaveStub {
+    junction: ScatteringJunction,
+    stub_pipe: WaveguidePipe,
+    length: f32,
+    scatter_buf: [f32; 3],
+}
+
+impl QuarterWaveStub {
+    /// Constructs a quarter-wave stub:
+    /// - `pipe_area`: through-duct cross-sectional area [m^2].
+    /// - `stub_area`: side branch cross-sectional area [m^2].
+    /// - `stub_length`: side branch centerline length $L_{\text{stub}}$ [m].
+    pub fn new(
+        pipe_area: f64,
+        stub_area: f64,
+        stub_length: f64,
+        sample_rate: f32,
+        gamma: f32,
+        gas_constant: f32,
+        temperature: f32,
+    ) -> Self {
+        let ap = pipe_area.max(1e-7);
+        let as_ = stub_area.max(1e-7);
+        let junction = ScatteringJunction::from_areas(&[ap, ap, as_]);
+        let stub_pipe = WaveguidePipe::new(
+            stub_length,
+            as_,
+            sample_rate,
+            gamma,
+            gas_constant,
+            temperature,
+        );
+
+        Self {
+            junction,
+            stub_pipe,
+            length: stub_length.max(0.001) as f32,
+            scatter_buf: [0.0; 3],
+        }
+    }
+
+    /// Theoretical quarter-wave notch frequency [Hz]:
+    ///
+    /// $$f_0 = \frac{c}{4 L_{\text{stub}}}$$
+    pub fn notch_frequency_hz(&self, speed_of_sound: f32) -> f32 {
+        speed_of_sound / (4.0 * self.length)
+    }
+
+    /// Retunes propagation delay and acoustic admittance for current gas state.
+    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
+        self.stub_pipe.tune(gamma, gas_constant, temperature);
+    }
+
+    /// Steps the stub by one sample:
+    /// - `p_in_plus`: forward wave arriving from upstream ($p^+$).
+    /// - `p_out_minus`: backward wave arriving from downstream ($p^-$).
+    ///
+    /// Returns `(p_in_minus, p_out_plus)`:
+    /// - `p_in_minus`: reflected wave returning upstream.
+    /// - `p_out_plus`: transmitted wave continuing downstream.
+    #[inline(always)]
+    pub fn step(&mut self, p_in_plus: f32, p_out_minus: f32) -> (f32, f32) {
+        let (p_stub_0, p_stub_1) = self.stub_pipe.read_outputs();
+
+        // Closed rigid end at port 1: reflection is +1.0
+        let p_rigid_reflected = p_stub_1;
+
+        // 3-port junction: upstream (0), downstream (1), stub inlet (2)
+        self.junction
+            .scatter(&[p_in_plus, p_out_minus, p_stub_0], &mut self.scatter_buf);
+        let p_in_minus = self.scatter_buf[0];
+        let p_out_plus = self.scatter_buf[1];
+        let p_into_stub = self.scatter_buf[2];
+
+        self.stub_pipe.push_inputs(p_into_stub, p_rigid_reflected);
+
+        (p_in_minus, p_out_plus)
+    }
+
+    /// Clears internal state.
+    pub fn reset(&mut self) {
+        self.stub_pipe.reset();
+        self.scatter_buf = [0.0; 3];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
