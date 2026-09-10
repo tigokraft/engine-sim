@@ -34,17 +34,17 @@ What is wrong with it, in the order this plan fixes it:
 |---|---|---|
 | 1 | No measurement harness, so no change can be proven | — |
 | 2 | Knock is solved and displayed, never heard | `physics/thermodynamics.rs:173` |
-| 3 | Blowdown smoothed over 15 ms — six firings at 6000 rpm — so every cylinder gets the same amplitude | `audio/dsp.rs:1372` |
-| 4 | Crank speed is smoothed constant; no intra-cycle ripple | `audio/dsp.rs:1551` |
-| 5 | Mechanical layer is one click plus one noise bed | `audio/dsp.rs:970` |
-| 6 | Every engine shares one runner length, reflection, muffler, block mass | `audio/mod.rs:472` |
+| 3 | Blowdown smoothed over 15 ms — six firings at 6000 rpm — so every cylinder gets the same amplitude | `audio/dsp.rs:1374` |
+| 4 | Crank speed is smoothed constant; no intra-cycle ripple | `audio/dsp.rs:1565` |
+| 5 | Mechanical layer is one click plus one noise bed | `audio/dsp.rs:972` |
+| 6 | Every engine shares one runner length, reflection, muffler, block mass | `audio/mod.rs:484` |
 | 7 | No radiation model; tailpipe is a lowpass where physics wants a differentiator | `audio/filters.rs:702` |
-| 8 | One shared runner per bank, hand-set reflection coefficient | `audio/dsp.rs:749` |
-| 9 | No intake pipe at all, so no intake note | `audio/dsp.rs:846` |
+| 8 | One shared runner per bank, hand-set reflection coefficient | `audio/dsp.rs:754` |
+| 9 | No intake pipe at all, so no intake note | `audio/dsp.rs:853` |
 | 10 | Nothing from combustion reaches the block; structure is one biquad on the bus | `audio/filters.rs:1008` |
 | 11 | No thermal state: wall temperature fixed, no cold engine | `physics/thermodynamics.rs:236` |
 | 12 | Bulk exhaust temperature for all delays; no mean-flow convection | `audio/filters.rs:863` |
-| 13 | Exhaust panned, everything else centred; no space, no apertures | `audio/dsp.rs:1626` |
+| 13 | Exhaust panned, everything else centred; no space, no apertures | `audio/dsp.rs:1654` |
 | 14 | AFR and spark timing are constants | `physics/thermodynamics.rs` |
 | 15 | Physics pipe is linear-acoustic at Mach 0.5 | `physics/engine_block.rs:683` |
 
@@ -257,7 +257,7 @@ test firing intervals ripple at idle
 >    past 1.0 the integral went. Route it through the block resonator, not the
 >    exhaust bus.
 > 2. **Per-cylinder blowdown.** The single `blowdown_pa` smoother at
->    `src/audio/dsp.rs:1372` has a 15 ms time constant, slower than the firing
+>    `src/audio/dsp.rs:1374` has a 15 ms time constant, slower than the firing
 >    interval — it erases real cylinder-to-cylinder pressure differences.
 >    Replace it with a per-cylinder array sampled from the phase ring at each
 >    cylinder's own EVO phase, and cut `CycleVariation`'s amplitude sigma to
@@ -449,7 +449,7 @@ test every preset derives distinct acoustics
 > Implement Stage 3 of `docs/IMPLEMENTATION_PLAN.md`. Read that stage and
 > `AGENTS.md` first. Commit each piece separately, one line, no trailers.
 >
-> Today `SynthConfig::from_block` (`src/audio/mod.rs:472`) copies only the firing
+> Today `SynthConfig::from_block` (`src/audio/mod.rs:484`) copies only the firing
 > taps out of the block, so every engine in the catalogue inherits
 > `runner_length: 0.45`, `runner_reflection: 0.55`, one default muffler and
 > `block_mass: 180.0`. Fix that at the root: add `src/physics/plumbing.rs` with
@@ -523,7 +523,7 @@ test radiated tilt is six db per octave
 >
 > Add `src/audio/radiation.rs` with a proper open-end termination and use it in
 > place of the ad-hoc open end inside `ExhaustRunner`
-> (`src/audio/filters.rs:772`) and the `tailpipe_cutoff` lowpass in `Muffler`.
+> (`src/audio/filters.rs:792`) and the `tailpipe_cutoff` lowpass in `Muffler`.
 > Three parts, all from mouth radius: a reflection filter with `|R|->1` at
 > `ka<<1` and `->0` at `ka>>1` cornering at `f = c/(2 pi a)` with DC gain `-1`; an
 > end correction of `0.6133a` unflanged or `0.8216a` flanged added to the delay;
@@ -732,7 +732,7 @@ test itbs are brighter than a single throttle
 > that stage, Stage 5 (whose waveguide primitives you reuse unchanged) and
 > `AGENTS.md`. Granular one-line commits, no trailers.
 >
-> Replace `IntakeVoice` (`src/audio/dsp.rs:846`), which is bandpassed noise with
+> Replace `IntakeVoice` (`src/audio/dsp.rs:853`), which is bandpassed noise with
 > no pipe in it, with a real network built from `IntakeSystem`: port, per-cylinder
 > runner, plenum junction, throttle as a time-varying area restriction, airbox,
 > snorkel, mouth radiation. Excite it with three things, each its own commit: the
@@ -1080,7 +1080,7 @@ test steepening raises high orders with amplitude
 in real positions relative to a listener.
 
 **Why.** Today the exhaust is panned by bank index and everything else is centred
-(`src/audio/dsp.rs:1626`). Tailpipe, intake mouth and block are metres apart on a
+(`src/audio/dsp.rs:1654`). Tailpipe, intake mouth and block are metres apart on a
 real car; getting that *geometry* right does more for "this is a physical object"
 than any single filter.
 
@@ -1135,7 +1135,7 @@ test ground notch matches the path difference
 > Implement Stage 11 of `docs/IMPLEMENTATION_PLAN.md`. Read it and `AGENTS.md`.
 > Granular one-line commits, no trailers.
 >
-> The mix in `src/audio/dsp.rs:1626` pans the exhaust by bank index and puts
+> The mix in `src/audio/dsp.rs:1654` pans the exhaust by bank index and puts
 > everything else in the centre. Replace it with a real propagation model in
 > `src/audio/propagation.rs`: an aperture list (tailpipes, intake mouth, block)
 > each with position, area and facing, each delayed by its own path length,
