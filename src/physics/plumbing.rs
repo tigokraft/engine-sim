@@ -255,7 +255,6 @@ impl ExhaustSystem {
         }
     }
 
-    /// Primary runner length for a given bank [m].
     /// Mean primary length of the cylinders that actually feed one bank [m].
     ///
     /// Bank membership comes from the firing table, not from position in the
@@ -280,26 +279,6 @@ impl ExhaustSystem {
         } else {
             total / count as f64
         }
-    }
-
-    pub fn primary_length_for_bank(&self, bank: usize, bank_count: usize) -> f64 {
-        if self.primaries.is_empty() {
-            return 0.0;
-        }
-        if bank_count <= 1 {
-            return self.primary_length();
-        }
-        let per_bank = self.primaries.len() / bank_count;
-        if per_bank == 0 {
-            return self.primary_length();
-        }
-        let start = bank * per_bank;
-        let end = (start + per_bank).min(self.primaries.len());
-        if start >= end {
-            return self.primary_length();
-        }
-        let slice = &self.primaries[start..end];
-        slice.iter().map(|p| p.length).sum::<f64>() / slice.len() as f64
     }
 
     /// Acoustic reflection coefficient at the collector junction:
