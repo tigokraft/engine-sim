@@ -495,10 +495,19 @@ pub fn track(samples: &[f32], sample_rate: f64, rpm: &RpmCurve, orders: &[f64]) 
 
 /// Smallest rise above the surrounding spectrum that counts as a peak [dB].
 ///
-/// Averaging many frames of a running engine leaves about a decibel of scatter
-/// per bin, so anything under about three is the noise floor's own shape rather
-/// than a resonance.
+/// An absolute floor under the adaptive test below, so that a very long and
+/// very smooth average does not start reporting half-decibel ripples as modes.
 pub const MIN_PROMINENCE_DB: f64 = 3.0;
+
+/// How far above the average's own residual scatter a peak has to stand.
+///
+/// Averaging `M` periodograms leaves a chi-square scatter of roughly
+/// `4.34 / sqrt(M)` dB in every bin, and over the few thousand bins of a
+/// spectrum the largest excursion of pure noise lands a little under five of
+/// those. Six is the first multiple that reports nothing at all from white
+/// noise, and it means a peak found in a short render is as trustworthy as one
+/// found in a long one without either having to know how long it was.
+pub const PROMINENCE_SIGMA: f64 = 6.0;
 
 /// A peak in a render's long-term average spectrum.
 ///
@@ -591,7 +600,38 @@ impl AverageSpectrum {
         db(self.stft.bin_amplitude(self.power[k]))
     }
 
+    /// Scatter left in the average by the finite number of frames [dB].
+    ///
+    /// Estimated from the differences between bins a main lobe apart, through a
+    /// median rather than a mean: a real resonance puts a large difference on
+    /// its two flanks, and a median ignores the handful of bins that are on
+    /// one. The gap has to clear the window's own main lobe, or the two bins
+    /// share energy and their difference understates the scatter.
+    ///
+    /// A normal variable's median absolute value is `0.6745 sigma`, and the
+    /// difference of two independent bins carries `sqrt(2)` times one bin's.
+    pub fn scatter_db(&self) -> f64 {
+        let bins = self.power.len();
+        let first = (self.stft.resolution_floor() / self.bin_hz()).ceil() as usize;
+        let gap = LOBE as usize + 1;
+        if first + gap >= bins {
+            return 0.0;
+        }
+
+        let curve: Vec<f64> = (first..bins).map(|k| self.bin_db(k)).collect();
+        let mut diffs: Vec<f64> = curve
+            .windows(gap + 1)
+            .map(|w| (w[gap] - w[0]).abs())
+            .collect();
+        diffs.sort_by(f64::total_cmp);
+        diffs[diffs.len() / 2] / 0.6745 / std::f64::consts::SQRT_2
+    }
+
     /// The `count` most prominent peaks, in frequency order.
+    ///
+    /// `min_prominence_db` is a floor: the test actually applied is the larger
+    /// of it and [`PROMINENCE_SIGMA`] times [`Self::scatter_db`], so a short
+    /// render is held to a higher bar than a long one.
     ///
     /// Frequencies are interpolated by fitting a parabola through the peak bin
     /// and its two neighbours in decibels, which is what recovers a resonance to
@@ -607,6 +647,7 @@ impl AverageSpectrum {
             return Vec::new();
         }
 
+        let threshold = min_prominence_db.max(PROMINENCE_SIGMA * self.scatter_db());
         let curve: Vec<f64> = (0..bins).map(|k| self.bin_db(k)).collect();
         let mut found = Vec::new();
 
@@ -633,7 +674,7 @@ impl AverageSpectrum {
             }
 
             let prominence = curve[k] - left.max(right);
-            if prominence < min_prominence_db {
+            if prominence < threshold {
                 continue;
             }
 
@@ -863,5 +904,93 @@ mod tests {
         let (slow, fast) = curve.range(0.0, 0.1);
         assert!((slow - 6_880.0).abs() < 1e-9, "missed the bounce: {slow}");
         assert!((fast - 7_000.0).abs() < 1e-9);
+    }
+
+    /// The plan's claim for the peak picker: two known tones, both found, both
+    /// within one per cent.
+    #[test]
+    fn the_peak_picker_finds_both_tones_of_a_two_tone_signal() {
+        let (low, high) = (220.0, 733.0);
+        let a = tone(low, 0.5, 2.0);
+        let b = tone(high, 0.25, 2.0);
+        let mixed: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x + y).collect();
+
+        let peaks = resonances(&mixed, RATE, 8);
+        assert!(peaks.len() >= 2, "found {} peaks, wanted two", peaks.len());
+
+        for (wanted, level) in [(low, -6.02), (high, -12.04)] {
+            let found = peaks
+                .iter()
+                .min_by(|p, q| (p.hz - wanted).abs().total_cmp(&(q.hz - wanted).abs()))
+                .unwrap();
+            let error = (found.hz - wanted).abs() / wanted;
+            assert!(
+                error < 0.01,
+                "{wanted} Hz came back as {:.2} Hz, {:.2} % out",
+                found.hz,
+                error * 100.0
+            );
+            assert!(
+                (found.db - level).abs() < 0.5,
+                "{wanted} Hz read {:.2} dB, wanted {level:.2}",
+                found.db
+            );
+        }
+    }
+
+    /// Interpolation, not rounding: a tone deliberately between two bins comes
+    /// back at its own frequency rather than at the nearest bin centre.
+    #[test]
+    fn a_peak_between_two_bins_is_interpolated() {
+        let bin = RATE / WINDOW as f64;
+        let wanted = 60.4 * bin;
+        let peaks = resonances(&tone(wanted, 0.5, 2.0), RATE, 4);
+
+        let found = peaks
+            .iter()
+            .min_by(|p, q| (p.hz - wanted).abs().total_cmp(&(q.hz - wanted).abs()))
+            .expect("no peak at all");
+        assert!(
+            (found.hz - wanted).abs() < 0.25 * bin,
+            "{wanted:.2} Hz came back as {:.2} Hz, and the bin is {bin:.2} Hz wide",
+            found.hz
+        );
+    }
+
+    /// Noise alone has no resonances in it.
+    #[test]
+    fn a_flat_noise_floor_has_no_prominent_peaks() {
+        // A fixed linear congruential draw, so the test is the same every run.
+        let mut state = 0x2545_F491u32;
+        let samples: Vec<f32> = (0..(2.0 * RATE) as usize)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+            })
+            .collect();
+
+        let all = AverageSpectrum::of(&samples, RATE).peaks(4096, 0.0);
+        let mut proms: Vec<f64> = all.iter().map(|p| p.prominence_db).collect();
+        proms.sort_by(|a, b| b.total_cmp(a));
+        println!(
+            "PROBE frames={} peaks={} top={:?}",
+            AverageSpectrum::of(&samples, RATE).frames(),
+            all.len(),
+            &proms[..10.min(proms.len())]
+        );
+        let peaks = resonances(&samples, RATE, 32);
+        assert!(
+            peaks.len() < 8,
+            "picked {} peaks out of white noise",
+            peaks.len()
+        );
+    }
+
+    /// A render shorter than one window has nothing to average.
+    #[test]
+    fn a_render_under_one_window_reports_no_frames() {
+        let spectrum = AverageSpectrum::of(&tone(200.0, 0.5, 0.05), RATE);
+        assert_eq!(spectrum.frames(), 0);
+        assert!(spectrum.peaks(8, MIN_PROMINENCE_DB).is_empty());
     }
 }
