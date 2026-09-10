@@ -44,6 +44,13 @@ pub const EXHAUST_PRANDTL_NUMBER: f32 = 0.71;
 /// Effective turbulent boundary layer enhancement factor in corrugated/hot exhaust pipe.
 const BOUNDARY_LAYER_TURBULENCE_FACTOR: f32 = 16.0;
 
+/// Fraction of the valve-end reflection that survives full damping [-].
+///
+/// Not zero: even wide open, a port is a real area change and does send
+/// something back. It is small enough that the primary's ringdown falls below
+/// one firing interval, which is what stops a comb from forming.
+pub const VALVE_DAMPED_REFLECTION: f32 = 0.35;
+
 // ---------------------------------------------------------------------------
 // Viscothermal wall loss
 // ---------------------------------------------------------------------------
@@ -139,6 +146,11 @@ impl ViscothermalLoss {
         self.cutoff_hz
     }
 
+    /// Delay the loss filter adds to a wave passing through it [samples].
+    pub fn phase_delay_samples(&self) -> f32 {
+        self.filter.phase_delay_samples()
+    }
+
     /// Clears internal state.
     pub fn reset(&mut self) {
         self.filter.reset();
@@ -166,6 +178,7 @@ impl ViscothermalLoss {
 pub struct ValveTermination {
     pipe_area: f32,
     reflection: f32,
+    damping: f32,
 }
 
 impl ValveTermination {
@@ -174,6 +187,7 @@ impl ValveTermination {
         Self {
             pipe_area: pipe_area.max(1e-7) as f32,
             reflection: 1.0,
+            damping: 0.0,
         }
     }
 
@@ -190,7 +204,17 @@ impl ValveTermination {
 
     /// Reflection coefficient currently in effect [-].
     pub fn reflection(&self) -> f32 {
-        self.reflection
+        self.reflection * (1.0 - self.damping * (1.0 - VALVE_DAMPED_REFLECTION))
+    }
+
+    /// Softens the reflection, `0` for the bare boundary and `1` fully damped.
+    pub fn set_damping(&mut self, damping: f32) {
+        self.damping = damping.clamp(0.0, 1.0);
+    }
+
+    /// Damping currently applied, `0..=1` [-].
+    pub fn damping(&self) -> f32 {
+        self.damping
     }
 
     /// Computes the forward-travelling wave entering the runner:
@@ -198,7 +222,7 @@ impl ValveTermination {
     /// - `returning_wave`: backward wave arriving at the valve boundary ($p^-(0)$) [Pa].
     #[inline(always)]
     pub fn step(&self, excitation: f32, returning_wave: f32) -> f32 {
-        excitation + self.reflection * returning_wave
+        excitation + self.reflection() * returning_wave
     }
 }
 
@@ -282,6 +306,16 @@ impl MouthTermination {
         self.area
     }
 
+    /// Delay the reflection filter adds to a wave turning around here [samples].
+    ///
+    /// The end correction says how much *longer* than its machined length the
+    /// pipe behaves; this says how much of that the reflection filter has
+    /// already supplied. A pipe attached to this mouth has to subtract it, or
+    /// the mouth is counted twice and the pipe plays flat.
+    pub fn phase_delay_samples(&self) -> f32 {
+        self.filter.phase_delay_samples()
+    }
+
     /// Steps the termination with incident forward wave $p^+$ from the pipe:
     /// Returns `(p_minus, p_radiated)`:
     /// - `p_minus`: reflected backward wave returning down the pipe ($p^-$) [Pa].
@@ -320,6 +354,9 @@ impl MouthTermination {
 pub struct WaveguidePipe {
     length: f32,
     area: f32,
+    /// Delay contributed by filters at the pipe's boundaries, per round trip
+    /// [samples]; see [`WaveguidePipe::set_boundary_phase_delay`].
+    boundary_phase_delay: f32,
     forward_line: DelayLine,
     backward_line: DelayLine,
     forward_loss: ViscothermalLoss,
@@ -355,7 +392,6 @@ impl WaveguidePipe {
         let max_delay_samples = (max_delay_sec * sample_rate).ceil() as usize + 8;
 
         let initial_delay_sec = runner_delay_seconds(length_f32, gamma, gas_constant, temperature);
-        let initial_delay_samples = (initial_delay_sec * sample_rate).max(1.0);
 
         let c = speed_of_sound(gamma, gas_constant, temperature);
         let rho = REFERENCE_PRESSURE_PA / (gas_constant * temperature.max(1.0));
@@ -363,10 +399,13 @@ impl WaveguidePipe {
 
         let forward_loss = ViscothermalLoss::new(radius_f32, length_f32, c, gamma, sample_rate);
         let backward_loss = ViscothermalLoss::new(radius_f32, length_f32, c, gamma, sample_rate);
+        let initial_delay_samples =
+            (initial_delay_sec * sample_rate - forward_loss.phase_delay_samples()).max(1.0);
 
         Self {
             length: length_f32,
             area: area_f32,
+            boundary_phase_delay: 0.0,
             forward_line: DelayLine::with_max_delay(max_delay_samples),
             backward_line: DelayLine::with_max_delay(max_delay_samples),
             forward_loss,
@@ -382,11 +421,6 @@ impl WaveguidePipe {
 
     /// Retunes propagation delay, acoustic admittance, and wall losses for current gas state.
     pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
-        let delay_sec = runner_delay_seconds(self.length, gamma, gas_constant, temperature);
-        let samples = delay_sec * self.sample_rate;
-        self.delay_samples
-            .set_target(samples.clamp(1.0, self.forward_line.max_delay()));
-
         let c = speed_of_sound(gamma, gas_constant, temperature);
         let rho = REFERENCE_PRESSURE_PA / (gas_constant * temperature.max(1.0));
         self.admittance = self.area / (rho * c).max(1e-4);
@@ -396,6 +430,33 @@ impl WaveguidePipe {
             .tune(r, self.length, c, gamma, self.sample_rate);
         self.backward_loss
             .tune(r, self.length, c, gamma, self.sample_rate);
+
+        // Retune the loss filters first, then take the delay they now add out of
+        // the line. What the pipe owes the wave is L / c of travel; the filters
+        // have already supplied part of it.
+        let delay_sec = runner_delay_seconds(self.length, gamma, gas_constant, temperature);
+        let samples = delay_sec * self.sample_rate - self.compensation();
+        self.delay_samples
+            .set_target(samples.clamp(1.0, self.forward_line.max_delay()));
+    }
+
+    /// Filter delay to take out of each direction of travel [samples].
+    ///
+    /// One loss filter sits in each direction, so each pays for its own; a
+    /// boundary filter is met once per round trip, so each direction pays half.
+    #[inline]
+    fn compensation(&self) -> f32 {
+        self.forward_loss.phase_delay_samples() + 0.5 * self.boundary_phase_delay
+    }
+
+    /// Declares the delay that filters at this pipe's boundaries add, per round
+    /// trip [samples] — a [`MouthTermination`]'s reflection filter, typically.
+    ///
+    /// Without this the pipe is longer than its geometry says by however much
+    /// phase the terminations happen to carry, and every resonance built on it
+    /// sits flat. Retune afterwards, or on the next [`WaveguidePipe::tune`].
+    pub fn set_boundary_phase_delay(&mut self, samples: f32) {
+        self.boundary_phase_delay = samples.max(0.0);
     }
 
     /// Length of the pipe section [m].
@@ -418,14 +479,18 @@ impl WaveguidePipe {
         self.admittance
     }
 
-    /// Current one-way transit delay [samples].
+    /// Current one-way acoustic transit delay $L / c$ [samples].
+    ///
+    /// This is the physical transit, not the length of the delay line: the line
+    /// is deliberately shorter by whatever the loss and boundary filters
+    /// contribute, and that bookkeeping is nobody else's business.
     pub fn delay_samples(&self) -> f32 {
-        self.delay_samples.value()
+        self.delay_samples.value() + self.compensation()
     }
 
     /// One-way transit time through the pipe [s].
     pub fn transit_time_seconds(&self) -> f32 {
-        self.delay_samples.value() / self.sample_rate
+        self.delay_samples() / self.sample_rate
     }
 
     /// Wall loss filter cutoff [Hz].
@@ -819,14 +884,21 @@ impl TaperedCollector {
 
     /// Steps the collector by one sample:
     /// - `primaries_plus`: forward waves arriving from each primary runner ($p_i^+$).
+    /// - `excitation`: pressure released *inside* the collector this sample [Pa].
     /// - `downstream_minus`: backward wave returning from downstream ($p^-$).
     /// - `primaries_minus`: output buffer filled with waves returning up each primary ($p_i^-$).
+    ///
+    /// The excitation enters as an incident wave at the junction rather than as
+    /// something added to the output, so it scatters into every port the way a
+    /// pressure rise at that node physically does: down the collector, and back
+    /// up every primary standing open to it.
     ///
     /// Returns the transmitted wave continuing downstream.
     #[inline(always)]
     pub fn step(
         &mut self,
         primaries_plus: &[f32],
+        excitation: f32,
         downstream_minus: f32,
         primaries_minus: &mut [f32],
     ) -> f32 {
@@ -843,7 +915,7 @@ impl TaperedCollector {
         {
             *dst = src;
         }
-        self.scatter_in[self.inlet_count] = p_taper_upstream;
+        self.scatter_in[self.inlet_count] = p_taper_upstream + excitation;
 
         self.junction
             .scatter(&self.scatter_in, &mut self.scatter_out);
@@ -866,6 +938,258 @@ impl TaperedCollector {
         self.taper_pipe.reset();
         self.scatter_in.fill(0.0);
         self.scatter_out.fill(0.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Composed elements: Absorptive silencer
+// ---------------------------------------------------------------------------
+
+/// Straight-through packed silencer: a perforated core inside acoustic packing.
+///
+/// The core is a duct like any other, so it is a [`WaveguidePipe`] with area
+/// steps at each end. What the packing adds is resistive attenuation, quoted by
+/// the geometry as a loss in decibels per metre. Over a body of length $L$ the
+/// surviving amplitude is
+///
+/// $$g = 10^{-\frac{\alpha_{dB} L}{20}}$$
+///
+/// applied to each direction of travel, so a wave that goes in and comes back
+/// pays for the length twice — which is exactly why a packed silencer kills the
+/// returning reflection harder than it kills the through path.
+#[derive(Debug, Clone)]
+pub struct AbsorptiveSilencer {
+    junction_in: ScatteringJunction,
+    core: WaveguidePipe,
+    junction_out: ScatteringJunction,
+    /// Amplitude surviving one pass through the packing [-].
+    pass: f32,
+    scatter_buf_in: [f32; 2],
+    scatter_buf_out: [f32; 2],
+}
+
+impl AbsorptiveSilencer {
+    /// Constructs a packed silencer:
+    /// - `pipe_area`: area of the ducts either side of the body [m^2].
+    /// - `core_area`: flow area through the perforated core [m^2].
+    /// - `length`: length of the packed body [m].
+    /// - `loss_db_per_m`: attenuation of the packing [dB/m].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        pipe_area: f64,
+        core_area: f64,
+        length: f64,
+        loss_db_per_m: f64,
+        sample_rate: f32,
+        gamma: f32,
+        gas_constant: f32,
+        temperature: f32,
+    ) -> Self {
+        let a1 = pipe_area.max(1e-7);
+        let a2 = core_area.max(1e-7);
+        let l = length.max(0.001);
+        let core = WaveguidePipe::new(l, a2, sample_rate, gamma, gas_constant, temperature);
+        let pass = 10f64.powf(-loss_db_per_m.max(0.0) * l / 20.0) as f32;
+
+        Self {
+            junction_in: ScatteringJunction::from_areas(&[a1, a2]),
+            core,
+            junction_out: ScatteringJunction::from_areas(&[a2, a1]),
+            pass,
+            scatter_buf_in: [0.0; 2],
+            scatter_buf_out: [0.0; 2],
+        }
+    }
+
+    /// Amplitude surviving one pass through the packing [-].
+    pub fn pass_gain(&self) -> f32 {
+        self.pass
+    }
+
+    /// Retunes propagation delay and acoustic admittance for current gas state.
+    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
+        self.core.tune(gamma, gas_constant, temperature);
+    }
+
+    /// Steps the silencer by one sample; see [`ExpansionChamber::step`] for the
+    /// port convention.
+    #[inline(always)]
+    pub fn step(&mut self, p_in_plus: f32, p_out_minus: f32) -> (f32, f32) {
+        let (p_core_0, p_core_1) = self.core.read_outputs();
+        let p_core_0 = p_core_0 * self.pass;
+        let p_core_1 = p_core_1 * self.pass;
+
+        self.junction_in
+            .scatter(&[p_in_plus, p_core_0], &mut self.scatter_buf_in);
+        let p_in_minus = self.scatter_buf_in[0];
+        let p_into_core_0 = self.scatter_buf_in[1];
+
+        self.junction_out
+            .scatter(&[p_core_1, p_out_minus], &mut self.scatter_buf_out);
+        let p_into_core_1 = self.scatter_buf_out[0];
+        let p_out_plus = self.scatter_buf_out[1];
+
+        self.core.push_inputs(p_into_core_0, p_into_core_1);
+
+        (p_in_minus, p_out_plus)
+    }
+
+    /// Clears internal state.
+    pub fn reset(&mut self) {
+        self.core.reset();
+        self.scatter_buf_in = [0.0; 2];
+        self.scatter_buf_out = [0.0; 2];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Composed elements: the silencer chain
+// ---------------------------------------------------------------------------
+
+/// Side branch length that puts a quarter-wave notch on a Helmholtz resonance [m].
+///
+/// A Helmholtz chamber of volume $V$ behind a neck of area $A_n$ and length
+/// $L_n$ resonates at $f_H = \frac{c}{2\pi}\sqrt{A_n / (V L_n)}$, and a closed
+/// side branch of length $L$ notches at $c / 4L$. Equating the two,
+///
+/// $$L = \frac{\pi}{2} \sqrt{\frac{V L_n}{A_n}}$$
+///
+/// and the speed of sound cancels: the equivalent length is pure geometry, so
+/// the branch tracks temperature exactly the way the chamber it stands in for
+/// does. That is what lets a Helmholtz muffler be a side branch on the same
+/// 3-port junction as every other side branch rather than a special case.
+#[inline]
+pub fn helmholtz_equivalent_stub_length(
+    neck_area: f64,
+    chamber_volume: f64,
+    neck_length: f64,
+) -> f64 {
+    let ratio = chamber_volume.max(1e-9) * neck_length.max(1e-6) / neck_area.max(1e-9);
+    std::f64::consts::FRAC_PI_2 * ratio.sqrt()
+}
+
+/// One silencing element in a bank's chain, composed from the primitives.
+///
+/// Every variant of [`crate::physics::plumbing::Silencer`] lands here, so the
+/// network never has to ask what kind of silencer it is holding — a straight
+/// pipe is simply a chain with nothing in it.
+#[derive(Debug, Clone)]
+pub enum SilencerElement {
+    /// A sudden expansion and the contraction back, one stage.
+    Chamber(ExpansionChamber),
+    /// A packed straight-through body.
+    Absorptive(AbsorptiveSilencer),
+    /// A closed side branch, either a drone-killer stub or a Helmholtz chamber
+    /// standing in as one; see [`helmholtz_equivalent_stub_length`].
+    SideBranch(QuarterWaveStub),
+}
+
+impl SilencerElement {
+    /// Appends the elements a geometric silencer is made of to `chain`.
+    ///
+    /// A [`crate::physics::plumbing::Silencer::Straight`] appends nothing, and a
+    /// multi-stage expansion chamber appends one [`ExpansionChamber`] per stage,
+    /// which is what a stage *is*.
+    pub fn extend_chain(
+        chain: &mut Vec<Self>,
+        silencer: &crate::physics::plumbing::Silencer,
+        pipe_area: f64,
+        sample_rate: f32,
+        gamma: f32,
+        gas_constant: f32,
+        temperature: f32,
+    ) {
+        use crate::physics::plumbing::Silencer;
+        match silencer {
+            Silencer::Straight => {}
+            Silencer::ExpansionChamber {
+                length,
+                area_ratio,
+                stages,
+            } => {
+                for _ in 0..(*stages).max(1) {
+                    chain.push(Self::Chamber(ExpansionChamber::new(
+                        pipe_area,
+                        *area_ratio,
+                        *length,
+                        sample_rate,
+                        gamma,
+                        gas_constant,
+                        temperature,
+                    )));
+                }
+            }
+            Silencer::Absorptive {
+                length,
+                area,
+                loss_db_per_m,
+            } => chain.push(Self::Absorptive(AbsorptiveSilencer::new(
+                pipe_area,
+                *area,
+                *length,
+                *loss_db_per_m,
+                sample_rate,
+                gamma,
+                gas_constant,
+                temperature,
+            ))),
+            Silencer::QuarterWaveStub { length, area } => {
+                chain.push(Self::SideBranch(QuarterWaveStub::new(
+                    pipe_area,
+                    *area,
+                    *length,
+                    sample_rate,
+                    gamma,
+                    gas_constant,
+                    temperature,
+                )))
+            }
+            Silencer::Helmholtz(geometry) => {
+                let length = helmholtz_equivalent_stub_length(
+                    geometry.neck_area,
+                    geometry.chamber_volume,
+                    geometry.neck_length,
+                );
+                chain.push(Self::SideBranch(QuarterWaveStub::new(
+                    pipe_area,
+                    geometry.neck_area,
+                    length,
+                    sample_rate,
+                    gamma,
+                    gas_constant,
+                    temperature,
+                )))
+            }
+        }
+    }
+
+    /// Retunes propagation delay and acoustic admittance for current gas state.
+    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
+        match self {
+            Self::Chamber(c) => c.tune(gamma, gas_constant, temperature),
+            Self::Absorptive(a) => a.tune(gamma, gas_constant, temperature),
+            Self::SideBranch(s) => s.tune(gamma, gas_constant, temperature),
+        }
+    }
+
+    /// Steps the element by one sample; see [`ExpansionChamber::step`] for the
+    /// port convention.
+    #[inline(always)]
+    pub fn step(&mut self, p_in_plus: f32, p_out_minus: f32) -> (f32, f32) {
+        match self {
+            Self::Chamber(c) => c.step(p_in_plus, p_out_minus),
+            Self::Absorptive(a) => a.step(p_in_plus, p_out_minus),
+            Self::SideBranch(s) => s.step(p_in_plus, p_out_minus),
+        }
+    }
+
+    /// Clears internal state.
+    pub fn reset(&mut self) {
+        match self {
+            Self::Chamber(c) => c.reset(),
+            Self::Absorptive(a) => a.reset(),
+            Self::SideBranch(s) => s.reset(),
+        }
     }
 }
 
@@ -1051,8 +1375,7 @@ pub struct ExhaustNetwork {
     collectors: Vec<TaperedCollector>,
     crossover: BankCrossover,
     pre_cross_pipes: Vec<WaveguidePipe>,
-    post_cross_pipes: Vec<WaveguidePipe>,
-    chambers: Vec<Vec<ExpansionChamber>>,
+    silencers: Vec<Vec<SilencerElement>>,
     tailpipes: Vec<WaveguidePipe>,
     mouths: Vec<MouthTermination>,
     bank_cylinders: Vec<Vec<usize>>,
@@ -1063,6 +1386,28 @@ pub struct ExhaustNetwork {
     prim_to_collector: Vec<f32>,
     bank_prim_in: Vec<Vec<f32>>,
     bank_prim_refl: Vec<Vec<f32>>,
+    bank_trans: Vec<f32>,
+    bank_down: Vec<f32>,
+    pre_cross_up: Vec<f32>,
+    pre_cross_down: Vec<f32>,
+
+    /// Backward wave waiting at each collector outlet [Pa].
+    ///
+    /// Only used where no pipe separates the collector from what follows it; a
+    /// crossover at a stated position supplies its own delay and this stays zero.
+    collector_returns: Vec<f32>,
+
+    /// Backward waves waiting at each interface of a bank's downstream chain [Pa].
+    ///
+    /// Interface `0` is where the crossover hands over to the chain, interface
+    /// `j` is between silencer `j-1` and silencer `j`, and the last one is the
+    /// tailpipe entrance. Holding them for a sample is what closes the loop: a
+    /// silencer and a mouth both reflect, and until those reflections can travel
+    /// back up to the collector the network downstream of the header is a
+    /// one-way chain rather than an acoustic system. One sample at 48 kHz is
+    /// about 7 mm of pipe, an order below the shortest length any geometry here
+    /// describes.
+    chain_returns: Vec<Vec<f32>>,
 }
 
 impl ExhaustNetwork {
@@ -1136,27 +1481,24 @@ impl ExhaustNetwork {
             temp,
         );
 
-        let has_crossover = matches!(
-            exhaust.crossover,
-            crate::physics::plumbing::Crossover::XPipe { .. }
-                | crate::physics::plumbing::Crossover::HPipe { .. }
-                | crate::physics::plumbing::Crossover::Balance180
-        );
+        // Where the banks meet is geometry, not a constant: the crossover sits a
+        // stated distance downstream of the collector, and that run of pipe is
+        // what decides which harmonics arrive at the junction in phase. An X-pipe
+        // 0.4 m back and one 1.2 m back are different exhausts.
+        let cross_position = match exhaust.crossover {
+            crate::physics::plumbing::Crossover::None => None,
+            crate::physics::plumbing::Crossover::XPipe { position }
+            | crate::physics::plumbing::Crossover::HPipe { position, .. } => Some(position),
+            // A 180-degree bundle crosses inside the header itself, so the banks
+            // meet as soon as the collectors do.
+            crate::physics::plumbing::Crossover::Balance180 => Some(0.0),
+        };
 
         let mut pre_cross_pipes = Vec::with_capacity(n_banks);
-        let mut post_cross_pipes = Vec::with_capacity(n_banks);
-        for _ in 0..n_banks {
-            if has_crossover {
+        if let Some(position) = cross_position {
+            for _ in 0..n_banks {
                 pre_cross_pipes.push(WaveguidePipe::new(
-                    0.30,
-                    exhaust.collector.outlet_area,
-                    sample_rate,
-                    gamma,
-                    r,
-                    temp,
-                ));
-                post_cross_pipes.push(WaveguidePipe::new(
-                    0.30,
+                    position,
                     exhaust.collector.outlet_area,
                     sample_rate,
                     gamma,
@@ -1166,26 +1508,19 @@ impl ExhaustNetwork {
             }
         }
 
-        // 4. Silencers (expansion chambers) per bank
-        let mut chambers = vec![Vec::new(); n_banks];
-        for bank_chambers in &mut chambers {
+        // 4. Silencer chain per bank
+        let mut silencers = vec![Vec::new(); n_banks];
+        for chain in &mut silencers {
             for silencer in &exhaust.silencers {
-                if let crate::physics::plumbing::Silencer::ExpansionChamber {
-                    length,
-                    area_ratio,
-                    ..
-                } = silencer
-                {
-                    bank_chambers.push(ExpansionChamber::new(
-                        exhaust.collector.outlet_area,
-                        *area_ratio,
-                        *length,
-                        sample_rate,
-                        gamma,
-                        r,
-                        temp,
-                    ));
-                }
+                SilencerElement::extend_chain(
+                    chain,
+                    silencer,
+                    exhaust.collector.outlet_area,
+                    sample_rate,
+                    gamma,
+                    r,
+                    temp,
+                );
             }
         }
 
@@ -1200,7 +1535,7 @@ impl ExhaustNetwork {
                 sample_rate,
             );
             let eff_tail_len = exhaust.tailpipe.length + mouth.end_correction();
-            let tailpipe = WaveguidePipe::new(
+            let mut tailpipe = WaveguidePipe::new(
                 eff_tail_len,
                 exhaust.tailpipe.area,
                 sample_rate,
@@ -1208,6 +1543,10 @@ impl ExhaustNetwork {
                 r,
                 temp,
             );
+            // The mouth's reflection filter already holds part of the round
+            // trip; leave it in the pipe as well and the tailpipe plays flat.
+            tailpipe.set_boundary_phase_delay(mouth.phase_delay_samples());
+            tailpipe.tune(gamma, r, temp);
             tailpipes.push(tailpipe);
             mouths.push(mouth);
         }
@@ -1222,6 +1561,10 @@ impl ExhaustNetwork {
             bank_prim_in.push(vec![0.0; cnt]);
             bank_prim_refl.push(vec![0.0; cnt]);
         }
+        let chain_returns = silencers
+            .iter()
+            .map(|chain| vec![0.0; chain.len() + 1])
+            .collect();
 
         Self {
             primaries,
@@ -1229,8 +1572,7 @@ impl ExhaustNetwork {
             collectors,
             crossover,
             pre_cross_pipes,
-            post_cross_pipes,
-            chambers,
+            silencers,
             tailpipes,
             mouths,
             bank_cylinders,
@@ -1239,6 +1581,12 @@ impl ExhaustNetwork {
             prim_to_collector,
             bank_prim_in,
             bank_prim_refl,
+            bank_trans: vec![0.0; n_banks],
+            bank_down: vec![0.0; n_banks],
+            pre_cross_up: vec![0.0; n_banks],
+            pre_cross_down: vec![0.0; n_banks],
+            collector_returns: vec![0.0; n_banks],
+            chain_returns,
         }
     }
 
@@ -1255,12 +1603,9 @@ impl ExhaustNetwork {
         for p in &mut self.pre_cross_pipes {
             p.tune(gamma, gas_constant, temperature);
         }
-        for p in &mut self.post_cross_pipes {
-            p.tune(gamma, gas_constant, temperature);
-        }
-        for b in 0..self.bank_count {
-            for ch in &mut self.chambers[b] {
-                ch.tune(gamma, gas_constant, temperature);
+        for chain in &mut self.silencers {
+            for element in chain {
+                element.tune(gamma, gas_constant, temperature);
             }
         }
         for tp in &mut self.tailpipes {
@@ -1271,6 +1616,69 @@ impl ExhaustNetwork {
         }
     }
 
+    /// Number of banks the network radiates from.
+    pub fn bank_count(&self) -> usize {
+        self.bank_count
+    }
+
+    /// One-way transit delay of a cylinder's primary [samples].
+    pub fn primary_delay_samples(&self, cylinder: usize) -> f32 {
+        self.primaries[cylinder.min(self.primaries.len() - 1)].delay_samples()
+    }
+
+    /// Acoustic round-trip time of a cylinder's primary [s].
+    ///
+    /// This is the `tau_pulse` of the Transit-Time Decision Rule, read back from
+    /// the delay the pipe is actually using rather than recomputed from
+    /// temperature, so it follows the glide instead of leading it.
+    pub fn primary_round_trip_seconds(&self, cylinder: usize) -> f32 {
+        let i = cylinder.min(self.primaries.len() - 1);
+        2.0 * self.primaries[i].transit_time_seconds()
+    }
+
+    /// Damping currently applied to a cylinder's valve end, `0..=1` [-].
+    pub fn valve_damping(&self, cylinder: usize) -> f32 {
+        self.valves[cylinder.min(self.valves.len() - 1)].damping()
+    }
+
+    /// Mean acoustic round-trip time of a bank's primaries [s].
+    ///
+    /// A bank no longer has *a* runner — it has one primary per cylinder, and on
+    /// an unequal-length header no two of them agree. This is the average, which
+    /// is the quantity a per-bank lumped model was ever standing in for.
+    pub fn bank_mean_round_trip_seconds(&self, bank: usize) -> f32 {
+        let cyls = match self.bank_cylinders.get(bank) {
+            Some(cyls) if !cyls.is_empty() => cyls,
+            _ => return 0.0,
+        };
+        let total: f32 = cyls
+            .iter()
+            .map(|&i| 2.0 * self.primaries[i].transit_time_seconds())
+            .sum();
+        total / cyls.len() as f32
+    }
+
+    /// Reflection coefficient currently at a cylinder's valve end [-].
+    pub fn valve_reflection(&self, cylinder: usize) -> f32 {
+        self.valves[cylinder.min(self.valves.len() - 1)].reflection()
+    }
+
+    /// Damps a primary by softening its valve-end reflection, `0` for the bare
+    /// closed valve and `1` for fully damped.
+    ///
+    /// Until the solver's own valve lift reaches the snapshot, a primary's head
+    /// is a rigid closed end at every instant, which is what a real one is for
+    /// most of the cycle but never all of it: for the part of the cycle the
+    /// valve is open, the pipe is looking into the cylinder and the reflection
+    /// is far weaker. Scaling the reflection here stands in for that, and it is
+    /// the same physical quantity a lift curve would set — see
+    /// [`ValveTermination::set_effective_area`].
+    pub fn set_valve_damping(&mut self, cylinder: usize, damping: f32) {
+        if let Some(valve) = self.valves.get_mut(cylinder) {
+            valve.set_damping(damping);
+        }
+    }
+
     /// Updates valve effective flow areas for all cylinders.
     pub fn set_valve_areas(&mut self, valve_areas: &[f64]) {
         for (v, &area) in self.valves.iter_mut().zip(valve_areas.iter()) {
@@ -1278,15 +1686,47 @@ impl ExhaustNetwork {
         }
     }
 
-    /// Steps the entire waveguide network by one audio sample:
-    /// - `excitations`: slice of blowdown pressure pulse injections per cylinder.
-    ///
-    /// Returns stereo radiated pressure `(left_radiated, right_radiated)`.
+    /// Hands a bank's upstream-travelling wave back toward its collector: down
+    /// the pre-crossover pipe where the geometry gave one, and through the
+    /// one-sample connector where it did not.
     #[inline(always)]
-    pub fn step(&mut self, excitations: &[f32]) -> (f32, f32) {
-        let n_cyl = self.primaries.len();
+    fn push_upstream(&mut self, bank: usize, upstream: f32, crossed: bool) {
+        if crossed {
+            let forward = self.bank_trans[bank];
+            self.pre_cross_pipes[bank].push_inputs(forward, upstream);
+        } else {
+            self.collector_returns[bank] = upstream;
+        }
+    }
 
-        // 1. Read outputs from primaries and apply valve boundaries
+    /// Steps the entire waveguide network by one audio sample:
+    /// - `excitations`: blowdown pressure pulse injected at each cylinder's port.
+    /// - `bank_excitations`: pressure released inside each bank's collector — an
+    ///   exhaust backfire is unburnt fuel lighting off in the pipework, not a
+    ///   cylinder event, so it belongs at the junction and not at a valve.
+    /// - `radiated`: filled with the pressure radiated from each bank's mouth.
+    ///
+    /// A bank is a tailpipe, so the caller gets one radiated signal per bank and
+    /// decides where each one sits in the image. Imaging is not the network's
+    /// business, and folding it to stereo here would silently drop the outer
+    /// banks of anything with more than two.
+    #[inline(always)]
+    pub fn step(&mut self, excitations: &[f32], bank_excitations: &[f32], radiated: &mut [f32]) {
+        let n_cyl = self.primaries.len();
+        let crossed = !self.pre_cross_pipes.is_empty();
+
+        // 1. Read the pipes running from the collectors to the crossover first,
+        //    so a wave coming back up arrives at the collector with that pipe's
+        //    own transit time rather than an invented one.
+        if crossed {
+            for b in 0..self.bank_count {
+                let (up, down) = self.pre_cross_pipes[b].read_outputs();
+                self.pre_cross_up[b] = up;
+                self.pre_cross_down[b] = down;
+            }
+        }
+
+        // 2. Read outputs from primaries and apply valve boundaries
         for i in 0..n_cyl {
             let (p_at_valve, p_at_coll) = self.primaries[i].read_outputs();
             let excit = if i < excitations.len() {
@@ -1298,21 +1738,25 @@ impl ExhaustNetwork {
             self.prim_to_collector[i] = p_at_coll;
         }
 
-        // 2. Step collectors for each bank
-        let mut bank_trans = [0.0f32; 2];
-        for (b, trans_slot) in bank_trans[..self.bank_count.min(2)].iter_mut().enumerate() {
+        // 3. Step collectors for each bank
+        for b in 0..self.bank_count {
             let cyls = &self.bank_cylinders[b];
             for (k, &cyl_idx) in cyls.iter().enumerate() {
                 self.bank_prim_in[b][k] = self.prim_to_collector[cyl_idx];
             }
 
-            let downstream_refl = 0.0f32;
-            let trans = self.collectors[b].step(
+            let downstream_refl = if crossed {
+                self.pre_cross_up[b]
+            } else {
+                self.collector_returns[b]
+            };
+            let excitation = bank_excitations.get(b).copied().unwrap_or(0.0);
+            self.bank_trans[b] = self.collectors[b].step(
                 &self.bank_prim_in[b],
+                excitation,
                 downstream_refl,
                 &mut self.bank_prim_refl[b],
             );
-            *trans_slot = trans;
 
             for (k, &cyl_idx) in cyls.iter().enumerate() {
                 let p_in_1 = self.bank_prim_refl[b][k];
@@ -1320,34 +1764,56 @@ impl ExhaustNetwork {
             }
         }
 
-        // 3. Crossover
-        let (cross_out_0, cross_out_1) = if self.bank_count > 1 {
-            let (b0_in, b1_in) = (bank_trans[0], bank_trans[1]);
-            let (_, _, b0_out, b1_out) = self.crossover.step(b0_in, b1_in, 0.0, 0.0);
-            (b0_out, b1_out)
-        } else {
-            (bank_trans[0], 0.0)
-        };
+        // 4. Crossover. It links the first two banks; anything beyond them — the
+        //    outer banks of a W engine — has no partner to cross with and runs
+        //    straight through. Either way the wave arrives through the
+        //    pre-crossover pipe when the geometry described one.
+        let linked = if self.bank_count > 1 { 2 } else { 0 };
+        if linked == 2 {
+            let (in0, in1) = if crossed {
+                (self.pre_cross_down[0], self.pre_cross_down[1])
+            } else {
+                (self.bank_trans[0], self.bank_trans[1])
+            };
+            let (b0_up, b1_up, b0_down, b1_down) =
+                self.crossover
+                    .step(in0, in1, self.chain_returns[0][0], self.chain_returns[1][0]);
+            self.bank_down[0] = b0_down;
+            self.bank_down[1] = b1_down;
+            self.push_upstream(0, b0_up, crossed);
+            self.push_upstream(1, b1_up, crossed);
+        }
+        for b in linked..self.bank_count {
+            self.bank_down[b] = if crossed {
+                self.pre_cross_down[b]
+            } else {
+                self.bank_trans[b]
+            };
+            let upstream = self.chain_returns[b][0];
+            self.push_upstream(b, upstream, crossed);
+        }
 
-        // 4. Silencers & Tailpipes
-        let mut radiated = [0.0f32; 2];
-        let bank_inputs = [cross_out_0, cross_out_1];
-
-        for b in 0..self.bank_count.min(2) {
-            let mut sig = bank_inputs[b];
-            for ch in &mut self.chambers[b] {
-                let (_, trans) = ch.step(sig, 0.0);
+        // 5. Silencer chain, tailpipe and mouth. Each element hands its upstream
+        //    reflection to the interface above it, so what a silencer or the open
+        //    mouth sends back reaches the collector and the primaries beyond it.
+        for b in 0..self.bank_count {
+            let mut sig = self.bank_down[b];
+            let n_sil = self.silencers[b].len();
+            for k in 0..n_sil {
+                let downstream = self.chain_returns[b][k + 1];
+                let (upstream, trans) = self.silencers[b][k].step(sig, downstream);
+                self.chain_returns[b][k] = upstream;
                 sig = trans;
             }
 
-            // Tailpipe & Mouth
-            let (_, p_tail_exit) = self.tailpipes[b].read_outputs();
+            let (p_tail_up, p_tail_exit) = self.tailpipes[b].read_outputs();
             let (p_mouth_refl, p_mouth_rad) = self.mouths[b].step(p_tail_exit);
             self.tailpipes[b].push_inputs(sig, p_mouth_refl);
-            radiated[b] = p_mouth_rad;
+            self.chain_returns[b][n_sil] = p_tail_up;
+            if let Some(slot) = radiated.get_mut(b) {
+                *slot = p_mouth_rad;
+            }
         }
-
-        (radiated[0], radiated[1])
     }
 
     /// Clears internal state across the entire network.
@@ -1362,12 +1828,9 @@ impl ExhaustNetwork {
         for p in &mut self.pre_cross_pipes {
             p.reset();
         }
-        for p in &mut self.post_cross_pipes {
-            p.reset();
-        }
-        for b in 0..self.bank_count {
-            for ch in &mut self.chambers[b] {
-                ch.reset();
+        for chain in &mut self.silencers {
+            for element in chain {
+                element.reset();
             }
         }
         for tp in &mut self.tailpipes {
@@ -1382,6 +1845,321 @@ impl ExhaustNetwork {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Amplitude of `signal` at `frequency`, by Goertzel-style projection.
+    fn magnitude_at(signal: &[f32], frequency: f32, sample_rate: f32) -> f32 {
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (i, &x) in signal.iter().enumerate() {
+            let phase = std::f32::consts::TAU * frequency * i as f32 / sample_rate;
+            re += x as f64 * phase.sin() as f64;
+            im += x as f64 * phase.cos() as f64;
+        }
+        (2.0 * (re * re + im * im).sqrt() / signal.len() as f64) as f32
+    }
+
+    #[test]
+    fn closed_open_pipe_resonates_at_c_over_four_l() {
+        // A pipe shut at one end and open at the other is a quarter-wave
+        // resonator: the closed end forces a pressure antinode, the open end a
+        // node, and the lowest mode that fits is f = c / 4L. This is the single
+        // claim the whole network rests on — every tuned length in an exhaust is
+        // some version of it.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.4;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 300.0;
+
+        for (length, radius) in [(0.5f64, 0.025f64), (0.9, 0.030), (0.35, 0.020)] {
+            let area = std::f64::consts::PI * radius * radius;
+            let mouth =
+                MouthTermination::new(radius, false, speed_of_sound(GAMMA, R, TEMPERATURE), FS);
+            // The open end acts as if the pipe ran on past its edge; the network
+            // adds the same correction, so the resonance is set by the effective
+            // length rather than the machined one.
+            let effective = length + mouth.end_correction();
+            let mut pipe = WaveguidePipe::new(effective, area, FS, GAMMA, R, TEMPERATURE);
+            pipe.set_boundary_phase_delay(mouth.phase_delay_samples());
+            pipe.tune(GAMMA, R, TEMPERATURE);
+            let mut mouth = mouth;
+
+            // Impulse in at the closed end, radiated pressure out at the mouth.
+            let mut radiated = vec![0.0f32; 1 << 16];
+            for (i, out) in radiated.iter_mut().enumerate() {
+                let (p_at_closed, p_at_mouth) = pipe.read_outputs();
+                let (p_reflected, p_rad) = mouth.step(p_at_mouth);
+                // A rigid closed end reflects in phase: r = +1.
+                let excitation = if i == 0 { 1.0 } else { 0.0 };
+                pipe.push_inputs(excitation + p_at_closed, p_reflected);
+                *out = p_rad;
+            }
+
+            let c = speed_of_sound(GAMMA, R, TEMPERATURE);
+            let expected = c / (4.0 * effective as f32);
+
+            // Sweep a band around the prediction and take the peak.
+            let mut best = (0.0f32, 0.0f32);
+            let mut f = expected * 0.7;
+            while f <= expected * 1.3 {
+                let m = magnitude_at(&radiated[1..], f, FS);
+                if m > best.1 {
+                    best = (f, m);
+                }
+                f += 0.05;
+            }
+
+            let error = (best.0 - expected).abs() / expected;
+            assert!(
+                error < 0.01,
+                "L = {length} m: resonance at {:.2} Hz, expected {:.2} Hz ({:.2} % off)",
+                best.0,
+                expected,
+                error * 100.0
+            );
+        }
+    }
+
+    #[test]
+    fn chamber_transmission_loss_matches_theory() {
+        // A single-expansion chamber terminated anechoically has a closed-form
+        // transmission loss that depends only on the area ratio and how many
+        // wavelengths fit the cavity:
+        //
+        //   TL = 10 log10[ 1 + (1/4) (m - 1/m)^2 sin^2(kL) ]
+        //
+        // It is zero whenever kL is a multiple of pi — the chamber is
+        // transparent at those frequencies, which is exactly why a single
+        // chamber cannot silence an engine on its own — and peaks at the
+        // quarter-wave points. Nothing in it is tunable, so it is a real check
+        // that the two area steps and the pipe between them scatter correctly.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.4;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 300.0;
+
+        let c = speed_of_sound(GAMMA, R, TEMPERATURE);
+        let pipe_area = std::f64::consts::PI * 0.030 * 0.030;
+        let cavity_length = 0.30f64;
+        let area_ratio = 4.0f64;
+
+        let analytic = |f: f32| {
+            let k = std::f32::consts::TAU * f / c;
+            let m = area_ratio as f32;
+            let s = (k * cavity_length as f32).sin();
+            10.0 * (1.0 + 0.25 * (m - 1.0 / m).powi(2) * s * s).log10()
+        };
+
+        // Quarter-wave point (peak loss), half-wave point (transparent), and a
+        // frequency between the two.
+        let quarter = c / (4.0 * cavity_length as f32);
+        for f in [quarter, 2.0 * quarter, 0.5 * quarter, 1.5 * quarter] {
+            let mut chamber = ExpansionChamber::new(
+                pipe_area,
+                area_ratio,
+                cavity_length,
+                FS,
+                GAMMA,
+                R,
+                TEMPERATURE,
+            );
+
+            // Drive with a sine and read the transmitted wave. Handing the
+            // chamber a zero backward wave from downstream *is* the anechoic
+            // termination the analytic result assumes.
+            let settle = 24_000;
+            let measure = 24_000;
+            let mut transmitted = vec![0.0f32; measure];
+            for i in 0..(settle + measure) {
+                let phase = std::f32::consts::TAU * f * i as f32 / FS;
+                let (_, out) = chamber.step(phase.sin(), 0.0);
+                if i >= settle {
+                    transmitted[i - settle] = out;
+                }
+            }
+
+            let amplitude = magnitude_at(&transmitted, f, FS);
+            let measured = -20.0 * amplitude.max(1e-9).log10();
+            let expected = analytic(f);
+
+            assert!(
+                (measured - expected).abs() < 1.0,
+                "at {f:.0} Hz (kL = {:.2} rad): {measured:.2} dB measured, {expected:.2} dB from theory",
+                std::f32::consts::TAU * f / c * cavity_length as f32
+            );
+        }
+    }
+
+    #[test]
+    fn crossover_transfers_energy_between_banks() {
+        // What separates a flat-plane V8 from a cross-plane one at equal firing
+        // order is whether the banks can hear each other. Fire only bank 0 and
+        // listen at bank 1's tailpipe: with an X-pipe, energy arrives; with
+        // `Crossover::None` the banks are two separate exhausts and nothing
+        // does. Nothing here is a mixing coefficient — the transfer is whatever
+        // the 4-port junction scatters.
+        use crate::physics::plumbing::{
+            Collector, Crossover, ExhaustSystem, PipeSection, Silencer,
+        };
+
+        const FS: f32 = 48_000.0;
+
+        let system = |crossover: Crossover| ExhaustSystem {
+            primaries: vec![PipeSection::from_diameter(0.45, 0.040, 850.0); 8],
+            collector: Collector::from_diameter(4, 0.060, 0.15),
+            secondary: vec![],
+            crossover,
+            silencers: vec![Silencer::Straight],
+            tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
+            tailpipe_flanged: false,
+        };
+
+        // A cross-plane V8's banks: cylinders 0, 2, 3, 7 on one, the rest on the other.
+        let cylinders: Vec<crate::audio::dsp::CylinderTap> = [0, 1, 0, 0, 1, 1, 1, 0]
+            .iter()
+            .enumerate()
+            .map(|(i, &bank)| crate::audio::dsp::CylinderTap {
+                evo_phase: i as f32 / 8.0,
+                bank,
+            })
+            .collect();
+
+        let snapshot = crate::audio::dsp::EngineSnapshot::default();
+        let far_bank_energy = |crossover: Crossover| {
+            let exhaust = system(crossover);
+            let mut network = ExhaustNetwork::new(&exhaust, &cylinders, 2, FS, &snapshot);
+            let mut excitations = vec![0.0f32; cylinders.len()];
+            let bank_excitations = vec![0.0f32; 2];
+            let mut radiated = vec![0.0f32; 2];
+
+            let mut near = 0.0f64;
+            let mut far = 0.0f64;
+            for i in 0..48_000 {
+                // Impulse into one cylinder of bank 0 only. Every other port
+                // stays silent, so anything at bank 1's mouth crossed over.
+                excitations.fill(0.0);
+                if i == 0 {
+                    excitations[0] = 1.0;
+                }
+                network.step(&excitations, &bank_excitations, &mut radiated);
+                near += (radiated[0] as f64).powi(2);
+                far += (radiated[1] as f64).powi(2);
+            }
+            (near, far)
+        };
+
+        let (isolated_near, isolated_far) = far_bank_energy(Crossover::None);
+        let (crossed_near, crossed_far) = far_bank_energy(Crossover::XPipe { position: 0.80 });
+
+        assert!(
+            isolated_near > 0.0 && crossed_near > 0.0,
+            "the fired bank radiated nothing at all"
+        );
+        assert_eq!(
+            isolated_far, 0.0,
+            "energy reached the far bank with no crossover fitted: {isolated_far:e}"
+        );
+        assert!(
+            crossed_far > 0.05 * crossed_near,
+            "the X-pipe passed almost nothing across: {crossed_far:e} against {crossed_near:e} on the fired bank"
+        );
+    }
+
+    #[test]
+    fn stub_notches_at_c_over_four_l_stub() {
+        // A closed side branch is a drone killer: the round trip up and back
+        // covers half a wavelength at f = c / 4L, and the rigid end reflects in
+        // phase, so what returns to the junction arrives inverted and cancels.
+        // The notch frequency is set by the branch length and nothing else.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.4;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 300.0;
+
+        let c = speed_of_sound(GAMMA, R, TEMPERATURE);
+        let pipe_area = std::f64::consts::PI * 0.030 * 0.030;
+        let stub_area = std::f64::consts::PI * 0.020 * 0.020;
+
+        for stub_length in [0.25f64, 0.40] {
+            let expected = c / (4.0 * stub_length as f32);
+
+            // Sweep the band around the prediction and find the deepest point.
+            let mut deepest = (0.0f32, f32::MAX);
+            let mut f = expected * 0.75;
+            while f <= expected * 1.25 {
+                let mut stub = QuarterWaveStub::new(
+                    pipe_area,
+                    stub_area,
+                    stub_length,
+                    FS,
+                    GAMMA,
+                    R,
+                    TEMPERATURE,
+                );
+                let settle = 24_000;
+                let measure = 24_000;
+                let mut transmitted = vec![0.0f32; measure];
+                for i in 0..(settle + measure) {
+                    let phase = std::f32::consts::TAU * f * i as f32 / FS;
+                    let (_, out) = stub.step(phase.sin(), 0.0);
+                    if i >= settle {
+                        transmitted[i - settle] = out;
+                    }
+                }
+                let m = magnitude_at(&transmitted, f, FS);
+                if m < deepest.1 {
+                    deepest = (f, m);
+                }
+                f += expected * 0.002;
+            }
+
+            let error = (deepest.0 - expected).abs() / expected;
+            assert!(
+                error < 0.02,
+                "stub of {stub_length} m notched at {:.1} Hz, expected {:.1} Hz ({:.1} % off)",
+                deepest.0,
+                expected,
+                error * 100.0
+            );
+            assert!(
+                deepest.1 < 0.5,
+                "the notch is not a notch: {:.3} of the drive still gets through",
+                deepest.1
+            );
+        }
+    }
+
+    #[test]
+    fn a_narrow_pipe_is_duller_than_a_wide_one() {
+        // Wall loss goes as sqrt(f) / a, so a narrow pipe swallows its top end
+        // and a wide one does not. This is free differentiation between a bike's
+        // 38 mm primary and a truck's 76 mm pipe — no tone control anywhere.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.4;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 300.0;
+
+        let brightness = |radius: f64| {
+            let area = std::f64::consts::PI * radius * radius;
+            let mut pipe = WaveguidePipe::new(0.6, area, FS, GAMMA, R, TEMPERATURE);
+            // Straight through: impulse in one end, read what leaves the other,
+            // with nothing reflecting at either boundary.
+            let mut out = vec![0.0f32; 4_096];
+            for (i, sample) in out.iter_mut().enumerate() {
+                let (_, p_far) = pipe.read_outputs();
+                pipe.push_inputs(if i == 0 { 1.0 } else { 0.0 }, 0.0);
+                *sample = p_far;
+            }
+            let high = magnitude_at(&out, 6_000.0, FS);
+            let low = magnitude_at(&out, 300.0, FS);
+            high / low.max(1e-9)
+        };
+
+        let narrow = brightness(0.019);
+        let wide = brightness(0.038);
+        assert!(
+            wide > 1.5 * narrow,
+            "the narrow pipe was not measurably duller: {narrow:.3} against {wide:.3} wide"
+        );
+    }
 
     #[test]
     fn two_pipe_junction_reflects_exact_area_ratio() {

@@ -1032,7 +1032,6 @@ mod tests {
     fn physics_pipe_and_audio_path_round_trip_times_agree() {
         use crate::audio::dsp::EngineSynth;
         use crate::audio::filters::round_trip_seconds;
-        use crate::audio::radiation::end_correction;
 
         let fs = 48_000.0;
         let env = Environment::default();
@@ -1051,7 +1050,7 @@ mod tests {
                 let phys_round_trip = manifold.pipe.transit_time(c);
                 let runner_length = preset
                     .exhaust
-                    .primary_length_for_bank(bank_idx, block.exhaust_banks.len());
+                    .primary_length_for_cylinders(&block.firing.cylinders_on_bank(bank_idx as u8));
 
                 // Direct analytical calculation in audio filters:
                 let audio_filter_round_trip = round_trip_seconds(
@@ -1074,14 +1073,12 @@ mod tests {
                 );
 
                 // Initialized audio synth runner agreement at default ambient
-                // conditions. The synth's pipe is the physical one plus the
-                // mouth's end correction: the runner resonates as the air
-                // outside its open end says it does, not as a tape measure
-                // does.
+                // conditions. No end correction here: a primary in the network
+                // stops at the collector junction, which scatters off an area
+                // ratio, and only a pipe stopping in open air is lengthened by
+                // the slug of gas outside its mouth.
                 let c_ambient = (1.33 * 287.0 * 300.0_f64).sqrt();
-                let radius = (preset.exhaust.primary_area() / std::f64::consts::PI).sqrt();
-                let acoustic_length = runner_length + end_correction(radius, false);
-                let phys_ambient_round_trip = 2.0 * acoustic_length / c_ambient;
+                let phys_ambient_round_trip = 2.0 * runner_length / c_ambient;
                 let audio_synth_round_trip = synth.runner_round_trip_seconds(bank_idx) as f64;
                 let diff_synth_samples =
                     (phys_ambient_round_trip - audio_synth_round_trip).abs() * fs as f64;
