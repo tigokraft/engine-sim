@@ -497,6 +497,20 @@ impl FiringOrder {
     pub fn two_rotor_wankel() -> Self {
         Self::new(&[1, 3, 2, 4], &|_| 0)
     }
+
+    /// A single cylinder: one firing per two revolutions, and nothing else.
+    ///
+    /// The degenerate case, and the interesting one. Every other order in this
+    /// catalogue spreads its firings around the cycle so that the crank is
+    /// being pushed somewhere in it at almost all times; a single is pushed
+    /// once, hard, over about sixty degrees, and then dragged round the
+    /// remaining six hundred and sixty by whatever the flywheel kept. That is
+    /// what makes the intra-cycle speed ripple of Stage 1c audible as the
+    /// engine's *character* rather than as a subtlety — there is nothing else
+    /// in the cycle to mask it.
+    pub fn single() -> Self {
+        Self::new(&[1], &|_| 0)
+    }
 }
 
 // ---------------------------------------------------------------------------
