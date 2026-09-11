@@ -1478,4 +1478,192 @@ mod tests {
             snapshot_normal.unburnt_fuel_mass
         );
     }
+
+    #[test]
+    fn supercharger_whine_tracks_crank_speed_exactly_and_shows_no_spool_lag() {
+        // A supercharger is mechanically coupled to the crankshaft via belt or gears.
+        // During an immediate throttle opening and engine acceleration, its tone
+        // target updates synchronously with crank speed — there is zero fluid or
+        // wheel spool lag. A turbocharger, in contrast, must accelerate its turbine
+        // wheel against inertia using exhaust enthalpy, introducing a multi-hundred
+        // millisecond spool lag.
+        let block = primed(2_000.0);
+        let mut source_roots = SnapshotSource::with_induction(&block, Induction::roots());
+        let mut source_centrifugal =
+            SnapshotSource::with_induction(&block, Induction::centrifugal());
+        let mut source_turbo = SnapshotSource::with_induction(&block, Induction::large_single());
+
+        let wot = EngineControls::wide_open();
+        let dt = 1.0 / 240.0;
+        let target_rpm = 6_000.0;
+
+        // Advance 12 frames (50 ms) after a speed step
+        let mut snap_roots = None;
+        let mut snap_centrifugal = None;
+        let mut snap_turbo = None;
+
+        for _ in 0..12 {
+            snap_roots = Some(source_roots.sample(&block, target_rpm, dt, wot));
+            snap_centrifugal = Some(source_centrifugal.sample(&block, target_rpm, dt, wot));
+            snap_turbo = Some(source_turbo.sample(&block, target_rpm, dt, wot));
+        }
+
+        let snap_roots = snap_roots.unwrap();
+        let snap_centrifugal = snap_centrifugal.unwrap();
+        let snap_turbo = snap_turbo.unwrap();
+
+        // 1. Both supercharger snapshots report instantaneous crank speed without lag
+        assert_eq!(snap_roots.rpm, target_rpm as f32);
+        assert_eq!(snap_centrifugal.rpm, target_rpm as f32);
+
+        // 2. Roots tone frequency is locked to crank order (2.1 * 4 = 8.4)
+        let roots_order = 2.1 * 4.0;
+        let roots_expected_hz = (target_rpm as f32 / 60.0) * roots_order;
+        assert!(
+            (roots_expected_hz - 840.0).abs() < 1e-3,
+            "expected 840 Hz, got {roots_expected_hz}"
+        );
+
+        // 3. Centrifugal tone frequency is locked to crank order (9.2 * 1.8 = 16.56)
+        let centrifugal_order = 9.2 * 1.8;
+        let centrifugal_expected_hz = (target_rpm as f32 / 60.0) * centrifugal_order;
+        assert!(
+            (centrifugal_expected_hz - 1656.0).abs() < 1e-3,
+            "expected 1656 Hz, got {centrifugal_expected_hz}"
+        );
+
+        // 4. Turbo shaft speed at 50 ms is still spooling up and lags far behind terminal speed
+        let mut turbo_steady = source_turbo.clone();
+        for _ in 0..600 {
+            turbo_steady.sample(&block, target_rpm, dt, wot);
+        }
+        let terminal_turbo_rpm = turbo_steady.turbo_shaft_rpm();
+        assert!(
+            terminal_turbo_rpm > 100_000.0,
+            "turbo must reach > 100,000 RPM at WOT 6000 RPM: got {terminal_turbo_rpm}"
+        );
+
+        // At 50 ms, the turbo shaft has only completed a fraction of its spool-up
+        let transient_turbo_rpm = snap_turbo.turbo_rpm as f64;
+        assert!(
+            transient_turbo_rpm < 0.35 * terminal_turbo_rpm,
+            "turbo spool lag must be present: at 50 ms shaft is {transient_turbo_rpm} RPM, \
+             terminal is {terminal_turbo_rpm} RPM"
+        );
+    }
+
+    #[test]
+    fn turbos_whistle_still_lags_the_two_are_distinguishable_in_an_order_analysis() {
+        use crate::analysis::orders::{track, RpmCurve};
+
+        let block = primed(2_000.0);
+        let sample_rate = 48_000.0f64;
+        let dt = 1.0f64 / 240.0f64;
+        let duration = 2.0f64; // 2.0 second acceleration pull
+        let frame_count = (duration / dt) as usize;
+        let samples_per_frame = (sample_rate * dt) as usize;
+
+        let mut source_roots = SnapshotSource::with_induction(&block, Induction::roots());
+        let mut source_turbo = SnapshotSource::with_induction(&block, Induction::large_single());
+
+        // Configure synth with isolated induction paths
+        let mut config_roots =
+            SynthConfig::from_block(&block, sample_rate as f32).with_induction(Induction::roots());
+        config_roots.exhaust_level = 0.0;
+        config_roots.intake_level = 0.0;
+        config_roots.mechanical_level = 0.0;
+        config_roots.structure_level = 0.0;
+        let mut synth_roots = EngineSynth::new(config_roots);
+
+        let mut config_turbo = SynthConfig::from_block(&block, sample_rate as f32)
+            .with_induction(Induction::large_single());
+        config_turbo.exhaust_level = 0.0;
+        config_turbo.intake_level = 0.0;
+        config_turbo.mechanical_level = 0.0;
+        config_turbo.structure_level = 0.0;
+        let mut synth_turbo = EngineSynth::new(config_turbo);
+
+        let wot = EngineControls::wide_open();
+        let mut speeds = Vec::with_capacity(frame_count);
+        let mut mono_roots = Vec::with_capacity(frame_count * samples_per_frame);
+        let mut mono_turbo = Vec::with_capacity(frame_count * samples_per_frame);
+
+        let mut buf_roots = vec![0.0f32; 2 * samples_per_frame];
+        let mut buf_turbo = vec![0.0f32; 2 * samples_per_frame];
+
+        for k in 0..frame_count {
+            let t = k as f64 * dt;
+            let rpm = 2_000.0 + (6_000.0 - 2_000.0) * (t / duration);
+            speeds.push(rpm);
+
+            let snap_roots = source_roots.sample(&block, rpm, dt, wot);
+            let snap_turbo = source_turbo.sample(&block, rpm, dt, wot);
+
+            synth_roots.set_snapshot(&snap_roots);
+            synth_turbo.set_snapshot(&snap_turbo);
+
+            synth_roots.render(&mut buf_roots, 2);
+            synth_turbo.render(&mut buf_turbo, 2);
+
+            for chunk in buf_roots.chunks(2) {
+                mono_roots.push(0.5 * (chunk[0] + chunk[1]));
+            }
+            for chunk in buf_turbo.chunks(2) {
+                mono_turbo.push(0.5 * (chunk[0] + chunk[1]));
+            }
+        }
+
+        let rpm_curve = RpmCurve::new(speeds, dt);
+        let orders = [4.0, 6.0, 7.0, 8.0, 8.4, 9.0, 10.0, 12.0];
+
+        let table_roots = track(&mono_roots, sample_rate, &rpm_curve, &orders);
+        let table_turbo = track(&mono_turbo, sample_rate, &rpm_curve, &orders);
+
+        // 1. In order analysis, the supercharger's energy is strongly focused on order 8.4
+        let roots_peak = table_roots.loudest().expect("roots table has no loudest");
+        assert_eq!(
+            roots_peak.order, 8.4,
+            "Roots supercharger whine must peak at crank order 8.4, got order {}",
+            roots_peak.order
+        );
+        let roots_8_4_db = table_roots.level(8.4).unwrap().mean_db;
+        let roots_6_0_db = table_roots.level(6.0).unwrap().mean_db;
+        let roots_10_0_db = table_roots.level(10.0).unwrap().mean_db;
+        assert!(
+            roots_8_4_db - roots_6_0_db > 15.0,
+            "order 8.4 ({roots_8_4_db:.1} dB) must stand well above order 6.0 ({roots_6_0_db:.1} dB)"
+        );
+        assert!(
+            roots_8_4_db - roots_10_0_db > 15.0,
+            "order 8.4 ({roots_8_4_db:.1} dB) must stand well above order 10.0 ({roots_10_0_db:.1} dB)"
+        );
+
+        // 2. The turbo has no lock to crank order 8.4 — its energy at order 8.4 is far lower
+        let turbo_8_4_db = table_turbo.level(8.4).unwrap().mean_db;
+        assert!(
+            roots_8_4_db - turbo_8_4_db > 20.0,
+            "supercharger whine at order 8.4 ({roots_8_4_db:.1} dB) must dominate turbo ({turbo_8_4_db:.1} dB) by >20 dB"
+        );
+
+        // 3. Early transient response: during the first 250 ms (first 60 frames = 12000 samples),
+        // supercharger produces immediate whine power while turbo lags with minimal output
+        let early_samples = 12_000;
+        let roots_early_energy: f64 = mono_roots[..early_samples]
+            .iter()
+            .map(|&s| (s as f64) * (s as f64))
+            .sum();
+        let turbo_early_energy: f64 = mono_turbo[..early_samples]
+            .iter()
+            .map(|&s| (s as f64) * (s as f64))
+            .sum();
+
+        assert!(
+            roots_early_energy > 1e-4,
+            "roots whine must have audible energy immediately during transient: got {roots_early_energy}"
+        );
+        assert!(
+            roots_early_energy > 5.0 * turbo_early_energy,
+            "roots early energy ({roots_early_energy:.6}) must vastly exceed spooling turbo ({turbo_early_energy:.6})"
+        );
+    }
 }
