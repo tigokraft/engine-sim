@@ -464,6 +464,43 @@ impl Default for TurboVoicing {
     }
 }
 
+/// What a Roots or twin-screw positive displacement supercharger sounds like.
+///
+/// Driven directly from the crankshaft by belt or gears, so its tone frequency
+/// tracks engine speed with no spool lag. The fundamental whine frequency is
+/// locked to a crank order given by the pulley drive ratio multiplied by the
+/// rotor lobe count.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RootsVoicing {
+    /// Pulley drive ratio: supercharger rotor speed relative to crankshaft speed [-].
+    pub belt_ratio: f64,
+    /// Number of lobes on each rotor (typically 3 or 4 for modern twin-screw / Eaton TVS).
+    pub lobes: usize,
+    /// Crank speed at which the supercharger whine reaches full reference level [rev/min].
+    pub reference_rpm: f64,
+    /// Level of the supercharger whine layer in the mix [-].
+    pub level: f64,
+}
+
+impl RootsVoicing {
+    /// Order of the whine fundamental relative to crankshaft speed [-].
+    pub fn order(&self) -> f64 {
+        self.belt_ratio * self.lobes as f64
+    }
+}
+
+impl Default for RootsVoicing {
+    /// A typical 4-lobe twin-screw / TVS blower with a 2.1:1 drive ratio.
+    fn default() -> Self {
+        Self {
+            belt_ratio: 2.1,
+            lobes: 4,
+            reference_rpm: 6_500.0,
+            level: 0.030,
+        }
+    }
+}
+
 /// How an impulsive mechanical source sets its recurrence rate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SourceRate {
@@ -575,6 +612,8 @@ pub struct SynthConfig {
     /// Normally set from [`crate::audio::Induction`], which keeps this and the
     /// shaft that drives it together.
     pub turbo: Option<TurboVoicing>,
+    /// The Roots / twin-screw supercharger, or `None` if not fitted.
+    pub roots: Option<RootsVoicing>,
     /// Unburnt fuel per cycle above which backfires become possible [kg].
     pub backfire_fuel_threshold: f64,
     /// Runner temperature above which backfires become possible [K].
@@ -684,6 +723,7 @@ impl SynthConfig {
             // Atmospheric by default: a turbo is something a preset fits, not
             // something every engine is born with.
             turbo: None,
+            roots: None,
             // A cut charge on the shipped V8 carries 24-36 mg of fuel to the
             // exhaust, so 12 mg puts a real spark cut at 2-3x the threshold —
             // enough to crackle hard, while a partial misfire stays below it.
@@ -1848,6 +1888,66 @@ impl TurboVoice {
     }
 }
 
+/// Scaling that normalises [`RootsVoice`] to roughly unity RMS at reference speed.
+const ROOTS_UNITY_RMS: f32 = 1.326;
+
+/// Roots / twin-screw supercharger whine voice.
+///
+/// Driven directly from the crankshaft by belt or gears, so its tone frequency
+/// tracks engine speed with no spool lag. The whine fundamental is locked to
+/// the crank order: belt drive ratio times rotor lobe count.
+#[derive(Debug, Clone)]
+struct RootsVoice {
+    phase: f32,
+    gain: Smoothed,
+    tone_hz: Smoothed,
+    sample_rate: f32,
+}
+
+impl RootsVoice {
+    fn new(sample_rate: f32) -> Self {
+        Self {
+            phase: 0.0,
+            gain: Smoothed::new(0.0, sample_rate, 0.020),
+            tone_hz: Smoothed::new(0.0, sample_rate, 0.015),
+            sample_rate,
+        }
+    }
+
+    fn tune(&mut self, voicing: &RootsVoicing, rpm: f32, throttle: f32) {
+        let crank_hz = (rpm / 60.0).max(0.0);
+        let tone = crank_hz * voicing.order() as f32;
+        // Anti-alias limit: keep 3rd harmonic below Nyquist.
+        self.tone_hz.set_target(tone.min(0.15 * self.sample_rate));
+
+        let load = (rpm / voicing.reference_rpm as f32).clamp(0.0, 1.5);
+        // Acoustic power scales quadratically with speed, amplified under load as
+        // bypass valve shuts with throttle.
+        let throttle_factor = 0.30 + 0.70 * throttle.clamp(0.0, 1.0);
+        self.gain.set_target(load * load * throttle_factor);
+    }
+
+    #[inline(always)]
+    fn process(&mut self) -> f32 {
+        let gain = self.gain.next_value();
+        let tone_hz = self.tone_hz.next_value();
+
+        self.phase += tone_hz / self.sample_rate;
+        if self.phase >= 1.0 {
+            self.phase -= self.phase.floor();
+        }
+        let w = TAU * self.phase;
+        let whine = w.sin() + 0.35 * (2.0 * w).sin() + 0.12 * (3.0 * w).sin();
+        whine * gain * ROOTS_UNITY_RMS
+    }
+
+    fn reset(&mut self) {
+        self.phase = 0.0;
+        self.gain.snap(0.0);
+        self.tone_hz.snap(0.0);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Backfire
 // ---------------------------------------------------------------------------
@@ -2107,6 +2207,7 @@ pub struct EngineSynth {
     intake_excitations: Vec<f32>,
     prev_cylinder_intake_flow: Vec<f32>,
     turbo: TurboVoice,
+    roots: RootsVoice,
     backfire: BackfireVoice,
     mechanical: MechanicalVoice,
     knock: KnockVoice,
@@ -2308,6 +2409,7 @@ impl EngineSynth {
             intake_excitations: vec![0.0; n_cyl],
             prev_cylinder_intake_flow: vec![0.0; n_cyl],
             turbo: TurboVoice::new(fs),
+            roots: RootsVoice::new(fs),
             backfire: BackfireVoice::new(fs),
             mechanical: MechanicalVoice::from_spec(&config.mechanical, fs),
             knock: KnockVoice::new(fs),
@@ -2466,6 +2568,7 @@ impl EngineSynth {
             smoother.snap(0.0);
         }
         self.turbo.reset();
+        self.roots.reset();
         self.mechanical.reset();
         self.knock.reset();
         self.propagation.reset();
@@ -2595,6 +2698,10 @@ impl EngineSynth {
         if let Some(voicing) = self.config.turbo {
             self.turbo
                 .tune(&voicing, self.snapshot.turbo_rpm, self.snapshot.turbo_surge);
+        }
+        if let Some(voicing) = self.config.roots {
+            self.roots
+                .tune(&voicing, self.snapshot.rpm, self.snapshot.throttle);
         }
 
         self.backfire.tune(&self.config, &self.snapshot);
@@ -2845,6 +2952,10 @@ impl EngineSynth {
             Some(voicing) => self.turbo.process(&mut self.noise) * voicing.level as f32,
             None => 0.0,
         };
+        let roots = match self.config.roots {
+            Some(voicing) => self.roots.process() * voicing.level as f32,
+            None => 0.0,
+        };
         let intake_rad =
             self.intake_network.step(&self.intake_excitations) / REFERENCE_INTAKE_PRESSURE;
         // Combustion and the mechanical rig arrive at the block as one force,
@@ -2858,7 +2969,8 @@ impl EngineSynth {
         let drive = rise * self.combustion_scale
             + self.mechanical.process(&mut self.noise) * self.config.mechanical_level as f32
             + self.knock.process(&mut self.noise) * self.knock_scale;
-        let block_rad = turbo + self.structure.process(drive) * self.config.structure_level as f32;
+        let block_rad =
+            turbo + roots + self.structure.process(drive) * self.config.structure_level as f32;
         let intake_rad = intake_rad * self.config.intake_level as f32;
 
         let (left, right) = self
@@ -5069,5 +5181,45 @@ mod tests {
         let mut synth = EngineSynth::new(config);
         synth.set_snapshot(&loaded_snapshot());
         assert!(render(&mut synth, 4_800).iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn roots_supercharger_whine_tracks_crank_order_with_no_lag() {
+        let voicing = RootsVoicing {
+            belt_ratio: 2.0,
+            lobes: 4,
+            reference_rpm: 6_000.0,
+            level: 0.05,
+        };
+        assert_eq!(voicing.order(), 8.0);
+
+        let mut voice = RootsVoice::new(FS);
+        voice.tune(&voicing, 3_000.0, 1.0);
+        let crank_hz_1 = 3_000.0 / 60.0;
+        let expected_hz_1 = crank_hz_1 * 8.0;
+        assert!(
+            (voice.tone_hz.target() - expected_hz_1).abs() < 1e-3,
+            "expected tone target {expected_hz_1}, got {}",
+            voice.tone_hz.target()
+        );
+
+        // Immediate step in RPM: tone target updates instantaneously without spool lag
+        voice.tune(&voicing, 6_000.0, 1.0);
+        let crank_hz_2 = 6_000.0 / 60.0;
+        let expected_hz_2 = crank_hz_2 * 8.0;
+        assert!(
+            (voice.tone_hz.target() - expected_hz_2).abs() < 1e-3,
+            "expected tone target {expected_hz_2}, got {}",
+            voice.tone_hz.target()
+        );
+
+        // Render samples to ensure output is finite and nonzero
+        let mut sum = 0.0f32;
+        for _ in 0..1000 {
+            let s = voice.process();
+            assert!(s.is_finite());
+            sum += s.abs();
+        }
+        assert!(sum > 0.01, "roots voice produced silence");
     }
 }

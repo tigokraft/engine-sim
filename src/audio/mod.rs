@@ -64,8 +64,8 @@ pub mod structure;
 pub mod waveguide;
 
 pub use dsp::{
-    CylinderTap, EngineSnapshot, EngineSynth, ImpulsiveSpec, MechanicalSpec, SourceRate,
-    SynthConfig, TurboVoicing, MAX_CYLINDERS,
+    CylinderTap, EngineSnapshot, EngineSynth, ImpulsiveSpec, MechanicalSpec, RootsVoicing,
+    SourceRate, SynthConfig, TurboVoicing, MAX_CYLINDERS,
 };
 pub use filters::MufflerGeometry;
 pub use propagation::{Aperture, AperturePath, AperturePositions, Listener, PropagationModel};
@@ -226,6 +226,11 @@ pub enum Induction {
         /// What that shaft is heard as.
         voice: TurboVoicing,
     },
+    /// A Roots or twin-screw positive displacement supercharger, crank-order locked.
+    RootsSupercharged {
+        /// What the supercharger sounds like.
+        voice: RootsVoicing,
+    },
 }
 
 impl Induction {
@@ -300,15 +305,34 @@ impl Induction {
         }
     }
 
+    /// A twin-screw / Roots-type positive displacement supercharger.
+    ///
+    /// Driven directly by belt from the crankshaft, its whine frequency is
+    /// locked to crank speed times pulley ratio times rotor lobe count with zero
+    /// spool lag.
+    pub const fn roots() -> Self {
+        Self::RootsSupercharged {
+            voice: RootsVoicing {
+                belt_ratio: 2.1,
+                lobes: 4,
+                reference_rpm: 6_500.0,
+                level: 0.030,
+            },
+        }
+    }
+
     /// Whether a compressor is fitted at all.
     pub fn is_forced(&self) -> bool {
-        matches!(self, Self::Turbocharged { .. })
+        matches!(
+            self,
+            Self::Turbocharged { .. } | Self::RootsSupercharged { .. }
+        )
     }
 
     /// The shaft to run, if there is one.
     pub fn shaft(&self) -> Option<TurboModel> {
         match *self {
-            Self::NaturallyAspirated => None,
+            Self::NaturallyAspirated | Self::RootsSupercharged { .. } => None,
             Self::Turbocharged { shaft, .. } => Some(shaft),
         }
     }
@@ -316,8 +340,16 @@ impl Induction {
     /// The voicing to mix, if there is one.
     pub fn voice(&self) -> Option<TurboVoicing> {
         match *self {
-            Self::NaturallyAspirated => None,
+            Self::NaturallyAspirated | Self::RootsSupercharged { .. } => None,
             Self::Turbocharged { voice, .. } => Some(voice),
+        }
+    }
+
+    /// The Roots supercharger voicing, if one is fitted.
+    pub fn roots_voice(&self) -> Option<RootsVoicing> {
+        match *self {
+            Self::RootsSupercharged { voice } => Some(voice),
+            _ => None,
         }
     }
 
@@ -326,6 +358,7 @@ impl Induction {
         match self {
             Self::NaturallyAspirated => "naturally aspirated",
             Self::Turbocharged { .. } => "turbocharged",
+            Self::RootsSupercharged { .. } => "roots supercharged",
         }
     }
 }
@@ -642,6 +675,7 @@ impl SynthConfig {
     /// the same [`Induction`].
     pub fn with_induction(mut self, induction: Induction) -> Self {
         self.turbo = induction.voice();
+        self.roots = induction.roots_voice();
         self
     }
 }
