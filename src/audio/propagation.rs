@@ -25,6 +25,10 @@
 //!    during a pass-by, because the front and rear of the vehicle pass the observer
 //!    at different moments.
 
+use std::f32::consts::PI;
+
+use crate::audio::filters::DelayLine;
+
 /// Speed of sound in ambient air at reference conditions (20 °C, 101.3 kPa) [m/s].
 pub const SPEED_OF_SOUND_AIR: f32 = 343.2;
 
@@ -34,7 +38,8 @@ pub const LISTENER_EAR_SPACING: f32 = 0.18;
 /// Reference distance for 1/r geometric attenuation [m].
 pub const REFERENCE_PROPAGATION_DISTANCE: f32 = 1.0;
 
-use std::f32::consts::PI;
+/// Maximum propagation distance supported by internal delay lines [m].
+pub const MAX_PROPAGATION_DISTANCE: f32 = 40.0;
 
 /// Normalizes a 3D vector to unit length.
 #[inline]
@@ -60,6 +65,18 @@ pub fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     let dy = a[1] - b[1];
     let dz = a[2] - b[2];
     (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// Propagation delay in seconds for a given path length [s].
+#[inline]
+pub fn path_delay_seconds(distance: f32, c: f32) -> f32 {
+    distance / c.max(1.0)
+}
+
+/// Propagation delay in samples for a given path length [samples].
+#[inline]
+pub fn path_delay_samples(distance: f32, c: f32, sample_rate: f32) -> f32 {
+    path_delay_seconds(distance, c) * sample_rate
 }
 
 /// An acoustic radiating aperture on the engine / vehicle.
@@ -167,6 +184,57 @@ impl Listener {
     }
 }
 
+/// Propagation path from one aperture to the listener's ears.
+///
+/// Owns its delay lines sized for [`MAX_PROPAGATION_DISTANCE`].
+#[derive(Debug, Clone)]
+pub struct AperturePath {
+    pub aperture: Aperture,
+    sample_rate: f32,
+    left_delay: DelayLine,
+    right_delay: DelayLine,
+}
+
+impl AperturePath {
+    /// Creates a new path for `aperture` at the given sample rate.
+    pub fn new(aperture: Aperture, sample_rate: f32) -> Self {
+        let max_samples =
+            (MAX_PROPAGATION_DISTANCE / SPEED_OF_SOUND_AIR * sample_rate) as usize + 64;
+        Self {
+            aperture,
+            sample_rate,
+            left_delay: DelayLine::with_max_delay(max_samples),
+            right_delay: DelayLine::with_max_delay(max_samples),
+        }
+    }
+
+    /// Clears internal delay lines.
+    pub fn reset(&mut self) {
+        self.left_delay.reset();
+        self.right_delay.reset();
+    }
+
+    /// Delays one input sample by the physical path length to each ear.
+    ///
+    /// Returns stereo `(left, right)` delayed samples.
+    #[inline]
+    pub fn step_delay(&mut self, sample: f32, listener: &Listener) -> (f32, f32) {
+        let (left_ear, right_ear) = listener.ears();
+        let r_left = self.aperture.distance_to(left_ear);
+        let r_right = self.aperture.distance_to(right_ear);
+
+        let d_left = (1.0 + path_delay_samples(r_left, SPEED_OF_SOUND_AIR, self.sample_rate))
+            .clamp(1.0, self.left_delay.max_delay());
+        let d_right = (1.0 + path_delay_samples(r_right, SPEED_OF_SOUND_AIR, self.sample_rate))
+            .clamp(1.0, self.right_delay.max_delay());
+
+        self.left_delay.push(sample);
+        self.right_delay.push(sample);
+
+        (self.left_delay.read(d_left), self.right_delay.read(d_right))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +267,86 @@ mod tests {
         assert_eq!(r[1], -3.0);
         assert_eq!(l[2], 1.2);
         assert_eq!(r[2], 1.2);
+    }
+
+    #[test]
+    fn aperture_delays_match_r_over_c_and_sum_shows_comb() {
+        let sample_rate = 48_000.0;
+        let c = SPEED_OF_SOUND_AIR; // 343.2 m/s
+
+        // Test 1: Impulse delay matches r / c.
+        // Choose distance 3.432 m -> delay = 3.432 / 343.2 = 0.010 s = 480 samples.
+        let dist = 3.432;
+        let aperture = Aperture::new([0.0, 0.0, 1.0], 0.01, [0.0, -1.0, 0.0]);
+        let listener = Listener {
+            position: [0.0, -dist, 1.0],
+            ear_spacing: 0.0, // Monoaural for exact sample count assertion
+        };
+        let mut path = AperturePath::new(aperture, sample_rate);
+
+        let expected_samples = (dist / c * sample_rate).round() as usize; // 480 samples
+        let mut peak_sample = 0;
+        let mut peak_val = 0.0f32;
+
+        for n in 0..1000 {
+            let input = if n == 0 { 1.0 } else { 0.0 };
+            let (l, _) = path.step_delay(input, &listener);
+            if l.abs() > peak_val {
+                peak_val = l.abs();
+                peak_sample = n;
+            }
+        }
+        assert_eq!(
+            peak_sample, expected_samples,
+            "Impulse should arrive at exactly r / c samples"
+        );
+
+        // Test 2: Two apertures with path difference produce expected comb cancellation.
+        // Aperture A at [0, 0, 1], distance 5 m.
+        // Aperture B at [0, 1, 1], distance 6 m.
+        // Path difference = 1.0 m -> delay difference = 1.0 / 343.2 s.
+        // Comb notch frequency: f_notch = c / (2 * delta_r) = 343.2 / 2 = 171.6 Hz.
+        // Comb peak frequency: f_peak = c / delta_r = 343.2 Hz.
+        let ap_a = Aperture::new([0.0, 0.0, 1.0], 0.01, [0.0, -1.0, 0.0]);
+        let ap_b = Aperture::new([0.0, 1.0, 1.0], 0.01, [0.0, -1.0, 0.0]);
+        let listener_comb = Listener {
+            position: [0.0, -5.0, 1.0],
+            ear_spacing: 0.0,
+        };
+
+        let measure_response_at = |freq: f32| -> f32 {
+            let mut path_a = AperturePath::new(ap_a, sample_rate);
+            let mut path_b = AperturePath::new(ap_b, sample_rate);
+            let mut max_sum = 0.0f32;
+            for n in 0..4000 {
+                let t = n as f32 / sample_rate;
+                let sig = (2.0 * PI * freq * t).sin();
+                let (la, _) = path_a.step_delay(sig, &listener_comb);
+                let (lb, _) = path_b.step_delay(sig, &listener_comb);
+                if n > 2000 {
+                    let sum = (la + lb).abs();
+                    if sum > max_sum {
+                        max_sum = sum;
+                    }
+                }
+            }
+            max_sum
+        };
+
+        let f_notch = c / 2.0; // 171.6 Hz
+        let f_peak = c; // 343.2 Hz
+        let level_at_notch = measure_response_at(f_notch);
+        let level_at_peak = measure_response_at(f_peak);
+
+        assert!(
+            level_at_notch < 0.05,
+            "Comb notch at f = c / (2 * delta_r) should cancel, got {}",
+            level_at_notch
+        );
+        assert!(
+            level_at_peak > 1.90,
+            "Comb peak at f = c / delta_r should reinforce to ~2.0, got {}",
+            level_at_peak
+        );
     }
 }
