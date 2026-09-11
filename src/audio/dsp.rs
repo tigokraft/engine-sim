@@ -40,8 +40,8 @@
 //!                     └─────────────────────────────────────────────┘
 //!   intake noise ── bandpass(m_dot, throttle) ───────────────> centre ──┐
 //!   turbo whistle + surge flutter ──[if fitted]──────────────> centre ──┤
-//!   valvetrain clicks + FMEP rumble ─────────────────────────> centre ──┤
-//!   dP/dtheta ──> modal block (bending, pan, bore walls) ────> centre ──┤
+//!   valvetrain clicks + FMEP rumble ──┐                                 │
+//!   dP/dtheta per cylinder ───────────┴> modal block ────────> centre ──┤
 //!                                                                       ▼
 //!                            DC block ─> block resonance ─> soft clip ─> out
 //!                                        (60-120 Hz, gain falls with rpm)
@@ -60,7 +60,8 @@
 //!   down when the pulses are far apart.
 //! - Combustion at idle is a series of widely spaced events, and an engine
 //!   built from combustion alone has audible *gaps*. [`MechanicalVoice`] fills
-//!   them with the noise floor a real engine never stops making.
+//!   them with the noise floor a real engine never stops making — radiating,
+//!   as it physically must, through the block rather than through the air.
 //! - The exhaust path is bandpass-like end to end and leaves out the block
 //!   itself, which at idle is most of what a listener hears as size.
 //!   [`crate::audio::filters::BlockResonator`] puts it back.
@@ -584,6 +585,11 @@ pub struct SynthConfig {
     pub intake_level: f64,
     pub backfire_level: f64,
     /// Level of the valvetrain and bearing noise floor [-].
+    ///
+    /// Measured at the *block*, not at the bus: the rig drives the structural
+    /// path and reaches the listener only through it, so this number is the
+    /// mechanical force against the combustion force the same structure is
+    /// carrying, and it is not comparable to [`Self::intake_level`].
     pub mechanical_level: f64,
     /// Level of the structural path in the final mix [-].
     ///
@@ -676,10 +682,10 @@ impl SynthConfig {
             backfire_level: 0.4,
             // Calibrated to sit about 8 dB under the exhaust at idle: audible
             // in the gaps between firings, which is its whole job, without
-            // becoming the thing the engine sounds like. Level is measured
-            // against a unity-RMS source, so this is directly comparable to
-            // `intake_level` and [`TurboVoicing::level`].
-            mechanical_level: 0.030,
+            // becoming the thing the engine sounds like. The rig itself sits at
+            // unity RMS, so this is the force it puts into the block relative to
+            // the combustion drive alongside it.
+            mechanical_level: 0.37,
             // Set by measurement against the catalogue: the largest value at
             // which the block is clearly present in the bottom octave at idle
             // without becoming the thing the engine sounds like.
@@ -1273,8 +1279,9 @@ const VALVE_EVENTS_PER_CYLINDER: f32 = 2.0;
 ///
 /// Two one-poles at [`MECHANICAL_RUMBLE_HZ`] throw away most of the power in a
 /// white source; this puts the survivor back at unity RMS so
-/// [`SynthConfig::mechanical_level`] means the same thing as the other level
-/// controls. Measured, not derived — see `mechanical_layers_sit_at_unity`.
+/// [`SynthConfig::mechanical_level`] is a force the block is driven with rather
+/// than an artefact of the filtering. Measured, not derived — see
+/// `mechanical_layers_sit_at_unity`.
 const MECHANICAL_RUMBLE_MAKEUP: f32 = 23.7;
 
 /// Corner of each rumble lowpass stage [Hz].
@@ -2683,26 +2690,29 @@ impl EngineSynth {
             right += out * bank.pan_right;
         }
 
-        // Intake and turbo are near the listener's centre line and share one
-        // mono source; only the exhaust is imaged.
-        // Intake, turbo, the mechanical floor, and cylinder bore knock are near
-        // the listener's centre line and share one mono source; only the exhaust
-        // is imaged. The mechanical and knock layers belong here because they
-        // radiate from the block, which is a single structural object sitting
-        // between the banks rather than something with two outlets.
+        // Intake, turbo, cylinder bore knock and the block itself are near the
+        // listener's centre line and share one mono source; only the exhaust is
+        // imaged, because only the exhaust has two outlets. The block is a
+        // single structural object sitting between the banks and radiating a
+        // four-metre wavelength at its lowest mode: there is nothing to image.
         let turbo = match self.config.turbo {
             Some(voicing) => self.turbo.process(&mut self.noise) * voicing.level as f32,
             None => 0.0,
         };
         let intake_rad =
             self.intake_network.step(&self.intake_excitations) / REFERENCE_INTAKE_PRESSURE;
-        let structural = self.structure.process(rise * self.combustion_scale)
-            * self.config.structure_level as f32;
+        // Combustion and the mechanical rig arrive at the block as one force,
+        // because the block cannot tell them apart: a lifter landing on a valve
+        // and a flame front arriving at the piston crown are both metal being
+        // hit, and both reach the listener only by shaking the casing. Summing
+        // them before the bank rather than after is not an optimisation — it is
+        // the statement that there is one structure, not two.
+        let drive = rise * self.combustion_scale
+            + self.mechanical.process(&mut self.noise) * self.config.mechanical_level as f32;
         let centre = intake_rad * self.config.intake_level as f32
             + turbo
-            + self.mechanical.process(&mut self.noise) * self.config.mechanical_level as f32
             + self.knock.process(&mut self.noise)
-            + structural;
+            + self.structure.process(drive) * self.config.structure_level as f32;
         left += centre;
         right += centre;
 
