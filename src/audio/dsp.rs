@@ -135,6 +135,12 @@ pub const REFERENCE_BLOWDOWN: f32 = 4.5e5;
 /// to 0.19 kg/s at the limiter.
 pub const REFERENCE_INTAKE_FLOW: f32 = 0.20;
 
+/// Reference acoustic pressure scale for intake network excitations [Pa].
+///
+/// Induction rarefactions (-c * mdot / A) and valve-closing water hammer pulses
+/// range from 10 to 40 kPa; 50 kPa normalises radiated mouth pressure to unity.
+pub const REFERENCE_INTAKE_PRESSURE: f32 = 5.0e4;
+
 /// Friction mean effective pressure that maps to a full mechanical noise floor [Pa].
 ///
 /// The Chen-Flynn correlation the block ships with runs from about 0.7 bar of
@@ -1197,89 +1203,6 @@ impl ExhaustBank {
 }
 
 // ---------------------------------------------------------------------------
-// Intake
-// ---------------------------------------------------------------------------
-
-/// Induction noise: broadband turbulence gated by flow and throttle.
-///
-/// Air rushing past a throttle plate and down a runner is a jet, and a jet's
-/// radiated sound is broadband with a spectral peak that climbs with velocity.
-/// Both the level and that peak are driven from the same mass flow, which is
-/// why an engine's intake gets not just louder but *brighter* as it breathes
-/// harder — and why a closed throttle at high rpm goes quiet rather than merely
-/// soft.
-///
-/// The *level* is driven sample by sample from the solver's own port flow curve
-/// played back at crank rate, so the layer is a train of gulps rather than a
-/// steady hiss: an engine draws air in discrete events, and at four cylinders
-/// and 1500 rpm there are gaps between them a listener can hear. Only the filter
-/// tuning is left at the control rate, because that is where the transcendental
-/// functions are.
-#[derive(Debug, Clone)]
-struct IntakeVoice {
-    band: Biquad,
-    body: Biquad,
-    /// Throttle-plate term of the level law, set at the control rate [-].
-    throttle_gain: f32,
-    sample_rate: f32,
-}
-
-impl IntakeVoice {
-    fn new(sample_rate: f32) -> Self {
-        Self {
-            band: Biquad::new(BiquadCoeffs::bandpass(sample_rate, 400.0, 0.7)),
-            body: Biquad::new(BiquadCoeffs::lowpass(sample_rate, 2_000.0, 0.7)),
-            throttle_gain: 0.0,
-            sample_rate,
-        }
-    }
-
-    /// Retunes from cycle-mean mass flow [kg/s] and throttle position.
-    fn tune(&mut self, mass_flow: f32, throttle: f32) {
-        let flow = (mass_flow / REFERENCE_INTAKE_FLOW).clamp(0.0, 1.6);
-
-        // Peak velocity noise climbs roughly linearly with flow over the range
-        // an engine actually uses.
-        let centre = 260.0 + 1_500.0 * flow;
-        self.band
-            .set_coeffs(BiquadCoeffs::bandpass(self.sample_rate, centre, 0.65));
-        self.body.set_coeffs(BiquadCoeffs::lowpass(
-            self.sample_rate,
-            (900.0 + 3_600.0 * flow).min(0.44 * self.sample_rate),
-            0.7,
-        ));
-
-        // The throttle plate itself: a shut throttle muffles the runner mouth
-        // even while the engine is still pumping. The flow term of the level law
-        // is applied per sample in `process`, from the port flow curve.
-        self.throttle_gain = 0.25 + 0.75 * throttle;
-    }
-
-    /// One sample, at the instantaneous induction flow the cylinders are drawing.
-    #[inline(always)]
-    fn process(&mut self, noise: &mut Noise, mass_flow: f32) -> f32 {
-        // Orifice noise is dipole: acoustic sound power scales as u^6, so
-        // acoustic pressure amplitude scales as u^3.
-        let flow = (mass_flow / REFERENCE_INTAKE_FLOW).clamp(0.0, 1.6);
-        let g = (flow * flow.sqrt() * self.throttle_gain).min(1.5);
-        if g < 1e-6 {
-            // Still run the filters so their state stays in step; only the
-            // multiply is skipped. Bypassing them entirely would leave stale
-            // state to thump when flow returns.
-            let _ = self.body.process(self.band.process(0.0));
-            return 0.0;
-        }
-        let excited = self.band.process(noise.next_bipolar());
-        self.body.process(excited) * g
-    }
-
-    fn reset(&mut self) {
-        self.band.reset();
-        self.body.reset();
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Mechanical noise floor
 // ---------------------------------------------------------------------------
 
@@ -2097,7 +2020,6 @@ pub struct EngineSynth {
     bank_excitations: Vec<f32>,
     /// Pressure radiated from each bank's mouth this sample.
     radiated: Vec<f32>,
-    intake: IntakeVoice,
     intake_network: IntakeNetwork,
     intake_excitations: Vec<f32>,
     prev_cylinder_intake_flow: Vec<f32>,
@@ -2199,7 +2121,6 @@ impl EngineSynth {
             backfire_pulses: vec![PopPool::default(); config.bank_count],
             bank_excitations: vec![0.0; config.bank_count],
             radiated: vec![0.0; config.bank_count],
-            intake: IntakeVoice::new(fs),
             intake_network: IntakeNetwork::new(&config.intake, config.cylinders.len(), fs),
             intake_excitations: vec![0.0; n_cyl],
             prev_cylinder_intake_flow: vec![0.0; n_cyl],
@@ -2340,7 +2261,6 @@ impl EngineSynth {
         for smoother in self.blowdown_pa.iter_mut() {
             smoother.snap(0.0);
         }
-        self.intake.reset();
         self.turbo.reset();
         self.mechanical.reset();
         self.knock.reset();
@@ -2418,7 +2338,7 @@ impl EngineSynth {
         let temperature = self.exhaust_temperature.advance(block);
         let gamma = self.exhaust_gamma.advance(block);
         let gas_constant = self.exhaust_gas_constant.advance(block);
-        let flow = self.intake_flow.advance(block);
+        self.intake_flow.advance(block);
         let throttle = self.throttle.advance(block);
         for smoother in self.blowdown_pa.iter_mut() {
             smoother.advance(block);
@@ -2448,7 +2368,7 @@ impl EngineSynth {
         self.block.tune(rpm);
         self.mechanical
             .tune(&self.snapshot, cycle_hz, self.config.cylinders.len());
-        self.intake.tune(flow, throttle);
+        self.intake_network.set_throttle(throttle);
         self.knock
             .tune(self.snapshot.bore, gamma, gas_constant, temperature);
         // Nothing to tune on an atmospheric engine: the voice is left cold and
@@ -2657,7 +2577,11 @@ impl EngineSynth {
                 crate::audio::intake_voice::induction_rarefaction_pa(flow, runner_area, c_intake);
             let p_slam =
                 crate::audio::intake_voice::valve_slam_pa(d_flow_dt, runner_len, runner_area);
-            self.intake_excitations[index] = p_rarefaction + p_slam;
+            let flow_ratio = (flow / REFERENCE_INTAKE_FLOW).clamp(0.0, 1.6);
+            let p_orifice = 1_000.0
+                * crate::audio::intake_voice::dipole_orifice_amplitude(flow_ratio)
+                * self.noise.next_bipolar();
+            self.intake_excitations[index] = p_rarefaction + p_slam + p_orifice;
         }
         induction
     }
@@ -2667,7 +2591,7 @@ impl EngineSynth {
     fn tick(&mut self) -> (f32, f32) {
         let cycle_hz = self.cycle_hz.next_value();
         let turning = self.advance_crank(cycle_hz);
-        let induction = self.fill_excitations(turning);
+        self.fill_excitations(turning);
 
         let exhaust_level = self.exhaust_level.next_value();
         for (excitation, pool) in self
@@ -2700,8 +2624,9 @@ impl EngineSynth {
             Some(voicing) => self.turbo.process(&mut self.noise) * voicing.level as f32,
             None => 0.0,
         };
-        let centre = self.intake.process(&mut self.noise, induction)
-            * self.config.intake_level as f32
+        let intake_rad =
+            self.intake_network.step(&self.intake_excitations) / REFERENCE_INTAKE_PRESSURE;
+        let centre = intake_rad * self.config.intake_level as f32
             + turbo
             + self.mechanical.process(&mut self.noise) * self.config.mechanical_level as f32
             + self.knock.process(&mut self.noise);
