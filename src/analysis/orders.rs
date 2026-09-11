@@ -59,6 +59,13 @@ pub const OVERLAP: usize = 4;
 /// exactly that band is what makes the level independent of bin alignment.
 const LOBE: isize = 2;
 
+/// How far either side of an order its own background is measured [orders].
+///
+/// A quarter of an order is half the way to the next half-order, so the two
+/// bands either side of a line sit between it and its neighbours and measure
+/// what is *under* it rather than what is next to it.
+pub const BACKGROUND_OFFSET: f64 = 0.25;
+
 /// Level reported for silence [dB].
 ///
 /// Finite so it can be averaged and printed like any other reading, and far
@@ -441,15 +448,42 @@ pub struct OrderLevel {
     ///
     /// The average is taken in power and converted once, not taken over
     /// decibels: a mean of logarithms is not the level of anything.
+    ///
+    /// This is the level *in the order's band*, which is the line plus whatever
+    /// else is passing through it. On a sweep that matters: order 2.5 of an
+    /// engine pulling from 850 to 7400 rpm drags its band across every
+    /// resonance between 35 and 310 Hz, and reads them all, whether or not the
+    /// crank drives that order at all. [`Self::line_db`] is the figure that
+    /// does not.
     pub mean_db: f64,
     /// Level in the loudest single frame [dBFS].
     pub peak_db: f64,
+    /// Level in the bands a quarter-order either side of it [dBFS].
+    ///
+    /// What is under the line: the broadband content and the tails of whatever
+    /// resonances the order was sweeping through, measured through bands of the
+    /// same width so the two readings are on one scale.
+    pub background_db: f64,
+    /// Level of the order *line*, with its own background taken out [dBFS].
+    ///
+    /// Power subtraction, not a decibel difference: the band holds the line and
+    /// the background together, so the line alone is
+    /// `sqrt(max(0, P_band - P_background))`. An order with no line in it comes
+    /// back at [`SILENCE_DB`], which is the answer the crank's nulls deserve
+    /// and the one a band level cannot give.
+    pub line_db: f64,
     /// How many analysis frames the order sat above the resolution floor in.
     ///
     /// Zero means the order was never measurable — an idling engine's order 1
     /// is below what a window this long can separate from DC — and `mean_db` is
     /// then [`SILENCE_DB`] by convention rather than by measurement.
     pub frames: usize,
+    /// Of those, how many the background could be measured in.
+    ///
+    /// Fewer, and sometimes none: at 850 rpm a quarter of an order is 3.5 Hz,
+    /// well inside the window's own main lobe, so an idle has a band level but
+    /// no line level.
+    pub background_frames: usize,
 }
 
 /// The order content of one render.
@@ -494,6 +528,9 @@ pub fn track(samples: &[f32], sample_rate: f64, rpm: &RpmCurve, orders: &[f64]) 
     let mut power_sum = vec![0.0f64; orders.len()];
     let mut peak = vec![0.0f64; orders.len()];
     let mut counted = vec![0usize; orders.len()];
+    let mut background_sum = vec![0.0f64; orders.len()];
+    let mut line_sum = vec![0.0f64; orders.len()];
+    let mut background_counted = vec![0usize; orders.len()];
     let mut frames = 0usize;
 
     let mut start = 0usize;
@@ -515,6 +552,35 @@ pub fn track(samples: &[f32], sample_rate: f64, rpm: &RpmCurve, orders: &[f64]) 
             power_sum[i] += amplitude * amplitude;
             peak[i] = peak[i].max(amplitude);
             counted[i] += 1;
+
+            // The background either side, but only where a quarter-order is
+            // further from the line than the window's own main lobe. Below
+            // that the two bands overlap the line they are supposed to measure
+            // under, and the answer would be the line again.
+            if BACKGROUND_OFFSET * slow / 60.0 < stft.resolution_floor() {
+                continue;
+            }
+            let mut background = 0.0;
+            let mut sides = 0;
+            for offset in [-BACKGROUND_OFFSET, BACKGROUND_OFFSET] {
+                let side = order + offset;
+                if side < BACKGROUND_OFFSET {
+                    continue;
+                }
+                if let Some(amplitude) =
+                    stft.amplitude_in_band(side * slow / 60.0, side * fast / 60.0)
+                {
+                    background += amplitude * amplitude;
+                    sides += 1;
+                }
+            }
+            if sides == 0 {
+                continue;
+            }
+            let background = background / sides as f64;
+            background_sum[i] += background;
+            line_sum[i] += (amplitude * amplitude - background).max(0.0);
+            background_counted[i] += 1;
         }
 
         frames += 1;
@@ -524,15 +590,23 @@ pub fn track(samples: &[f32], sample_rate: f64, rpm: &RpmCurve, orders: &[f64]) 
     let levels = orders
         .iter()
         .enumerate()
-        .map(|(i, &order)| OrderLevel {
-            order,
-            mean_db: if counted[i] > 0 {
-                db((power_sum[i] / counted[i] as f64).sqrt())
-            } else {
-                SILENCE_DB
-            },
-            peak_db: db(peak[i]),
-            frames: counted[i],
+        .map(|(i, &order)| {
+            let mean = |sum: f64, count: usize| {
+                if count > 0 {
+                    db((sum / count as f64).sqrt())
+                } else {
+                    SILENCE_DB
+                }
+            };
+            OrderLevel {
+                order,
+                mean_db: mean(power_sum[i], counted[i]),
+                peak_db: db(peak[i]),
+                background_db: mean(background_sum[i], background_counted[i]),
+                line_db: mean(line_sum[i], background_counted[i]),
+                frames: counted[i],
+                background_frames: background_counted[i],
+            }
         })
         .collect();
 
@@ -677,6 +751,29 @@ impl Balance {
 }
 
 impl OrderTable {
+    /// This table's *order lines* as a balance, each with its own background
+    /// taken out.
+    ///
+    /// The form to compare against a firing pattern. A band level answers "how
+    /// much energy went past this order", which on a sweep is largely a
+    /// question about what resonances the band crossed; a line level answers
+    /// "how much of it was on this order", which is the question a crank
+    /// answers. An order with no line in it is absent here rather than
+    /// reported at the level of its own background.
+    pub fn line_balance(&self, reference_order: f64) -> Balance {
+        let levels: Vec<(f64, Option<f64>)> = self
+            .levels
+            .iter()
+            .map(|l| {
+                (
+                    l.order,
+                    (l.background_frames > 0 && l.line_db > SILENCE_DB).then_some(l.line_db),
+                )
+            })
+            .collect();
+        Balance::from_levels(reference_order, &levels)
+    }
+
     /// This table as a balance against one of its own orders.
     ///
     /// The firing order is the one to ask for: it is the order the engine
