@@ -1728,6 +1728,58 @@ mod tests {
     }
 
     #[test]
+    fn the_single_rocks_its_crank_where_the_twelve_barely_ripples() {
+        // Stage 1c integrates crank speed at audio rate from the indicated
+        // torque curve and the rotating inertia, so how much the crank hunts
+        // inside its own cycle is a property of the engine rather than a
+        // setting. A single is the extreme case in both terms at once: one
+        // firing per two revolutions instead of twelve, and a tenth of the
+        // inertia to smooth it with. It should not be a subtle difference, and
+        // it is not.
+        use crate::audio::dsp::EngineSynth;
+
+        let rpm = 1_250.0;
+        let ripple = |preset: &EnginePreset| {
+            let block = primed(preset, rpm);
+            let mut source = preset.snapshot_source(&block);
+            let snapshot = source.sample(&block, rpm, 1.0 / 240.0, EngineControls::wide_open());
+            let mut synth = EngineSynth::new(preset.synth_config(&block, 48_000.0));
+            synth.set_snapshot(&snapshot);
+
+            let mut frame = [0.0f32; 2];
+            // A second to settle the speed smoother, then two cycles of it.
+            for _ in 0..48_000 {
+                synth.render(&mut frame, 2);
+            }
+            let (mut low, mut high) = (f32::MAX, f32::MIN);
+            for _ in 0..24_000 {
+                synth.render(&mut frame, 2);
+                let delta = synth.crank_omega_delta();
+                low = low.min(delta);
+                high = high.max(delta);
+            }
+            let nominal = 4.0 * std::f32::consts::PI * (rpm as f32 / 120.0);
+            (high - low) / nominal
+        };
+
+        let single = ripple(&EnginePreset::big_single());
+        let twelve = ripple(&EnginePreset::v12());
+
+        assert!(
+            single > 0.02,
+            "the single's crank barely moved: {:.3} % of peak-to-peak ripple",
+            single * 100.0
+        );
+        assert!(
+            single > 5.0 * twelve,
+            "one cylinder on a light flywheel ripples {:.2} % against the V12's {:.2} %, \
+             which is not the difference between a thumper and a twelve",
+            single * 100.0,
+            twelve * 100.0
+        );
+    }
+
+    #[test]
     fn every_preset_has_valid_aperture_positions() {
         for preset in EnginePreset::catalogue() {
             assert!(
