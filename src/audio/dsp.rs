@@ -190,6 +190,8 @@ pub struct EngineSnapshot {
     pub exhaust_gas_constant: f32,
     /// Instantaneous induction mass flow, summed over cylinders [kg/s].
     pub intake_mass_flow: f32,
+    /// Instantaneous mass flow through each cylinder's intake port [kg/s].
+    pub cylinder_intake_flow: [f32; MAX_CYLINDERS],
     /// Throttle position, `0..=1` [-].
     pub throttle: f32,
     /// Turbocharger shaft speed [rev/min].
@@ -261,6 +263,7 @@ impl Default for EngineSnapshot {
             exhaust_gamma: 1.33,
             exhaust_gas_constant: 287.0,
             intake_mass_flow: 0.0,
+            cylinder_intake_flow: [0.0; MAX_CYLINDERS],
             throttle: 0.0,
             turbo_rpm: 0.0,
             turbo_surge: 0.0,
@@ -309,6 +312,12 @@ impl EngineSnapshot {
         guard!(exhaust_gamma, 1.05, 1.70);
         guard!(exhaust_gas_constant, 150.0, 600.0);
         guard!(intake_mass_flow, 0.0, 50.0);
+        for f in self.cylinder_intake_flow.iter_mut() {
+            if !f.is_finite() {
+                *f = 0.0;
+            }
+            *f = f.clamp(0.0, 10.0);
+        }
         guard!(throttle, 0.0, 1.0);
         guard!(turbo_rpm, 0.0, 400_000.0);
         guard!(turbo_surge, 0.0, 1.0);
@@ -2757,6 +2766,7 @@ mod tests {
             exhaust_gamma: 1.33,
             exhaust_gas_constant: 287.0,
             intake_mass_flow: 0.20,
+            cylinder_intake_flow: [0.20 / 8.0; MAX_CYLINDERS],
             throttle: 0.8,
             turbo_rpm: 90_000.0,
             turbo_surge: 0.0,
@@ -3206,10 +3216,10 @@ mod tests {
         // not allowed to do.
         assert!(!std::mem::needs_drop::<EngineSnapshot>());
 
-        // Three cycle tables, the per-cylinder blowdown array, sixteen scalars
-        // and one padded bool. Every byte accounted for is a byte that is not a
-        // pointer.
-        let expected = 3 * CYCLE_TABLE * 4 + MAX_CYLINDERS * 4 + 16 * 4 + 4;
+        // Three cycle tables, the per-cylinder blowdown and intake flow arrays,
+        // sixteen scalars and one padded bool. Every byte accounted for is a byte
+        // that is not a pointer.
+        let expected = 3 * CYCLE_TABLE * 4 + 2 * MAX_CYLINDERS * 4 + 16 * 4 + 4;
         assert_eq!(std::mem::size_of::<EngineSnapshot>(), expected);
     }
 
@@ -3223,6 +3233,7 @@ mod tests {
             exhaust_gamma: -1.0,
             exhaust_gas_constant: 0.0,
             intake_mass_flow: f32::NAN,
+            cylinder_intake_flow: [f32::NAN; MAX_CYLINDERS],
             throttle: f32::INFINITY,
             turbo_rpm: f32::NAN,
             turbo_surge: f32::NAN,

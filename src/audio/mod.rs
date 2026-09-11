@@ -443,9 +443,17 @@ impl SnapshotSource {
         // actually drawing. This is a *sum of instants*, not a cycle average:
         // the intake roar is made by the individual gulps, so the value that
         // drives it has to keep their peaks.
-        let intake_mass_flow: f64 = (0..block.firing.len())
-            .map(|i| block.sample_of(i).intake_flow.max(0.0))
-            .sum();
+        let mut cylinder_intake_flow = [0.0f32; MAX_CYLINDERS];
+        let mut intake_mass_flow = 0.0f64;
+        for (i, slot) in cylinder_intake_flow
+            .iter_mut()
+            .take(block.firing.len())
+            .enumerate()
+        {
+            let flow = block.sample_of(i).intake_flow.max(0.0);
+            *slot = flow as f32;
+            intake_mass_flow += flow;
+        }
 
         // Fuel that reaches the exhaust unburnt.
         //
@@ -527,6 +535,7 @@ impl SnapshotSource {
             exhaust_gamma: gamma as f32,
             exhaust_gas_constant: gas_constant as f32,
             intake_mass_flow: intake_mass_flow as f32,
+            cylinder_intake_flow,
             throttle: controls.throttle as f32,
             turbo_rpm: turbo_rpm as f32,
             turbo_surge: turbo_surge as f32,
