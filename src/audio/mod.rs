@@ -13,6 +13,7 @@
 //!   them.
 //! - [`radiation`] — what an open end does: reflect, lengthen, and radiate.
 //! - [`stream`] — the `cpal` output stream and the lock-free queue feeding it.
+//! - [`structure`] — the block as a radiating body, not as an EQ on the bus.
 //!
 //! # Wiring it up
 //!
@@ -58,6 +59,7 @@ pub mod filters;
 pub mod intake_voice;
 pub mod radiation;
 pub mod stream;
+pub mod structure;
 pub mod waveguide;
 
 pub use dsp::{
