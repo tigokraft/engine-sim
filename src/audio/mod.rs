@@ -64,8 +64,8 @@ pub mod structure;
 pub mod waveguide;
 
 pub use dsp::{
-    CylinderTap, EngineSnapshot, EngineSynth, ImpulsiveSpec, MechanicalSpec, RootsVoicing,
-    SourceRate, SynthConfig, TurboVoicing, MAX_CYLINDERS,
+    CentrifugalVoicing, CylinderTap, EngineSnapshot, EngineSynth, ImpulsiveSpec, MechanicalSpec,
+    RootsVoicing, SourceRate, SynthConfig, TurboVoicing, MAX_CYLINDERS,
 };
 pub use filters::MufflerGeometry;
 pub use propagation::{Aperture, AperturePath, AperturePositions, Listener, PropagationModel};
@@ -231,6 +231,11 @@ pub enum Induction {
         /// What the supercharger sounds like.
         voice: RootsVoicing,
     },
+    /// A centrifugal supercharger, shaft-order whistled but belt-locked to the crank.
+    CentrifugalSupercharged {
+        /// What the supercharger sounds like.
+        voice: CentrifugalVoicing,
+    },
 }
 
 impl Induction {
@@ -321,18 +326,38 @@ impl Induction {
         }
     }
 
+    /// A centrifugal supercharger.
+    ///
+    /// Driven by internal step-up planetary gear transmission and belt from the
+    /// crankshaft, its impeller speed is belt-locked to crank speed with zero
+    /// spool lag, producing high-frequency shaft-order compressor whistle.
+    pub const fn centrifugal() -> Self {
+        Self::CentrifugalSupercharged {
+            voice: CentrifugalVoicing {
+                gear_ratio: 9.2,
+                order: 1.8,
+                reference_rpm: 6_800.0,
+                level: 0.024,
+            },
+        }
+    }
+
     /// Whether a compressor is fitted at all.
     pub fn is_forced(&self) -> bool {
         matches!(
             self,
-            Self::Turbocharged { .. } | Self::RootsSupercharged { .. }
+            Self::Turbocharged { .. }
+                | Self::RootsSupercharged { .. }
+                | Self::CentrifugalSupercharged { .. }
         )
     }
 
     /// The shaft to run, if there is one.
     pub fn shaft(&self) -> Option<TurboModel> {
         match *self {
-            Self::NaturallyAspirated | Self::RootsSupercharged { .. } => None,
+            Self::NaturallyAspirated
+            | Self::RootsSupercharged { .. }
+            | Self::CentrifugalSupercharged { .. } => None,
             Self::Turbocharged { shaft, .. } => Some(shaft),
         }
     }
@@ -340,7 +365,9 @@ impl Induction {
     /// The voicing to mix, if there is one.
     pub fn voice(&self) -> Option<TurboVoicing> {
         match *self {
-            Self::NaturallyAspirated | Self::RootsSupercharged { .. } => None,
+            Self::NaturallyAspirated
+            | Self::RootsSupercharged { .. }
+            | Self::CentrifugalSupercharged { .. } => None,
             Self::Turbocharged { voice, .. } => Some(voice),
         }
     }
@@ -353,12 +380,21 @@ impl Induction {
         }
     }
 
+    /// The centrifugal supercharger voicing, if one is fitted.
+    pub fn centrifugal_voice(&self) -> Option<CentrifugalVoicing> {
+        match *self {
+            Self::CentrifugalSupercharged { voice } => Some(voice),
+            _ => None,
+        }
+    }
+
     /// A two-word label for a dashboard.
     pub fn label(&self) -> &'static str {
         match self {
             Self::NaturallyAspirated => "naturally aspirated",
             Self::Turbocharged { .. } => "turbocharged",
             Self::RootsSupercharged { .. } => "roots supercharged",
+            Self::CentrifugalSupercharged { .. } => "centrifugal supercharged",
         }
     }
 }
@@ -676,6 +712,7 @@ impl SynthConfig {
     pub fn with_induction(mut self, induction: Induction) -> Self {
         self.turbo = induction.voice();
         self.roots = induction.roots_voice();
+        self.centrifugal = induction.centrifugal_voice();
         self
     }
 }

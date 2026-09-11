@@ -501,6 +501,45 @@ impl Default for RootsVoicing {
     }
 }
 
+/// What a centrifugal supercharger sounds like.
+///
+/// A centrifugal supercharger uses an impeller like a turbocharger compressor,
+/// but is driven from the crankshaft through an internal step-up gear transmission
+/// and belt drive. Its impeller speed is mechanically locked to engine rpm
+/// (`gear_ratio * rpm`), producing a high-frequency shaft-order whistle like a
+/// turbo, but with zero spool lag.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CentrifugalVoicing {
+    /// Total gear and belt step-up ratio from crankshaft to impeller shaft [-].
+    /// Typically 7.0 to 12.0 for centrifugal blowers (e.g. ProCharger, Vortech).
+    pub gear_ratio: f64,
+    /// Order of the compressor whine relative to impeller shaft speed [-].
+    pub order: f64,
+    /// Engine speed at which the supercharger reaches full reference level [rev/min].
+    pub reference_rpm: f64,
+    /// Level of the centrifugal supercharger in the mix [-].
+    pub level: f64,
+}
+
+impl CentrifugalVoicing {
+    /// Effective crank order of the whine fundamental: `gear_ratio * order`.
+    pub fn crank_order(&self) -> f64 {
+        self.gear_ratio * self.order
+    }
+}
+
+impl Default for CentrifugalVoicing {
+    /// A typical street centrifugal supercharger: ~9.2:1 step-up, order 1.8.
+    fn default() -> Self {
+        Self {
+            gear_ratio: 9.2,
+            order: 1.8,
+            reference_rpm: 6_800.0,
+            level: 0.024,
+        }
+    }
+}
+
 /// How an impulsive mechanical source sets its recurrence rate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SourceRate {
@@ -614,6 +653,8 @@ pub struct SynthConfig {
     pub turbo: Option<TurboVoicing>,
     /// The Roots / twin-screw supercharger, or `None` if not fitted.
     pub roots: Option<RootsVoicing>,
+    /// The centrifugal supercharger, or `None` if not fitted.
+    pub centrifugal: Option<CentrifugalVoicing>,
     /// Unburnt fuel per cycle above which backfires become possible [kg].
     pub backfire_fuel_threshold: f64,
     /// Runner temperature above which backfires become possible [K].
@@ -724,6 +765,7 @@ impl SynthConfig {
             // something every engine is born with.
             turbo: None,
             roots: None,
+            centrifugal: None,
             // A cut charge on the shipped V8 carries 24-36 mg of fuel to the
             // exhaust, so 12 mg puts a real spark cut at 2-3x the threshold —
             // enough to crackle hard, while a partial misfire stays below it.
@@ -1948,6 +1990,65 @@ impl RootsVoice {
     }
 }
 
+/// Scaling that normalises [`CentrifugalVoice`] to roughly unity RMS at reference speed.
+const CENTRIFUGAL_UNITY_RMS: f32 = 1.380;
+
+/// Centrifugal supercharger voice.
+///
+/// An impeller driven from the crankshaft through a high-ratio internal step-up
+/// gear transmission and belt. The whistle tracks impeller shaft order, but is
+/// belt-locked to the crank with zero spool lag.
+#[derive(Debug, Clone)]
+struct CentrifugalVoice {
+    phase: f32,
+    gain: Smoothed,
+    tone_hz: Smoothed,
+    sample_rate: f32,
+}
+
+impl CentrifugalVoice {
+    fn new(sample_rate: f32) -> Self {
+        Self {
+            phase: 0.0,
+            gain: Smoothed::new(0.0, sample_rate, 0.020),
+            tone_hz: Smoothed::new(0.0, sample_rate, 0.015),
+            sample_rate,
+        }
+    }
+
+    fn tune(&mut self, voicing: &CentrifugalVoicing, rpm: f32, throttle: f32) {
+        let crank_hz = (rpm / 60.0).max(0.0);
+        let tone = crank_hz * voicing.crank_order() as f32;
+        // Keep second harmonic below Nyquist.
+        self.tone_hz.set_target(tone.min(0.22 * self.sample_rate));
+
+        let load = (rpm / voicing.reference_rpm as f32).clamp(0.0, 1.5);
+        // Centrifugal boost scales with impeller speed squared, amplified on throttle.
+        let throttle_factor = 0.35 + 0.65 * throttle.clamp(0.0, 1.0);
+        self.gain.set_target(load * load * throttle_factor);
+    }
+
+    #[inline(always)]
+    fn process(&mut self) -> f32 {
+        let gain = self.gain.next_value();
+        let tone_hz = self.tone_hz.next_value();
+
+        self.phase += tone_hz / self.sample_rate;
+        if self.phase >= 1.0 {
+            self.phase -= self.phase.floor();
+        }
+        let w = TAU * self.phase;
+        let whistle = w.sin() + 0.22 * (2.0 * w).sin() + 0.05 * (0.5 * w).sin();
+        whistle * gain * CENTRIFUGAL_UNITY_RMS
+    }
+
+    fn reset(&mut self) {
+        self.phase = 0.0;
+        self.gain.snap(0.0);
+        self.tone_hz.snap(0.0);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Backfire
 // ---------------------------------------------------------------------------
@@ -2208,6 +2309,7 @@ pub struct EngineSynth {
     prev_cylinder_intake_flow: Vec<f32>,
     turbo: TurboVoice,
     roots: RootsVoice,
+    centrifugal: CentrifugalVoice,
     backfire: BackfireVoice,
     mechanical: MechanicalVoice,
     knock: KnockVoice,
@@ -2410,6 +2512,7 @@ impl EngineSynth {
             prev_cylinder_intake_flow: vec![0.0; n_cyl],
             turbo: TurboVoice::new(fs),
             roots: RootsVoice::new(fs),
+            centrifugal: CentrifugalVoice::new(fs),
             backfire: BackfireVoice::new(fs),
             mechanical: MechanicalVoice::from_spec(&config.mechanical, fs),
             knock: KnockVoice::new(fs),
@@ -2569,6 +2672,7 @@ impl EngineSynth {
         }
         self.turbo.reset();
         self.roots.reset();
+        self.centrifugal.reset();
         self.mechanical.reset();
         self.knock.reset();
         self.propagation.reset();
@@ -2701,6 +2805,10 @@ impl EngineSynth {
         }
         if let Some(voicing) = self.config.roots {
             self.roots
+                .tune(&voicing, self.snapshot.rpm, self.snapshot.throttle);
+        }
+        if let Some(voicing) = self.config.centrifugal {
+            self.centrifugal
                 .tune(&voicing, self.snapshot.rpm, self.snapshot.throttle);
         }
 
@@ -2956,6 +3064,10 @@ impl EngineSynth {
             Some(voicing) => self.roots.process() * voicing.level as f32,
             None => 0.0,
         };
+        let centrifugal = match self.config.centrifugal {
+            Some(voicing) => self.centrifugal.process() * voicing.level as f32,
+            None => 0.0,
+        };
         let intake_rad =
             self.intake_network.step(&self.intake_excitations) / REFERENCE_INTAKE_PRESSURE;
         // Combustion and the mechanical rig arrive at the block as one force,
@@ -2969,8 +3081,10 @@ impl EngineSynth {
         let drive = rise * self.combustion_scale
             + self.mechanical.process(&mut self.noise) * self.config.mechanical_level as f32
             + self.knock.process(&mut self.noise) * self.knock_scale;
-        let block_rad =
-            turbo + roots + self.structure.process(drive) * self.config.structure_level as f32;
+        let block_rad = turbo
+            + roots
+            + centrifugal
+            + self.structure.process(drive) * self.config.structure_level as f32;
         let intake_rad = intake_rad * self.config.intake_level as f32;
 
         let (left, right) = self
@@ -5221,5 +5335,44 @@ mod tests {
             sum += s.abs();
         }
         assert!(sum > 0.01, "roots voice produced silence");
+    }
+
+    #[test]
+    fn centrifugal_supercharger_whine_tracks_shaft_order_without_lag() {
+        let voicing = CentrifugalVoicing {
+            gear_ratio: 9.0,
+            order: 1.5,
+            reference_rpm: 6_000.0,
+            level: 0.04,
+        };
+        assert_eq!(voicing.crank_order(), 13.5);
+
+        let mut voice = CentrifugalVoice::new(FS);
+        voice.tune(&voicing, 3_000.0, 1.0);
+        let crank_hz_1 = 3_000.0 / 60.0;
+        let expected_hz_1 = crank_hz_1 * 13.5;
+        assert!(
+            (voice.tone_hz.target() - expected_hz_1).abs() < 1e-3,
+            "expected centrifugal tone target {expected_hz_1}, got {}",
+            voice.tone_hz.target()
+        );
+
+        // Immediate step in RPM: tone target updates instantaneously without spool lag
+        voice.tune(&voicing, 6_000.0, 1.0);
+        let crank_hz_2 = 6_000.0 / 60.0;
+        let expected_hz_2 = crank_hz_2 * 13.5;
+        assert!(
+            (voice.tone_hz.target() - expected_hz_2).abs() < 1e-3,
+            "expected centrifugal tone target {expected_hz_2}, got {}",
+            voice.tone_hz.target()
+        );
+
+        let mut sum = 0.0f32;
+        for _ in 0..1000 {
+            let s = voice.process();
+            assert!(s.is_finite());
+            sum += s.abs();
+        }
+        assert!(sum > 0.01, "centrifugal voice produced silence");
     }
 }
