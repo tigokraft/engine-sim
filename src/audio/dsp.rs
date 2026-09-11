@@ -279,6 +279,8 @@ pub struct EngineSnapshot {
     pub exhaust_manifold_pressure: f32,
     /// Whether the active exhaust cutout flap is open.
     pub exhaust_cutout: bool,
+    /// Whether anti-lag is active.
+    pub anti_lag: bool,
 }
 
 impl Default for EngineSnapshot {
@@ -312,6 +314,7 @@ impl Default for EngineSnapshot {
             intake_port_flow: [0.0; CYCLE_TABLE],
             exhaust_manifold_pressure: 101_325.0,
             exhaust_cutout: false,
+            anti_lag: false,
         }
     }
 }
@@ -3476,6 +3479,7 @@ mod tests {
             intake_port_flow,
             exhaust_manifold_pressure: TEST_MANIFOLD_PA,
             exhaust_cutout: false,
+            anti_lag: false,
         }
     }
 
@@ -4169,6 +4173,7 @@ mod tests {
             intake_port_flow: [f32::NAN; CYCLE_TABLE],
             exhaust_manifold_pressure: f32::NAN,
             exhaust_cutout: false,
+            anti_lag: false,
         });
         let out = render(&mut synth, 48_000);
         assert!(out.iter().all(|s| s.is_finite()), "NaN reached the device");

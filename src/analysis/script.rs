@@ -109,6 +109,7 @@ impl Segment {
                 throttle,
                 spark_cut: self.spark_cut,
                 exhaust_cutout: false,
+                anti_lag: false,
             },
         )
     }

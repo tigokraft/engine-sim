@@ -96,6 +96,8 @@ pub struct EngineControls {
     pub spark_cut: bool,
     /// Whether the active exhaust cutout flap is open.
     pub exhaust_cutout: bool,
+    /// Whether anti-lag is active.
+    pub anti_lag: bool,
 }
 
 impl Default for EngineControls {
@@ -105,6 +107,7 @@ impl Default for EngineControls {
             throttle: 0.0,
             spark_cut: false,
             exhaust_cutout: false,
+            anti_lag: false,
         }
     }
 }
@@ -116,6 +119,7 @@ impl EngineControls {
             throttle: 1.0,
             spark_cut: false,
             exhaust_cutout: false,
+            anti_lag: false,
         }
     }
 
@@ -125,12 +129,19 @@ impl EngineControls {
             throttle: throttle.clamp(0.0, 1.0),
             spark_cut: true,
             exhaust_cutout: false,
+            anti_lag: false,
         }
     }
 
     /// Sets whether the active exhaust cutout flap is open.
     pub fn with_exhaust_cutout(mut self, open: bool) -> Self {
         self.exhaust_cutout = open;
+        self
+    }
+
+    /// Sets whether anti-lag is active.
+    pub fn with_anti_lag(mut self, enabled: bool) -> Self {
+        self.anti_lag = enabled;
         self
     }
 }
@@ -187,7 +198,13 @@ impl TurboModel {
         let flow = (rpm / self.reference_engine_rpm.max(1.0)).clamp(0.0, 1.2);
         // A shut throttle still leaves the turbine turning on pumped air, which
         // is why a turbo does not stop dead the instant a driver lifts.
-        let energy = 0.12 + 0.88 * controls.throttle.clamp(0.0, 1.0);
+        // Anti-lag fires late into the exhaust header with fuel on overrun,
+        // maintaining high turbine enthalpy and keeping the shaft spooled.
+        let energy = if controls.anti_lag && controls.throttle < 0.25 && rpm >= 2_000.0 {
+            0.85
+        } else {
+            0.12 + 0.88 * controls.throttle.clamp(0.0, 1.0)
+        };
         let demand = self.max_shaft_rpm * flow.powf(0.85) * energy;
 
         let tau = if demand > self.shaft_rpm {
@@ -647,8 +664,20 @@ impl SnapshotSource {
             let unburnt_charge = block.model.trapped_fuel_mass(at_evo.mass, 0.0);
             (unburnt_charge / total as f64) * dead_plug_count as f64
         };
-        let unburnt_fuel_mass =
-            block.model.trapped_fuel_mass(at_evo.mass, burned_at_evo) + tip_in + dead_plug_fuel;
+        let anti_lag_active = (controls.anti_lag
+            || block.ecu.is_anti_lag_active(controls.throttle, rpm))
+            && controls.throttle < 0.20
+            && rpm >= 2_000.0;
+        let anti_lag_fuel = if anti_lag_active { 25.0e-6 } else { 0.0 };
+        let unburnt_fuel_mass = block.model.trapped_fuel_mass(at_evo.mass, burned_at_evo)
+            + tip_in
+            + dead_plug_fuel
+            + anti_lag_fuel;
+        let manifold_temperature = if anti_lag_active {
+            manifold_temperature.max(1_050.0)
+        } else {
+            manifold_temperature
+        };
 
         let (gamma, gas_constant) = block
             .exhaust_banks
@@ -740,6 +769,7 @@ impl SnapshotSource {
             intake_port_flow,
             exhaust_manifold_pressure: manifold_pressure as f32,
             exhaust_cutout: controls.exhaust_cutout,
+            anti_lag: anti_lag_active,
         }
         .sanitized()
     }
@@ -1366,6 +1396,7 @@ mod tests {
                 throttle: t,
                 spark_cut: false,
                 exhaust_cutout: false,
+                anti_lag: false,
             };
             block.update(dt, rpm);
             synth.set_snapshot(&source.sample(&block, rpm, dt, controls));
@@ -1381,5 +1412,70 @@ mod tests {
         assert!(peak > 1e-3, "a revving V8 produced no sound");
         assert!(peak <= 1.0, "output clipped: {peak}");
         assert!(energy > 0.0);
+    }
+
+    #[test]
+    fn anti_lag_maintains_turbo_shaft_speed_and_fuels_exhaust_on_lift() {
+        let mut turbo_standard = TurboModel::default();
+        let mut turbo_als = TurboModel::default();
+
+        let dt = 1.0 / 60.0;
+        let rpm = 5_000.0;
+
+        // 1. Spool both turbos up under wide-open throttle
+        let wot = EngineControls::wide_open();
+        for _ in 0..120 {
+            turbo_standard.update(dt, rpm, &wot);
+            turbo_als.update(dt, rpm, &wot);
+        }
+        let speed_spooled = turbo_standard.shaft_rpm;
+        assert!(speed_spooled > 100_000.0);
+
+        // 2. Driver lifts off the throttle (throttle = 0.0) at 5,000 RPM
+        let lift_normal = EngineControls::default();
+        let lift_als = EngineControls::default().with_anti_lag(true);
+
+        // After 1 second off-throttle:
+        for _ in 0..60 {
+            turbo_standard.update(dt, rpm, &lift_normal);
+            turbo_als.update(dt, rpm, &lift_als);
+        }
+
+        // Without ALS, the turbo spools down rapidly
+        // With ALS, turbine demand stays high, keeping shaft speed elevated
+        assert!(
+            turbo_standard.shaft_rpm < 50_000.0,
+            "standard turbo must spool down on lift: got {}",
+            turbo_standard.shaft_rpm
+        );
+        assert!(
+            turbo_als.shaft_rpm > 100_000.0,
+            "ALS turbo must maintain high shaft speed on lift: got {}",
+            turbo_als.shaft_rpm
+        );
+        assert!(
+            turbo_als.shaft_rpm > 2.0 * turbo_standard.shaft_rpm,
+            "ALS shaft speed must be much higher than unassisted lift: als={} vs standard={}",
+            turbo_als.shaft_rpm,
+            turbo_standard.shaft_rpm
+        );
+
+        // 3. Verify SnapshotSource delivers unburnt fuel mass above backfire threshold when ALS is active
+        let block = primed(5_000.0);
+        let mut source = SnapshotSource::new(&block);
+        let snapshot_normal = source.sample(&block, rpm, dt, lift_normal);
+        let snapshot_als = source.sample(&block, rpm, dt, lift_als);
+
+        assert!(
+            snapshot_als.unburnt_fuel_mass as f64 > 12.0e-6,
+            "ALS must supply unburnt fuel mass above backfire threshold: got {}",
+            snapshot_als.unburnt_fuel_mass
+        );
+        assert!(
+            snapshot_als.unburnt_fuel_mass > snapshot_normal.unburnt_fuel_mass,
+            "ALS must deliver more exhaust fuel than standard lift: als={} vs normal={}",
+            snapshot_als.unburnt_fuel_mass,
+            snapshot_normal.unburnt_fuel_mass
+        );
     }
 }

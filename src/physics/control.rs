@@ -137,6 +137,16 @@ pub struct EngineControlUnit {
     /// Previous throttle position for derivative calculation [-].
     pub prev_throttle: f64,
 
+    // --- Anti-lag calibration ---
+    /// Whether anti-lag is enabled on lift/overrun.
+    pub anti_lag: bool,
+    /// Minimum engine speed to engage anti-lag [rev/min].
+    pub anti_lag_rpm_threshold: f64,
+    /// Spark retard angle past TDC applied during anti-lag [deg].
+    pub anti_lag_retard: f64,
+    /// Target air-fuel ratio during anti-lag overrun fuelling.
+    pub anti_lag_afr: f64,
+
     // --- Ignition calibration ---
     /// Nominal base spark advance [deg BTDC].
     pub base_spark_advance: f64,
@@ -216,6 +226,11 @@ impl EngineControlUnit {
             accel_enrichment: 0.0,
             prev_throttle: 0.0,
 
+            anti_lag: false,
+            anti_lag_rpm_threshold: 2_200.0,
+            anti_lag_retard: 30.0,
+            anti_lag_afr: 12.0,
+
             base_spark_advance: 25.0,
             idle_advance: 12.0,
             max_advance: 36.0,
@@ -237,6 +252,19 @@ impl EngineControlUnit {
 
             cylinder_health: [CylinderHealth::healthy(); MAX_CYLINDERS],
         }
+    }
+
+    /// Builder enabling or disabling anti-lag system.
+    pub fn with_anti_lag(mut self, enabled: bool) -> Self {
+        self.anti_lag = enabled;
+        self
+    }
+
+    /// Returns whether anti-lag is currently engaging (enabled, throttle closed, rpm above threshold).
+    pub fn is_anti_lag_active(&self, throttle: f64, rpm: f64) -> bool {
+        self.anti_lag
+            && throttle <= self.dfco_throttle_threshold
+            && rpm >= self.anti_lag_rpm_threshold
     }
 
     /// Returns the operational health of cylinder `i`.
@@ -331,7 +359,7 @@ impl EngineControlUnit {
     /// or when throttle is reapplied, fuel is restored. Throttle reapplication triggers
     /// a tip-in unburnt fuel spike into the exhaust.
     pub fn update_dfco(&mut self, throttle: f64, rpm: f64) -> bool {
-        if !self.dfco_enabled {
+        if !self.dfco_enabled || self.is_anti_lag_active(throttle, rpm) {
             self.dfco_active = false;
             self.dfco_tip_in = false;
             return false;
@@ -362,6 +390,16 @@ impl EngineControlUnit {
     /// piston speeds. Light load adds vacuum advance for efficiency, while heavy load
     /// (high cylinder pressure/temperature) retards timing to protect against detonation.
     pub fn schedule_spark_advance(&self, load: f64, rpm: f64) -> f64 {
+        self.schedule_spark_advance_with_throttle(load, rpm, self.prev_throttle)
+    }
+
+    /// Evaluates net spark advance [deg BTDC] against load, speed and throttle,
+    /// deeply retarding past TDC when anti-lag is active.
+    pub fn schedule_spark_advance_with_throttle(&self, load: f64, rpm: f64, throttle: f64) -> f64 {
+        if self.is_anti_lag_active(throttle, rpm) {
+            return -self.anti_lag_retard;
+        }
+
         let rpm_frac = ((rpm - 800.0) / 5_200.0).clamp(0.0, 1.0);
         let speed_advance =
             self.idle_advance + rpm_frac * (self.base_spark_advance - self.idle_advance);
@@ -380,7 +418,12 @@ impl EngineControlUnit {
 
     /// Evaluates Wiebe spark angle [rad, cycle coords] from load and speed.
     pub fn spark_angle(&self, load: f64, rpm: f64) -> f64 {
-        let advance = self.schedule_spark_advance(load, rpm);
+        self.spark_angle_with_throttle(load, rpm, self.prev_throttle)
+    }
+
+    /// Evaluates Wiebe spark angle [rad, cycle coords] from load, speed, and throttle.
+    pub fn spark_angle_with_throttle(&self, load: f64, rpm: f64, throttle: f64) -> f64 {
+        let advance = self.schedule_spark_advance_with_throttle(load, rpm, throttle);
         wrap_cycle(deg(360.0 - advance))
     }
 
@@ -420,6 +463,11 @@ impl EngineControlUnit {
 
     /// Base steady-state target AFR against load, speed and throttle.
     pub fn target_afr(&self, load: f64, rpm: f64, throttle: f64) -> f64 {
+        // Anti-lag overrun fuelling: rich mixture into the exhaust manifold
+        if self.is_anti_lag_active(throttle, rpm) {
+            return self.anti_lag_afr;
+        }
+
         // High load or wide throttle: WOT enrichment for peak power and charge cooling
         if throttle >= 0.70 || load >= 0.85 {
             let t_blend = ((throttle - 0.70) / 0.25).clamp(0.0, 1.0);
@@ -617,6 +665,7 @@ mod tests {
                 throttle: 0.5,
                 spark_cut: false,
                 exhaust_cutout: false,
+                anti_lag: false,
             },
         );
         assert!(
@@ -832,5 +881,53 @@ mod tests {
 
         ecu.set_cylinder_health(3, CylinderHealth::healthy());
         assert_eq!(ecu.cylinder_combustion_factor(3), 1.0);
+    }
+
+    #[test]
+    fn anti_lag_retards_spark_past_tdc_and_delivers_exhaust_fuelling_on_lift() {
+        let mut ecu = EngineControlUnit::new(7_000.0).with_anti_lag(true);
+        let rpm = 4_500.0;
+        let lift_throttle = 0.0;
+
+        // 1. Anti-lag must engage on throttle lift above threshold RPM
+        assert!(
+            ecu.is_anti_lag_active(lift_throttle, rpm),
+            "anti-lag must be active on lift above threshold rpm"
+        );
+
+        // 2. DFCO must be inhibited so fuel is not cut
+        assert!(
+            !ecu.update_dfco(lift_throttle, rpm),
+            "DFCO must be inhibited when anti-lag is active"
+        );
+
+        // 3. Exhaust fuelling must deliver rich AFR
+        let afr = ecu.target_afr(0.2, rpm, lift_throttle);
+        assert_eq!(
+            afr, ecu.anti_lag_afr,
+            "anti-lag must command rich exhaust fuelling: got {afr}"
+        );
+
+        // 4. Spark timing must retard past TDC (negative BTDC advance, angle > 360 deg)
+        let advance = ecu.schedule_spark_advance_with_throttle(0.2, rpm, lift_throttle);
+        assert!(
+            advance < 0.0,
+            "advance must be negative (retarded past TDC): got {advance} deg"
+        );
+        let spark_rad = ecu.spark_angle_with_throttle(0.2, rpm, lift_throttle);
+        let spark_deg = spark_rad.to_degrees();
+        assert!(
+            spark_deg > 360.0 && spark_deg < 420.0,
+            "spark angle must be past TDC (360 deg) into expansion: got {spark_deg} deg"
+        );
+
+        // 5. On throttle reapplication, anti-lag disengages and timing advances normally
+        let wot_throttle = 1.0;
+        assert!(!ecu.is_anti_lag_active(wot_throttle, rpm));
+        let wot_adv = ecu.schedule_spark_advance_with_throttle(0.9, rpm, wot_throttle);
+        assert!(
+            wot_adv > 10.0,
+            "WOT advance must be positive: got {wot_adv} deg"
+        );
     }
 }

@@ -1327,7 +1327,7 @@ impl EngineBlock {
         let limiter = self.ecu.evaluate_limiter(rpm);
         let dfco = self.ecu.update_dfco(self.throttle, rpm);
         self.model.fuel_cut = dfco || limiter == LimiterCut::Fuel;
-        self.model.wiebe.spark_angle = self.ecu.spark_angle(load, rpm);
+        self.model.wiebe.spark_angle = self.ecu.spark_angle_with_throttle(load, rpm, self.throttle);
         self.model.wiebe.duration = self.ecu.wiebe_duration(afr);
         for bank in &mut self.exhaust_banks {
             bank.plenum.gamma = self.model.gas.gamma_burned;
