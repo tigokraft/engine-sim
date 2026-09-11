@@ -16,6 +16,7 @@
 //!   a fouled plug or dead injector to produce a realistic hole in the firing
 //!   pattern.
 
+use crate::physics::cylinder::{deg, wrap_cycle};
 use crate::physics::thermodynamics::STOICH_AFR;
 
 /// Maximum number of cylinders supported by the control unit.
@@ -267,6 +268,34 @@ impl EngineControlUnit {
         self.dfco_active
     }
 
+    /// Evaluates net spark advance [deg BTDC] against load and speed, including knock retard.
+    ///
+    /// Advance increases with engine speed to allow time for flame propagation at higher
+    /// piston speeds. Light load adds vacuum advance for efficiency, while heavy load
+    /// (high cylinder pressure/temperature) retards timing to protect against detonation.
+    pub fn schedule_spark_advance(&self, load: f64, rpm: f64) -> f64 {
+        let rpm_frac = ((rpm - 800.0) / 5_200.0).clamp(0.0, 1.0);
+        let speed_advance =
+            self.idle_advance + rpm_frac * (self.base_spark_advance - self.idle_advance);
+
+        let load_offset = if load < 0.5 {
+            (0.5 - load) / 0.5 * 6.0
+        } else if load > 0.7 {
+            -((load - 0.7) / 0.3).min(1.0) * self.wot_retard
+        } else {
+            0.0
+        };
+
+        let total = speed_advance + load_offset - self.knock_retard;
+        total.clamp(0.0, self.max_advance)
+    }
+
+    /// Evaluates Wiebe spark angle [rad, cycle coords] from load and speed.
+    pub fn spark_angle(&self, load: f64, rpm: f64) -> f64 {
+        let advance = self.schedule_spark_advance(load, rpm);
+        wrap_cycle(deg(360.0 - advance))
+    }
+
     /// Evaluates target AFR from load and speed, applying WOT enrichment,
     /// lean cruise, and transient acceleration enrichment.
     pub fn schedule_afr(&mut self, load: f64, rpm: f64, throttle: f64, dt: f64) -> f64 {
@@ -505,6 +534,40 @@ mod tests {
         assert!(
             tip_in_snap.spark_cut,
             "tip-in must carry spark_cut flag to trigger backfire voice"
+        );
+    }
+
+    #[test]
+    fn spark_advances_with_rpm_and_retards_with_load() {
+        let ecu = EngineControlUnit::default();
+
+        // Idle advance
+        let idle_adv = ecu.schedule_spark_advance(0.2, 800.0);
+        assert!(
+            (12.0..=18.0).contains(&idle_adv),
+            "idle advance should be modest: {idle_adv}"
+        );
+
+        // High RPM advance at light cruise load
+        let cruise_adv = ecu.schedule_spark_advance(0.3, 4_500.0);
+        assert!(
+            cruise_adv > idle_adv + 5.0,
+            "speed must advance timing: cruise={cruise_adv} vs idle={idle_adv}"
+        );
+
+        // Heavy load (WOT) at same high speed: retarded relative to cruise
+        let wot_adv = ecu.schedule_spark_advance(1.0, 4_500.0);
+        assert!(
+            wot_adv < cruise_adv - 4.0,
+            "WOT load must retard spark relative to cruise: wot={wot_adv} vs cruise={cruise_adv}"
+        );
+
+        // Spark angle in Wiebe cycle coordinates: 20 deg BTDC corresponds to 340 deg
+        let spark_rad = ecu.spark_angle(0.6, 3_000.0);
+        let spark_deg = spark_rad * 180.0 / std::f64::consts::PI;
+        assert!(
+            spark_deg > 320.0 && spark_deg < 355.0,
+            "Wiebe spark angle must fall in compression BTDC range: {spark_deg} deg"
         );
     }
 }

@@ -1303,6 +1303,7 @@ impl EngineBlock {
         self.model.gas = GasProperties::for_afr(afr);
         let dfco = self.ecu.update_dfco(self.throttle, rpm);
         self.model.fuel_cut = dfco;
+        self.model.wiebe.spark_angle = self.ecu.spark_angle(load, rpm);
         let ports = self.port_conditions();
 
         // Destructured so the observer can borrow the ring while the solver
