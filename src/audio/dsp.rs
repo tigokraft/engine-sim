@@ -86,6 +86,8 @@ use crate::audio::filters::{
 use crate::audio::waveguide::ExhaustNetwork;
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
 
+pub use crate::physics::engine_block::CYCLE_TABLE;
+
 /// Samples between control-rate updates.
 ///
 /// 32 samples is 0.67 ms at 48 kHz — far below the ~10 ms it takes a listener to
@@ -198,6 +200,35 @@ pub struct EngineSnapshot {
     pub indicated_torque: f32,
     /// Rotating assembly inertia [kg m^2].
     pub inertia: f32,
+    /// Master-cylinder pressure over the cycle, from exhaust valve opening [Pa].
+    ///
+    /// The solver's own curve, downsampled from the 720-cell phase ring by
+    /// [`crate::physics::engine_block::PhaseRing::downsample_from`]. Point `k`
+    /// is the mean over `[k, k+1) / CYCLE_TABLE` of the cycle and stands at the
+    /// centre of that span, so a player reads it at `phase * CYCLE_TABLE - 0.5`.
+    ///
+    /// Cut at EVO because that is the event the audio thread schedules against:
+    /// index zero is the instant a cylinder's exhaust valve opens, whichever
+    /// cylinder it is and wherever its firing offset puts it.
+    pub cylinder_pressure: [f32; CYCLE_TABLE],
+    /// Mass flow leaving the cylinder through the exhaust port [kg/s].
+    ///
+    /// Positive *out* — the direction the pipe sees — and clamped there, so
+    /// reverse flow during overlap reads as a shut port rather than as a
+    /// negative excitation. Same phase convention as [`Self::cylinder_pressure`].
+    pub exhaust_port_flow: [f32; CYCLE_TABLE],
+    /// Mass flow entering the cylinder through the intake port [kg/s].
+    ///
+    /// Positive *in*, which is the direction that empties the runner and makes
+    /// induction noise. Same phase convention as [`Self::cylinder_pressure`].
+    pub intake_port_flow: [f32; CYCLE_TABLE],
+    /// Mean exhaust manifold pressure across the banks [Pa].
+    ///
+    /// What [`Self::cylinder_pressure`] is measured against: the pipe is driven
+    /// by the cylinder's excess over the gas already in it, and an absolute
+    /// trace on its own would present the manifold's own standing pressure as a
+    /// permanent offset for the delay lines to integrate.
+    pub exhaust_manifold_pressure: f32,
 }
 
 impl Default for EngineSnapshot {
@@ -222,6 +253,10 @@ impl Default for EngineSnapshot {
             peak_cylinder_pressure: 0.0,
             indicated_torque: 0.0,
             inertia: 0.25,
+            cylinder_pressure: [0.0; CYCLE_TABLE],
+            exhaust_port_flow: [0.0; CYCLE_TABLE],
+            intake_port_flow: [0.0; CYCLE_TABLE],
+            exhaust_manifold_pressure: 101_325.0,
         }
     }
 }
@@ -265,6 +300,23 @@ impl EngineSnapshot {
         guard!(peak_cylinder_pressure, 0.0, 50.0e6);
         guard!(indicated_torque, -500.0, 50_000.0);
         guard!(inertia, 0.010, 100.0);
+        guard!(exhaust_manifold_pressure, 1_000.0, 2.0e6);
+        for p in self.cylinder_pressure.iter_mut() {
+            if !p.is_finite() {
+                *p = 0.0;
+            }
+            *p = p.clamp(0.0, 50.0e6);
+        }
+        for f in self
+            .exhaust_port_flow
+            .iter_mut()
+            .chain(self.intake_port_flow.iter_mut())
+        {
+            if !f.is_finite() {
+                *f = 0.0;
+            }
+            *f = f.clamp(0.0, 50.0);
+        }
         self
     }
 }
@@ -2413,7 +2465,46 @@ mod tests {
 
     const FS: f32 = 48_000.0;
 
+    /// Exhaust manifold pressure the synthetic cycles below sit on top of [Pa].
+    const TEST_MANIFOLD_PA: f32 = 1.2e5;
+
+    /// A cycle in the shape the solver produces, for tests that are not about
+    /// the solver.
+    ///
+    /// Cut at EVO like the real thing: blowdown from `peak` decaying towards the
+    /// manifold, the exhaust valve open for `exhaust_duration` of the cycle with
+    /// a raised-cosine flow under it, induction on the following stroke, and the
+    /// combustion pressure rise just before the cycle comes back round to EVO.
+    fn synthetic_cycle(
+        peak: f32,
+        exhaust_duration: f32,
+    ) -> ([f32; CYCLE_TABLE], [f32; CYCLE_TABLE], [f32; CYCLE_TABLE]) {
+        let mut pressure = [TEST_MANIFOLD_PA; CYCLE_TABLE];
+        let mut exhaust = [0.0f32; CYCLE_TABLE];
+        let mut intake = [0.0f32; CYCLE_TABLE];
+        // IVO 200 degrees after EVO, IVC 440 after, on the default cam.
+        let (ivo, ivc) = (200.0 / 720.0, 440.0 / 720.0);
+        for k in 0..CYCLE_TABLE {
+            let phi = (k as f32 + 0.5) / CYCLE_TABLE as f32;
+            if phi < exhaust_duration {
+                let u = phi / exhaust_duration;
+                pressure[k] = TEST_MANIFOLD_PA + peak * (-phi / 0.04).exp();
+                exhaust[k] = 0.5 * (1.0 - (TAU * u).cos());
+            } else if phi < ivc {
+                let u = ((phi - ivo) / (ivc - ivo)).clamp(0.0, 1.0);
+                intake[k] = 0.05 * 0.5 * (1.0 - (TAU * u).cos());
+            } else {
+                // Compression and burn, peaking a little before the valve opens.
+                let u = (phi - ivc) / (1.0 - ivc);
+                pressure[k] = TEST_MANIFOLD_PA + 15.0 * peak * u.powi(6);
+            }
+        }
+        (pressure, exhaust, intake)
+    }
+
     fn loaded_snapshot() -> EngineSnapshot {
+        let (cylinder_pressure, exhaust_port_flow, intake_port_flow) =
+            synthetic_cycle(4.0e5, 240.0 / 720.0);
         EngineSnapshot {
             rpm: 3_000.0,
             blowdown_delta: [4.0e5; MAX_CYLINDERS],
@@ -2433,6 +2524,10 @@ mod tests {
             peak_cylinder_pressure: 60.0e5,
             indicated_torque: 250.0,
             inertia: 0.25,
+            cylinder_pressure,
+            exhaust_port_flow,
+            intake_port_flow,
+            exhaust_manifold_pressure: TEST_MANIFOLD_PA,
         }
     }
 
@@ -2645,6 +2740,24 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_stays_copy_and_free_of_indirection() {
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<EngineSnapshot>();
+
+        // The tables are what make this worth asserting. A `Vec` would be one
+        // word here and a heap allocation everywhere else, and its `Drop` would
+        // run inside the audio callback — which is the one thing the callback is
+        // not allowed to do.
+        assert!(!std::mem::needs_drop::<EngineSnapshot>());
+
+        // Three cycle tables, the per-cylinder blowdown array, sixteen scalars
+        // and one padded bool. Every byte accounted for is a byte that is not a
+        // pointer.
+        let expected = 3 * CYCLE_TABLE * 4 + MAX_CYLINDERS * 4 + 16 * 4 + 4;
+        assert_eq!(std::mem::size_of::<EngineSnapshot>(), expected);
+    }
+
+    #[test]
     fn nan_snapshot_cannot_reach_the_output() {
         let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
         synth.set_snapshot(&EngineSnapshot {
@@ -2665,6 +2778,10 @@ mod tests {
             peak_cylinder_pressure: f32::NAN,
             indicated_torque: f32::NAN,
             inertia: f32::NAN,
+            cylinder_pressure: [f32::NAN; CYCLE_TABLE],
+            exhaust_port_flow: [f32::NEG_INFINITY; CYCLE_TABLE],
+            intake_port_flow: [f32::NAN; CYCLE_TABLE],
+            exhaust_manifold_pressure: f32::NAN,
         });
         let out = render(&mut synth, 48_000);
         assert!(out.iter().all(|s| s.is_finite()), "NaN reached the device");

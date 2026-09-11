@@ -499,6 +499,23 @@ impl SnapshotSource {
             peak_pressure as f32
         };
 
+        // The cycle itself, downsampled off the phase ring and cut at EVO. This
+        // is what the audio thread plays back at crank rate instead of
+        // synthesising a pulse shape: the blowdown edge, the exhaust stroke and
+        // the induction gulp are the solver's own curves, so an engine with a
+        // different cam sounds different without a constant anywhere saying so.
+        let cylinder_pressure = block.ring.downsample_from(self.evo_angle, |s| s.pressure);
+        // The ring carries port flux positive *into* the cylinder. The exhaust
+        // side is flipped so that positive means "leaving through the port",
+        // which is what the runner sees, and clamped so that reverse flow during
+        // overlap reads as a shut port rather than as a negative excitation.
+        let exhaust_port_flow = block
+            .ring
+            .downsample_from(self.evo_angle, |s| (-s.exhaust_flow).max(0.0));
+        let intake_port_flow = block
+            .ring
+            .downsample_from(self.evo_angle, |s| s.intake_flow.max(0.0));
+
         let n_cylinders = block.firing.len().max(1) as f64;
         let cycle_work = block.ring.indicated_work(block.crankcase_pressure) * n_cylinders;
         let mean_indicated_torque = cycle_work / crate::physics::cylinder::CYCLE_ANGLE;
@@ -521,6 +538,10 @@ impl SnapshotSource {
             peak_cylinder_pressure,
             indicated_torque: mean_indicated_torque as f32,
             inertia: self.inertia as f32,
+            cylinder_pressure,
+            exhaust_port_flow,
+            intake_port_flow,
+            exhaust_manifold_pressure: manifold_pressure as f32,
         }
         .sanitized()
     }
@@ -690,28 +711,23 @@ mod tests {
         // was not worth modelling; a turbo louder than the engine sounds like a
         // kettle with a V8 somewhere behind it, which is what an un-normalised
         // voice and a level picked by eye produce.
+        // A real frame off a real block: the engine half of this comparison is
+        // driven by the solver's own cycle, so it has to come from one.
+        let block = primed(7_000.0);
+        let at_song = SnapshotSource::new(&block).sample(
+            &block,
+            7_000.0,
+            1.0 / 240.0,
+            EngineControls::wide_open(),
+        );
         for induction in every_turbo() {
             let shaft = induction.shaft().expect("turbocharged");
-            let mut snapshot = EngineSnapshot {
-                rpm: 7_000.0,
-                blowdown_delta: [5.0e5; MAX_CYLINDERS],
-                exhaust_temperature: 1_100.0,
-                exhaust_gamma: 1.33,
-                exhaust_gas_constant: 287.0,
-                intake_mass_flow: 0.40,
-                throttle: 1.0,
+            let snapshot = EngineSnapshot {
                 turbo_rpm: shaft.max_shaft_rpm as f32,
                 turbo_surge: 0.0,
-                unburnt_fuel_mass: 0.0,
-                friction_mep: 1.6e5,
-                spark_cut: false,
-                knock_intensity: 0.0,
-                bore: 0.084,
-                peak_cylinder_pressure: 80.0e5,
-                indicated_torque: 250.0,
-                inertia: 0.25,
-            };
-            snapshot = snapshot.sanitized();
+                ..at_song
+            }
+            .sanitized();
 
             let base = SynthConfig::uniform(48_000.0, 6, 1).with_induction(induction);
 
