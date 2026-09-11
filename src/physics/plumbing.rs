@@ -168,8 +168,24 @@ pub enum Silencer {
         length: f64,
         /// Core flow area [m^2].
         area: f64,
-        /// Viscothermal and fibrous acoustic attenuation per metre [dB/m].
-        loss_db_per_m: f64,
+        /// Radial depth of packing between the perforated core and the shell [m].
+        ///
+        /// What decides which half of the spectrum the silencer takes. Porous
+        /// packing does work against the gas only where the gas is moving, and
+        /// the particle velocity of a wave is greatest a quarter wavelength
+        /// from a rigid surface — the shell. So a layer of depth $t$ starts
+        /// absorbing near $c / 4t$ and is fully effective above it, which is
+        /// why a thin wrap kills only the hiss and a deep one reaches down into
+        /// the midrange.
+        packing_thickness: f64,
+        /// Absorption coefficient of the packing material, `0..=1` [-].
+        ///
+        /// A property of the wool, not of the silencer: how much of the energy
+        /// reaching it that the fibre bed takes rather than returns, near 0.8
+        /// for the mineral and glass wools these are packed with. The
+        /// decibels per metre follow from it and the core bore, by
+        /// [`sabine_attenuation_db_per_m`](crate::audio::waveguide::sabine_attenuation_db_per_m).
+        packing_absorption: f64,
     },
     /// Side-branch quarter-wave destructive interference stub (drone killer).
     QuarterWaveStub {
@@ -338,7 +354,8 @@ impl ExhaustSystem {
                 Silencer::Absorptive {
                     length,
                     area,
-                    loss_db_per_m: _,
+                    packing_thickness: _,
+                    packing_absorption: _,
                 } => {
                     return MufflerGeometry {
                         neck_area: *area,

@@ -547,10 +547,15 @@ pub struct SynthConfig {
     pub waveguide_damping: f64,
     /// Level of each layer in the final mix [-].
     ///
-    /// `backfire_level` is far above the others on purpose: a pop is an
-    /// unmetered charge lighting off in open pipe, and it is genuinely several
-    /// times the amplitude of an ordinary blowdown. The soft clipper is what
-    /// keeps that from tearing.
+    /// `backfire_level` is above the others on purpose: a pop is an unmetered
+    /// charge lighting off in open pipe, and it is genuinely larger than an
+    /// ordinary blowdown. It is not as far above them as it once was, because
+    /// a pop is broadband and the mouth radiates the top of that band far
+    /// better than it radiates a firing fundamental — see
+    /// [`radiation`](crate::audio::radiation). Against a tailpipe that tilts,
+    /// the old figure put every overrun through the clipper hard enough to
+    /// slew. Set where the whole catalogue renders clean with headroom to
+    /// spare.
     pub exhaust_level: f64,
     pub intake_level: f64,
     pub backfire_level: f64,
@@ -559,6 +564,19 @@ pub struct SynthConfig {
     /// Mechanical rig configuration: which impulsive sources exist, their orders and levels.
     pub mechanical: MechanicalSpec,
     /// Gain applied to the summed bus before the soft clipper [-].
+    ///
+    /// Lower than it was, because the bus it is scaling now has a far wider
+    /// dynamic range to carry. A tailpipe radiates the rate of change of what
+    /// reaches it, so an engine at its limiter is genuinely much louder than
+    /// the same engine idling — 13 dB apart on a four-cylinder, against barely
+    /// one when a flat lowpass stood in for the mouth. That spread is real and
+    /// it has to fit under full scale, so the idle it leaves is quiet on
+    /// purpose: the listener's volume control is the right place to answer
+    /// that, and a bus gain that lets the redline slew is not.
+    ///
+    /// Set by measurement, not by ear: the largest value at which every preset
+    /// in the catalogue renders every fixed profile clean — no clipping and no
+    /// slew — with headroom in hand.
     pub master_gain: f64,
 }
 
@@ -623,7 +641,7 @@ impl SynthConfig {
             waveguide_damping: 1.0,
             exhaust_level: 1.0,
             intake_level: 0.35,
-            backfire_level: 2.5,
+            backfire_level: 0.4,
             // Calibrated to sit about 8 dB under the exhaust at idle: audible
             // in the gaps between firings, which is its whole job, without
             // becoming the thing the engine sounds like. Level is measured
@@ -631,7 +649,7 @@ impl SynthConfig {
             // `intake_level` and [`TurboVoicing::level`].
             mechanical_level: 0.030,
             mechanical: MechanicalSpec::default(),
-            master_gain: 0.55,
+            master_gain: 0.20,
         }
     }
 

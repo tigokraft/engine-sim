@@ -22,7 +22,7 @@
 //! that never got out. Tilting the wrong way is the loudest single tell that a
 //! note was synthesised rather than recorded, and it costs one filter to fix.
 
-use crate::audio::filters::OnePole;
+use crate::audio::filters::{speed_of_sound, OnePole};
 
 /// End correction of a plain, unbaffled open pipe, as a multiple of the radius [-].
 ///
@@ -68,6 +68,50 @@ pub const REFERENCE_MOUTH_RADIUS: f32 = 0.030;
 /// Distance from the mouth the radiated level is expressed at [m].
 pub const REFERENCE_DISTANCE: f32 = 1.0;
 
+/// Frequency the radiated level is expressed at [Hz].
+///
+/// The geometric part of the gain is not the whole normalisation, because the
+/// transmission $(1 + R)$ is itself a function of frequency: it is unity above
+/// the corner and falls at 6 dB/octave below it. Quoting the reference case at
+/// the corner therefore quotes it an octave-count away from anywhere an engine
+/// puts its energy — a 60 mm tailpipe corners near 3 kHz, and a four-cylinder
+/// at idle fires at 28 Hz, seven octaves down and 42 dB into the tilt.
+///
+/// So the reference is taken at 100 Hz instead: the middle of the band an
+/// exhaust actually occupies, low enough to be a firing order on a real engine
+/// and high enough not to be a subsonic artefact. What it buys is that the
+/// numbers leaving this module mean the same thing they did before the tilt
+/// existed — a reference blowdown through a reference tailpipe still arrives
+/// at unity — so every level calibrated against the exhaust elsewhere in the
+/// synth still holds. Without it the whole exhaust path sits some 30 dB below
+/// everything that does not pass through a mouth, and the note disappears
+/// under the mechanical floor.
+pub const REFERENCE_RADIATED_HZ: f32 = 100.0;
+
+/// Gas the reference radiated level is quoted in: ratio of specific heats [-],
+/// specific gas constant [J/(kg K)] and temperature [K].
+///
+/// Warm exhaust rather than ambient air, because the corner the reference is
+/// measured against moves with the speed of sound and the reference ought to
+/// describe a running engine. These fix the normalisation as a constant; they
+/// do not constrain what any actual mouth is tuned to.
+pub const REFERENCE_EXHAUST_GAS: (f32, f32, f32) = (1.33, 287.0, 900.0);
+
+/// Transmitted fraction the reference mouth passes at [`REFERENCE_RADIATED_HZ`] [-].
+///
+/// $(1 + R)$ for the reference mouth in reference gas, which is what
+/// [`radiation_gain`] divides out so the reference case comes to unity.
+#[inline]
+pub fn reference_transmission() -> f32 {
+    let (gamma, gas_constant, temperature) = REFERENCE_EXHAUST_GAS;
+    let corner = corner_hz(
+        REFERENCE_MOUTH_RADIUS,
+        speed_of_sound(gamma, gas_constant, temperature),
+    );
+    let x = REFERENCE_RADIATED_HZ / corner;
+    x / (1.0 + x * x).sqrt()
+}
+
 /// Acoustic end correction $\delta$ of an open pipe [m].
 ///
 /// Add it to the physical length before the transit delay is computed: a pipe
@@ -112,9 +156,18 @@ pub fn corner_hz(radius: f32, speed_of_sound: f32) -> f32 {
 /// radius the corner frequency brought along. Quoted against
 /// [`REFERENCE_MOUTH_RADIUS`] at [`REFERENCE_DISTANCE`], for the reason given
 /// there.
+///
+/// The geometry is only half of the normalisation. The transmission this gain
+/// multiplies is itself frequency-dependent, so the reference is closed out at
+/// [`REFERENCE_RADIATED_HZ`] as well — see there for why the corner is the
+/// wrong place to quote it — by dividing through
+/// [`reference_transmission`]. A reference blowdown through a reference
+/// tailpipe then radiates at unity, which is what the rest of the synth is
+/// levelled against.
 #[inline]
 pub fn radiation_gain(radius: f32, distance: f32) -> f32 {
     (radius.max(0.0) / distance.max(1e-3)) * (REFERENCE_DISTANCE / REFERENCE_MOUTH_RADIUS)
+        / reference_transmission()
 }
 
 // ---------------------------------------------------------------------------

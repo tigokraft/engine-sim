@@ -828,6 +828,64 @@ impl TaperedCollector {
     }
 }
 
+/// Phase speed inside acoustic packing, as a fraction of the free-gas value [-].
+///
+/// A wave in a fibre bed does not travel at $c$. It threads a tortuous path
+/// through the fibres and the bed's own compliance adds to the gas's, and both
+/// slow it down; for the mineral and glass wools used in silencers the phase
+/// speed comes out around half of free-field. It matters here because it is
+/// what sets the depth a given wavelength needs — packing that would be a
+/// quarter wave deep at 4 kHz in open gas is a quarter wave deep at 2 kHz once
+/// the wave is inside it, so the absorber reaches an octave further down than
+/// its dry dimensions suggest.
+pub const PACKING_SOUND_SPEED_RATIO: f32 = 0.5;
+
+/// Attenuation of a lined duct, from Sabine's empirical formula [dB/m]:
+///
+/// ```text
+/// alpha_dB = 1.05 (P / A) a_bar^1.4
+/// ```
+///
+/// `P / A` is the lined perimeter over the open flow area — for a circular
+/// core of radius $a$ that is $2 / a$, so a narrow core is silenced far harder
+/// than a wide one of the same packing, because every part of the gas is
+/// closer to something absorbing. `a_bar` is the absorption coefficient of the
+/// packing itself, near 0.8 for the mineral and glass wools used in silencers.
+///
+/// This is where the decibels come from, rather than from a number somebody
+/// liked: a 64 mm core in good packing works out near 48 dB/m, so a 0.6 m body
+/// is worth some 29 dB across the band it covers — which is what a real
+/// straight-through absorptive muffler measures, and an order of magnitude
+/// more than a figure picked to sound about right.
+#[inline]
+pub fn sabine_attenuation_db_per_m(core_radius: f64, packing_absorption: f64) -> f64 {
+    let perimeter_over_area = 2.0 / core_radius.max(1e-4);
+    1.05 * perimeter_over_area * packing_absorption.clamp(0.0, 1.0).powf(1.4)
+}
+
+/// Frequency at which packing of depth `thickness` starts absorbing properly [Hz]:
+///
+/// ```text
+/// f_q = c_packing / (4 t)
+/// ```
+///
+/// Porous packing dissipates by dragging gas through fibres, so it can only
+/// work where the gas is moving. Against the rigid shell the particle velocity
+/// is zero, and it is greatest a quarter wavelength out from it — so a layer
+/// of depth $t$ is fully effective once $t$ reaches $\lambda / 4$, and below
+/// that its attenuation falls away as $f^2$ with the square of the velocity it
+/// has to work with.
+///
+/// This is the single number that decides which half of the spectrum a
+/// silencer takes, and it is why packing is the wrong tool for a drone: a
+/// 35 mm wrap in hot gas turns over around 2 kHz, so it takes the hiss and the
+/// rasp and leaves a 100 Hz boom completely untouched. Reaching that low
+/// wants a reactive element, not a thicker blanket.
+#[inline]
+pub fn packing_corner_hz(thickness: f64, speed_of_sound: f32) -> f32 {
+    PACKING_SOUND_SPEED_RATIO * speed_of_sound / (4.0 * thickness.max(1e-4) as f32)
+}
+
 // ---------------------------------------------------------------------------
 // Composed elements: Absorptive silencer
 // ---------------------------------------------------------------------------
@@ -837,20 +895,49 @@ impl TaperedCollector {
 /// The core is a duct like any other, so it is a [`WaveguidePipe`] with area
 /// steps at each end. What the packing adds is resistive attenuation, quoted by
 /// the geometry as a loss in decibels per metre. Over a body of length $L$ the
-/// surviving amplitude is
+/// amplitude surviving one pass, *once the packing is working*, is
 ///
 /// $$g = 10^{-\frac{\alpha_{dB} L}{20}}$$
 ///
 /// applied to each direction of travel, so a wave that goes in and comes back
 /// pays for the length twice — which is exactly why a packed silencer kills the
 /// returning reflection harder than it kills the through path.
+///
+/// # Why it is not one number
+///
+/// The packing does not take that much out at every frequency, and modelling
+/// it as a flat gain gets the whole point of the element backwards. Fibre
+/// absorbs by dragging gas through itself, so it works where the gas moves,
+/// and the gas barely moves within a quarter wavelength of the shell — see
+/// [`packing_corner_hz`]. Below that corner the attenuation falls away as
+/// $f^2$; above it the packing is as effective as it is ever going to be.
+///
+/// So the element is a shelf, not a scalar:
+///
+/// ```text
+/// H(s) = (1 + g s / w_q) / (1 + s / w_q)
+/// ```
+///
+/// unity at DC, `g` above the corner, with the $f^2$ approach to it that the
+/// velocity argument demands. A flat gain of `g` would take the same decibels
+/// off the firing fundamental as off the rasp, leaving the balance between them
+/// exactly where it found it — which is not what a muffler is for, and not what
+/// one sounds like.
 #[derive(Debug, Clone)]
 pub struct AbsorptiveSilencer {
     junction_in: ScatteringJunction,
     core: WaveguidePipe,
     junction_out: ScatteringJunction,
-    /// Amplitude surviving one pass through the packing [-].
+    /// Amplitude surviving one pass through the packing, above its corner [-].
     pass: f32,
+    /// Radial depth of packing around the core [m].
+    thickness: f64,
+    /// Corner of the absorption shelf as currently tuned [Hz].
+    corner_hz: f32,
+    /// Shelf state for each direction of travel through the body.
+    shelf_forward: OnePole,
+    shelf_backward: OnePole,
+    sample_rate: f32,
     scatter_buf_in: [f32; 2],
     scatter_buf_out: [f32; 2],
 }
@@ -860,12 +947,14 @@ impl AbsorptiveSilencer {
     /// - `pipe_area`: area of the ducts either side of the body [m^2].
     /// - `core_area`: flow area through the perforated core [m^2].
     /// - `length`: length of the packed body [m].
-    /// - `loss_db_per_m`: attenuation of the packing [dB/m].
+    /// - `packing_thickness`: radial depth of packing around the core [m].
+    /// - `loss_db_per_m`: attenuation of the packing above its corner [dB/m].
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         pipe_area: f64,
         core_area: f64,
         length: f64,
+        packing_thickness: f64,
         loss_db_per_m: f64,
         sample_rate: f32,
         gamma: f32,
@@ -877,25 +966,62 @@ impl AbsorptiveSilencer {
         let l = length.max(0.001);
         let core = WaveguidePipe::new(l, a2, sample_rate, gamma, gas_constant, temperature);
         let pass = 10f64.powf(-loss_db_per_m.max(0.0) * l / 20.0) as f32;
+        let corner_hz = packing_corner_hz(
+            packing_thickness,
+            speed_of_sound(gamma, gas_constant, temperature),
+        );
 
         Self {
             junction_in: ScatteringJunction::from_areas(&[a1, a2]),
             core,
             junction_out: ScatteringJunction::from_areas(&[a2, a1]),
             pass,
+            thickness: packing_thickness,
+            corner_hz,
+            shelf_forward: OnePole::new(sample_rate, corner_hz),
+            shelf_backward: OnePole::new(sample_rate, corner_hz),
+            sample_rate,
             scatter_buf_in: [0.0; 2],
             scatter_buf_out: [0.0; 2],
         }
     }
 
-    /// Amplitude surviving one pass through the packing [-].
+    /// Amplitude surviving one pass through the packing, above its corner [-].
     pub fn pass_gain(&self) -> f32 {
         self.pass
     }
 
-    /// Retunes propagation delay and acoustic admittance for current gas state.
+    /// Frequency above which the packing is fully effective [Hz].
+    pub fn corner_hz(&self) -> f32 {
+        self.corner_hz
+    }
+
+    /// Retunes propagation delay, admittance and the absorption corner for the
+    /// current gas state.
+    ///
+    /// The corner moves with the gas like every other acoustic length in the
+    /// model: hot packing is acoustically shallower than cold packing, so a
+    /// silencer absorbs a little less of the midrange as the system warms.
     pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
         self.core.tune(gamma, gas_constant, temperature);
+        self.corner_hz = packing_corner_hz(
+            self.thickness,
+            speed_of_sound(gamma, gas_constant, temperature),
+        );
+        self.shelf_forward
+            .set_cutoff(self.sample_rate, self.corner_hz);
+        self.shelf_backward
+            .set_cutoff(self.sample_rate, self.corner_hz);
+    }
+
+    /// Applies the packing's absorption shelf to one direction of travel.
+    ///
+    /// Unity at DC, [`pass_gain`](Self::pass_gain) above the corner: the
+    /// low-frequency part of the wave is handed back untouched and only what
+    /// the fibre can actually work on is taken out.
+    #[inline(always)]
+    fn absorb(pass: f32, shelf: &mut OnePole, x: f32) -> f32 {
+        pass * x + (1.0 - pass) * shelf.process(x)
     }
 
     /// Steps the silencer by one sample; see [`ExpansionChamber::step`] for the
@@ -903,8 +1029,8 @@ impl AbsorptiveSilencer {
     #[inline(always)]
     pub fn step(&mut self, p_in_plus: f32, p_out_minus: f32) -> (f32, f32) {
         let (p_core_0, p_core_1) = self.core.read_outputs();
-        let p_core_0 = p_core_0 * self.pass;
-        let p_core_1 = p_core_1 * self.pass;
+        let p_core_0 = Self::absorb(self.pass, &mut self.shelf_backward, p_core_0);
+        let p_core_1 = Self::absorb(self.pass, &mut self.shelf_forward, p_core_1);
 
         self.junction_in
             .scatter(&[p_in_plus, p_core_0], &mut self.scatter_buf_in);
@@ -924,6 +1050,8 @@ impl AbsorptiveSilencer {
     /// Clears internal state.
     pub fn reset(&mut self) {
         self.core.reset();
+        self.shelf_forward.reset();
+        self.shelf_backward.reset();
         self.scatter_buf_in = [0.0; 2];
         self.scatter_buf_out = [0.0; 2];
     }
@@ -1009,17 +1137,22 @@ impl SilencerElement {
             Silencer::Absorptive {
                 length,
                 area,
-                loss_db_per_m,
-            } => chain.push(Self::Absorptive(AbsorptiveSilencer::new(
-                pipe_area,
-                *area,
-                *length,
-                *loss_db_per_m,
-                sample_rate,
-                gamma,
-                gas_constant,
-                temperature,
-            ))),
+                packing_thickness,
+                packing_absorption,
+            } => {
+                let core_radius = (area.max(1e-7) / std::f64::consts::PI).sqrt();
+                chain.push(Self::Absorptive(AbsorptiveSilencer::new(
+                    pipe_area,
+                    *area,
+                    *length,
+                    *packing_thickness,
+                    sabine_attenuation_db_per_m(core_radius, *packing_absorption),
+                    sample_rate,
+                    gamma,
+                    gas_constant,
+                    temperature,
+                )))
+            }
             Silencer::QuarterWaveStub { length, area } => {
                 chain.push(Self::SideBranch(QuarterWaveStub::new(
                     pipe_area,
@@ -1875,6 +2008,106 @@ mod tests {
                 (measured - expected).abs() < 1.0,
                 "at {f:.0} Hz (kL = {:.2} rad): {measured:.2} dB measured, {expected:.2} dB from theory",
                 std::f32::consts::TAU * f / c * cavity_length as f32
+            );
+        }
+    }
+
+    #[test]
+    fn packed_absorption_rises_with_frequency() {
+        // The claim that separates a muffler from a volume knob: packing takes
+        // the top out and leaves the bottom alone. Fibre dissipates by dragging
+        // gas through itself, and the gas is still within a quarter wavelength
+        // of the shell, so a layer of depth t is transparent below
+        // c_packing / 4t and fully effective above it.
+        //
+        // Modelled as the shelf that argument implies,
+        //
+        //   |H(x)|^2 = (1 + p^2 x^2) / (1 + x^2),   x = f / f_q
+        //
+        // which is unity at DC and the packing's rated gain p far above the
+        // corner. The core is given the same area as the pipe either side of
+        // it, so the two area steps are transparent and what is left to measure
+        // is the packing alone.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.4;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 300.0;
+
+        let area = std::f64::consts::PI * 0.030 * 0.030;
+        let length = 0.50f64;
+        let thickness = 0.035f64;
+        let loss_db_per_m = 20.0f64;
+
+        let c = speed_of_sound(GAMMA, R, TEMPERATURE);
+        let corner = packing_corner_hz(thickness, c);
+        let pass = 10f64.powf(-loss_db_per_m * length / 20.0) as f32;
+
+        let analytic_loss = |f: f32| {
+            let x = f / corner;
+            -10.0 * ((1.0 + pass * pass * x * x) / (1.0 + x * x)).log10()
+        };
+
+        let measured_loss = |f: f32| {
+            let mut silencer = AbsorptiveSilencer::new(
+                area,
+                area,
+                length,
+                thickness,
+                loss_db_per_m,
+                FS,
+                GAMMA,
+                R,
+                TEMPERATURE,
+            );
+            let (settle, measure) = (24_000, 24_000);
+            let mut transmitted = vec![0.0f32; measure];
+            for i in 0..(settle + measure) {
+                let phase = std::f32::consts::TAU * f * i as f32 / FS;
+                // A zero backward wave from downstream is the anechoic
+                // termination, as in the chamber test above.
+                let (_, out) = silencer.step(phase.sin(), 0.0);
+                if i >= settle {
+                    transmitted[i - settle] = out;
+                }
+            }
+            -20.0 * magnitude_at(&transmitted, f, FS).max(1e-9).log10()
+        };
+
+        // Transparent an octave and a half below the corner, working hard two
+        // octaves above it, and never going backwards in between. The upper
+        // bound on the low point is the whole difference from a flat gain,
+        // which would have taken all 10 dB out down here as well.
+        let low = measured_loss(corner / 8.0);
+        let mid = measured_loss(corner);
+        let high = measured_loss(4.0 * corner);
+        assert!(
+            low < 0.5,
+            "packing is not transparent below its corner: {low:.2} dB at {:.0} Hz",
+            corner / 8.0
+        );
+        assert!(
+            high > 7.0,
+            "packing is not working above its corner: {high:.2} dB at {:.0} Hz",
+            4.0 * corner
+        );
+        assert!(
+            low < mid && mid < high,
+            "absorption did not rise with frequency: {low:.2}, {mid:.2}, {high:.2} dB"
+        );
+
+        // And it follows the shelf, not merely the right direction. Checked up
+        // to twice the corner: beyond that the core's own viscothermal wall
+        // loss (which rises as sqrt(f)) and the one-pole's discretisation both
+        // contribute, and by four times the corner they add 1.8 dB between
+        // them. Both take *more* out of the top, so the element stays on the
+        // right side of the claim; they are simply not part of the shelf, and
+        // this assertion is about the shelf.
+        for f in [corner / 8.0, corner / 2.0, corner, 2.0 * corner] {
+            let (measured, expected) = (measured_loss(f), analytic_loss(f));
+            assert!(
+                (measured - expected).abs() < 0.5,
+                "at {f:.0} Hz (f/f_q = {:.2}): {measured:.2} dB measured, {expected:.2} dB from the shelf",
+                f / corner
             );
         }
     }

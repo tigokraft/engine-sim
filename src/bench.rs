@@ -447,7 +447,8 @@ impl EnginePreset {
                 silencers: vec![Silencer::Absorptive {
                     length: 0.50,
                     area: PI * 0.030 * 0.030,
-                    loss_db_per_m: 8.0,
+                    packing_thickness: 0.025,
+                    packing_absorption: 0.80,
                 }],
                 tailpipe: PipeSection::from_diameter(1.0, 0.060, 700.0),
                 tailpipe_flanged: false,
@@ -601,7 +602,8 @@ impl EnginePreset {
                 silencers: vec![Silencer::Absorptive {
                     length: 0.60,
                     area: PI * 0.032 * 0.032,
-                    loss_db_per_m: 6.0,
+                    packing_thickness: 0.035,
+                    packing_absorption: 0.80,
                 }],
                 tailpipe: PipeSection::from_diameter(1.6, 0.070, 600.0),
                 tailpipe_flanged: false,
