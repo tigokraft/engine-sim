@@ -1,0 +1,475 @@
+//! Lumped thermal masses: the state that makes a cold engine sound cold.
+//!
+//! Everything acoustic in this simulator hangs off a temperature. The speed of
+//! sound in a pipe is `sqrt(gamma R T)`, so every resonance the exhaust has is
+//! proportional to `sqrt(T)`; the exhaust gas temperature itself is set by how
+//! much heat the combustion chamber walls took out of the charge; and the
+//! mechanical noise floor is set by friction, which is set by how thick the oil
+//! is. All three of those were constants. This module makes them state.
+//!
+//! The model is the crudest one that is still a model: a lumped capacity per
+//! body, heated by the flux the solver already computes and cooled by a
+//! conductance to a sink.
+//!
+//! ```text
+//! C dT/dt = Q_in - h (T - T_sink)
+//! ```
+//!
+//! A lumped capacity is only honest while the body is small compared with the
+//! distance heat diffuses through it in a time constant — which a 1.5 mm pipe
+//! wall comfortably is, and a whole engine block is not. See
+//! [`WARM_UP_MASS_FRACTION`] for what is done about that.
+
+use std::f64::consts::PI;
+
+// ---------------------------------------------------------------------------
+// Material and gas constants
+// ---------------------------------------------------------------------------
+
+/// Specific heat capacity of the engine's structural metal [J/(kg K)].
+///
+/// Between cast iron (450) and aluminium (900); a dressed engine is a mixture
+/// of both plus its steel fasteners, and the coolant and oil it carries are
+/// lumped in with it.
+pub const METAL_SPECIFIC_HEAT: f64 = 520.0;
+
+/// Fraction of the dressed block mass that follows the combustion chamber [-].
+///
+/// The whole casting does not warm up together. With the thermostat shut the
+/// radiator and its coolant are isolated, and the far end of the sump is
+/// hundreds of seconds of conduction away from the bores, so what actually
+/// responds to the first two minutes of running is the metal *around the
+/// chambers* and the coolant in the block. Measured warm-ups imply an effective
+/// capacity near a quarter of the dressed mass; using the whole casting puts a
+/// road engine twenty minutes from operating temperature, which is wrong by a
+/// factor of five.
+pub const WARM_UP_MASS_FRACTION: f64 = 0.25;
+
+/// Density of the steel exhaust tubing [kg/m^3].
+pub const PIPE_DENSITY: f64 = 7_800.0;
+/// Specific heat capacity of the steel exhaust tubing [J/(kg K)].
+pub const PIPE_SPECIFIC_HEAT: f64 = 490.0;
+/// Wall thickness of the exhaust tubing [m].
+///
+/// 1.5 mm is what mandrel-bent 16-gauge primaries and a production tailpipe are
+/// both near enough to; it is the single number that sets how long an exhaust
+/// takes to come up to temperature.
+pub const PIPE_WALL_THICKNESS: f64 = 1.5e-3;
+
+/// Thermal conductivity of exhaust gas at working temperature [W/(m K)].
+pub const EXHAUST_CONDUCTIVITY: f64 = 0.065;
+/// Dynamic viscosity of exhaust gas at working temperature [Pa s].
+pub const EXHAUST_VISCOSITY: f64 = 3.8e-5;
+/// Prandtl number of exhaust gas [-].
+pub const EXHAUST_PRANDTL: f64 = 0.72;
+/// Specific heat at constant pressure of exhaust gas [J/(kg K)].
+pub const EXHAUST_CP: f64 = 1_150.0;
+
+/// Enhancement of the gas-side film coefficient by flow pulsation [-].
+///
+/// Dittus-Boelter describes steady pipe flow. Exhaust flow is not steady: it
+/// arrives as a train of blowdown slugs that scour the boundary layer flat on
+/// every event, and manifold heat-transfer measurements come back around twice
+/// the steady-flow correlation because of it.
+pub const PULSATION_ENHANCEMENT: f64 = 2.0;
+
+/// Free-convection and radiation coefficient on the outside of a pipe [W/(m^2 K)].
+///
+/// A hot pipe in still air under a car: natural convection is worth perhaps
+/// 10 W/(m^2 K), and at 900 K the radiative part is worth rather more than
+/// that, so the two are carried together as one linearised coefficient.
+pub const PIPE_EXTERNAL_COEFFICIENT: f64 = 30.0;
+
+/// Conductance from the combustion chamber surface to the bulk block [W/(m^2 K)].
+///
+/// The chamber wall does not sit at the block's bulk temperature: the heat
+/// Woschni takes out of the charge has to cross the head metal, the coolant
+/// film and whatever deposit is on the inside before it reaches the coolant, and
+/// that drop is what makes a fired chamber wall run near 450 K against a 363 K
+/// coolant. Calibrated so a warm engine at idle lands on the 450 K this model
+/// used to assume outright.
+pub const HEAD_CONDUCTANCE: f64 = 1_200.0;
+
+/// Highest chamber wall temperature the head is allowed to reach [K].
+///
+/// A linear conductance keeps raising the wall as the flux grows, but an
+/// aluminium head does not: past this the coolant is boiling nucleate at the
+/// hot spots, which pins the surface, and past it by much the casting is
+/// failing rather than running. The ceiling is the material's, not a tuning
+/// knob.
+pub const MAX_WALL_TEMPERATURE: f64 = 600.0;
+
+// ---------------------------------------------------------------------------
+// A lumped body
+// ---------------------------------------------------------------------------
+
+/// One lumped thermal mass with a convective path to a sink.
+///
+/// ```text
+/// C dT/dt = Q_in - h (T - T_sink)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThermalMass {
+    /// Bulk temperature of the body [K].
+    pub temperature: f64,
+    /// Heat capacity `C` [J/K].
+    pub capacity: f64,
+    /// Conductance `h` to the sink [W/K].
+    pub conductance: f64,
+    /// Temperature of the sink the body loses to [K].
+    pub sink_temperature: f64,
+}
+
+impl ThermalMass {
+    /// A body at a temperature, with a capacity and a path to a sink.
+    pub fn new(temperature: f64, capacity: f64, conductance: f64, sink_temperature: f64) -> Self {
+        Self {
+            temperature,
+            capacity: capacity.max(1e-3),
+            conductance: conductance.max(1e-9),
+            sink_temperature,
+        }
+    }
+
+    /// First-order time constant `tau = C / h` [s].
+    pub fn time_constant(&self) -> f64 {
+        self.capacity / self.conductance
+    }
+
+    /// Temperature the body settles at under a steady input [K].
+    pub fn equilibrium(&self, heat_in: f64) -> f64 {
+        self.sink_temperature + heat_in / self.conductance
+    }
+
+    /// Advances the body by `dt` under a steady heat input [W].
+    ///
+    /// Integrated in closed form rather than by an Euler step. The frame here is
+    /// milliseconds and the pipe time constants are tens of seconds, so an
+    /// explicit step would be perfectly stable — but the exponential is the
+    /// exact solution of the equation for a constant input, costs one `exp`, and
+    /// means a cooling engine follows `tau` to the last decimal instead of to
+    /// whatever the frame rate allows.
+    pub fn integrate(&mut self, dt: f64, heat_in: f64) {
+        if !(dt.is_finite() && dt > 0.0 && heat_in.is_finite()) {
+            return;
+        }
+        let target = self.equilibrium(heat_in);
+        let decay = (-dt / self.time_constant()).exp();
+        self.temperature = target + (self.temperature - target) * decay;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The cooling system
+// ---------------------------------------------------------------------------
+
+/// The wax thermostat and the radiator behind it.
+///
+/// A block with a fixed conductance to ambient has no operating temperature: it
+/// settles wherever the load puts it, which for a V8 between idle and full
+/// throttle is a spread of several hundred Kelvin. A real engine does not do
+/// that, and the reason is one component. Below its opening temperature the
+/// thermostat is shut and the only loss is what leaks off the outside of the
+/// casting; above it the wax expands proportionally to how far past it the
+/// coolant is, and the conductance climbs steeply enough that the plateau moves
+/// by a couple of Kelvin across the whole load range.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Thermostat {
+    /// Temperature at which the valve starts to crack open [K].
+    pub open_temperature: f64,
+    /// Loss straight off the outside of the block with the valve shut [W/K].
+    pub bypass_conductance: f64,
+    /// How fast the valve opens past its rating [W/K per K].
+    pub gain: f64,
+    /// Conductance with the valve wide open and the fan running [W/K].
+    pub radiator_conductance: f64,
+}
+
+impl Default for Thermostat {
+    /// An 88 C thermostat on a road-car cooling pack.
+    fn default() -> Self {
+        Self {
+            open_temperature: 361.15,
+            bypass_conductance: 22.0,
+            gain: 200.0,
+            radiator_conductance: 3_000.0,
+        }
+    }
+}
+
+impl Thermostat {
+    /// Conductance from the block to ambient at a block temperature [W/K].
+    pub fn conductance(&self, block_temperature: f64) -> f64 {
+        let excess = (block_temperature - self.open_temperature).max(0.0);
+        (self.bypass_conductance + self.gain * excess).min(self.radiator_conductance)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Oil
+// ---------------------------------------------------------------------------
+
+/// Vogel's law for the oil in the sump, and what it does to friction.
+///
+/// ```text
+/// mu(T) = A exp( B / (T - C) )      [Pa s]
+/// ```
+///
+/// Three constants rather than Arrhenius' two, because a two-constant fit is
+/// badly wrong at both ends of the range an engine actually sees. The defaults
+/// are fitted to a 10W-40 through its two published grade points, 95 cSt at
+/// 40 C and 14 cSt at 100 C.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OilViscosity {
+    /// Vogel `A`, the high-temperature asymptote [Pa s].
+    pub a: f64,
+    /// Vogel `B`, the activation term [K].
+    pub b: f64,
+    /// Vogel `C`, the pole the viscosity runs away at [K].
+    pub c: f64,
+    /// Temperature the friction correlation's coefficients were measured at [K].
+    pub reference_temperature: f64,
+    /// How hard friction follows viscosity [-].
+    ///
+    /// Not 1. A journal bearing shearing a fixed film would give Petroff's
+    /// linear law, but an engine's rubbing surfaces sit in a mixed regime and
+    /// the film thickness itself adjusts to the viscosity, which flattens the
+    /// dependence a long way. Sandoval and Heywood's motoring-friction fit puts
+    /// the exponent near a quarter, which is why a cold engine's friction is
+    /// twice its warm value rather than the twenty times the viscosity ratio
+    /// alone would suggest.
+    pub exponent: f64,
+}
+
+impl Default for OilViscosity {
+    /// A 10W-40 mineral oil against a correlation measured at 90 C.
+    fn default() -> Self {
+        Self {
+            a: 6.899e-5,
+            b: 1_161.8,
+            c: 150.0,
+            reference_temperature: 363.15,
+            exponent: 0.24,
+        }
+    }
+}
+
+impl OilViscosity {
+    /// Dynamic viscosity at a temperature [Pa s].
+    pub fn dynamic_viscosity(&self, temperature: f64) -> f64 {
+        // Below the Vogel pole the expression is meaningless and above it, far
+        // enough down, it overflows; an oil that cold is a solid anyway.
+        let above_pole = (temperature - self.c).max(20.0);
+        self.a * (self.b / above_pole).exp()
+    }
+
+    /// Multiplier on the hydrodynamic friction terms at a temperature [-].
+    ///
+    /// `(mu(T) / mu(T_ref))^n`, which is 1 at the temperature the correlation
+    /// was fitted at and rises as the oil thickens.
+    pub fn friction_multiplier(&self, temperature: f64) -> f64 {
+        let ratio = self.dynamic_viscosity(temperature)
+            / self.dynamic_viscosity(self.reference_temperature);
+        ratio.max(0.0).powf(self.exponent)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pipe heat transfer
+// ---------------------------------------------------------------------------
+
+/// Heat capacity of a length of thin-walled steel tube [J/K].
+pub fn pipe_wall_capacity(length: f64, diameter: f64) -> f64 {
+    let volume = PI * diameter.max(1e-4) * PIPE_WALL_THICKNESS * length.max(1e-4);
+    volume * PIPE_DENSITY * PIPE_SPECIFIC_HEAT
+}
+
+/// Gas-side film coefficient inside an exhaust pipe [W/(m^2 K)].
+///
+/// Dittus-Boelter for turbulent pipe flow,
+///
+/// ```text
+/// Nu = 0.023 Re^0.8 Pr^0.4,     Re = 4 m_dot / (pi D mu)
+/// ```
+///
+/// floored at the fully developed laminar value `Nu = 4.36`, which is what the
+/// correlation is blended into below the transition and is also what keeps an
+/// idling engine's pipes from going adiabatic. Scaled by
+/// [`PULSATION_ENHANCEMENT`].
+pub fn gas_film_coefficient(mass_flow: f64, diameter: f64) -> f64 {
+    let d = diameter.max(1e-4);
+    let reynolds = 4.0 * mass_flow.abs() / (PI * d * EXHAUST_VISCOSITY);
+    let nusselt = (0.023 * reynolds.powf(0.8) * EXHAUST_PRANDTL.powf(0.4)).max(4.36);
+    PULSATION_ENHANCEMENT * nusselt * EXHAUST_CONDUCTIVITY / d
+}
+
+/// Gas temperature leaving a pipe section whose wall sits at `wall` [K].
+///
+/// The steady constant-wall-temperature tube solution:
+///
+/// ```text
+/// T_out = T_wall + (T_in - T_wall) exp( -h A / (m_dot c_p) )
+/// ```
+///
+/// This is where the gradient Stage 10 wants comes from. It is not a decay
+/// applied to the pipe, it is the exact answer for the section, and the heat it
+/// says the wall took is what the wall is then warmed by — so a long pipe at low
+/// flow cools its gas nearly to the wall and a short one at high flow barely
+/// touches it.
+pub fn outlet_temperature(
+    inlet: f64,
+    wall: f64,
+    mass_flow: f64,
+    film_coefficient: f64,
+    surface_area: f64,
+) -> f64 {
+    let capacity_rate = mass_flow.abs() * EXHAUST_CP;
+    if capacity_rate <= 1e-9 {
+        // No flow, no convection: the gas in the pipe is simply the wall's.
+        return wall;
+    }
+    let ntu = film_coefficient * surface_area / capacity_rate;
+    wall + (inlet - wall) * (-ntu).exp()
+}
+
+/// Heat a stream gives up between two stations [W].
+pub fn stream_heat(mass_flow: f64, inlet: f64, outlet: f64) -> f64 {
+    mass_flow.abs() * EXHAUST_CP * (inlet - outlet)
+}
+
+/// Chamber wall temperature for a block at `block_temperature` [K].
+///
+/// `T_wall = T_block + Q / (K A)`: the drop across the head metal and the
+/// coolant film, which is what stands between the surface Woschni is radiating
+/// into and the bulk of the casting. `heat_flow` is one cylinder's mean wall
+/// loss [W] and `area` its mean chamber surface [m^2].
+pub fn chamber_wall_temperature(block_temperature: f64, heat_flow: f64, area: f64) -> f64 {
+    let rise = heat_flow.max(0.0) / (HEAD_CONDUCTANCE * area.max(1e-6));
+    (block_temperature + rise).min(MAX_WALL_TEMPERATURE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx(a: f64, b: f64, tol: f64) {
+        assert!((a - b).abs() <= tol, "{a} != {b} (tol {tol})");
+    }
+
+    #[test]
+    fn a_mass_settles_at_its_equilibrium() {
+        let mut body = ThermalMass::new(300.0, 1_000.0, 10.0, 300.0);
+        // Ten time constants of 100 s each.
+        for _ in 0..100_000 {
+            body.integrate(0.01, 500.0);
+        }
+        // T_sink + Q/h = 300 + 50.
+        approx(body.temperature, 350.0, 1e-2);
+    }
+
+    #[test]
+    fn cooling_follows_the_modelled_time_constant() {
+        let mut body = ThermalMass::new(1_000.0, 2_000.0, 20.0, 300.0);
+        let tau = body.time_constant();
+        approx(tau, 100.0, 1e-9);
+
+        let start = body.temperature;
+        let steps = 1_000;
+        for _ in 0..steps {
+            body.integrate(tau / steps as f64, 0.0);
+        }
+        // One time constant leaves 1/e of the excess over the sink.
+        approx(
+            body.temperature - 300.0,
+            (start - 300.0) / std::f64::consts::E,
+            1e-6,
+        );
+    }
+
+    #[test]
+    fn the_thermostat_pins_the_plateau_across_the_load_range() {
+        let stat = Thermostat::default();
+        let plateau = |heat: f64| {
+            let mut block = ThermalMass::new(293.15, 22_000.0, stat.bypass_conductance, 293.15);
+            for _ in 0..200_000 {
+                block.conductance = stat.conductance(block.temperature);
+                block.integrate(0.01, heat);
+            }
+            block.temperature
+        };
+        let idle = plateau(8_000.0);
+        let loaded = plateau(60_000.0);
+        assert!(
+            idle > stat.open_temperature && idle < stat.open_temperature + 5.0,
+            "idle plateau {idle} is not on the thermostat"
+        );
+        assert!(
+            loaded - idle < 5.0,
+            "plateau moved {:.1} K from idle to full load",
+            loaded - idle
+        );
+    }
+
+    #[test]
+    fn vogel_viscosity_falls_with_temperature() {
+        let oil = OilViscosity::default();
+        let cold = oil.dynamic_viscosity(293.15);
+        let warm = oil.dynamic_viscosity(373.15);
+        assert!(cold > warm, "oil must thin as it warms");
+        // The grade points it was fitted through, in Pa s.
+        approx(oil.dynamic_viscosity(313.15), 0.0855, 1e-3);
+        approx(oil.dynamic_viscosity(373.15), 0.0126, 1e-3);
+    }
+
+    #[test]
+    fn the_friction_multiplier_is_unity_at_the_reference() {
+        let oil = OilViscosity::default();
+        approx(
+            oil.friction_multiplier(oil.reference_temperature),
+            1.0,
+            1e-12,
+        );
+        let cold = oil.friction_multiplier(293.15);
+        assert!(
+            (1.5..3.0).contains(&cold),
+            "a cold engine's hydrodynamic friction multiplier is {cold}, not near two"
+        );
+    }
+
+    #[test]
+    fn a_pipe_cools_its_gas_towards_the_wall() {
+        let area = PI * 0.040 * 0.45;
+        let h = gas_film_coefficient(0.0135, 0.040);
+        let out = outlet_temperature(1_100.0, 900.0, 0.0135, h, area);
+        assert!(
+            out < 1_100.0 && out > 900.0,
+            "outlet {out} left the bracket"
+        );
+        // Halve the flow and the same pipe takes more out of it.
+        let slower = outlet_temperature(1_100.0, 900.0, 0.0068, h, area);
+        assert!(slower < out, "less flow must be cooled further");
+    }
+
+    #[test]
+    fn a_stalled_pipe_holds_its_wall_temperature() {
+        approx(
+            outlet_temperature(1_100.0, 900.0, 0.0, 50.0, 0.05),
+            900.0,
+            0.0,
+        );
+    }
+
+    #[test]
+    fn the_chamber_wall_sits_above_the_block() {
+        let area = 2.0 * PI * 0.043 * 0.043;
+        let warm = chamber_wall_temperature(363.15, 1_000.0, area);
+        assert!(
+            (430.0..470.0).contains(&warm),
+            "a warm chamber wall at idle is {warm} K, not the 450 K this used to assume"
+        );
+        assert!(
+            chamber_wall_temperature(363.15, 1e9, area) <= MAX_WALL_TEMPERATURE,
+            "the head must not be allowed past its material limit"
+        );
+    }
+}
