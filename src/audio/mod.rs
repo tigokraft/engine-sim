@@ -68,6 +68,7 @@ pub use dsp::{
     SynthConfig, TurboVoicing, MAX_CYLINDERS,
 };
 pub use filters::MufflerGeometry;
+pub use propagation::{Aperture, Listener};
 pub use stream::{
     AudioScope, AudioSettings, AudioStats, EngineAudio, StreamInfo, PREFERRED_SAMPLE_RATE,
 };
