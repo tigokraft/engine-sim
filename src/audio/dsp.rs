@@ -98,10 +98,10 @@ pub use crate::physics::engine_block::CYCLE_TABLE;
 
 /// Samples between control-rate updates.
 ///
-/// 32 samples is 0.67 ms at 48 kHz — far below the ~10 ms it takes a listener to
-/// resolve a timbral change, and 32x cheaper than redesigning coefficients every
-/// sample.
-pub const CONTROL_BLOCK: usize = 32;
+/// 16 samples is ~0.33 ms at 48 kHz — well below the 1.25 ms firing interval of a
+/// V12 at 8000 rpm (60 samples), ensuring control-rate schedules and filters track
+/// every firing cycle without quantisation coarseness.
+pub const CONTROL_BLOCK: usize = 16;
 
 /// One whole master cycle, in the fixed-point units crank phase is kept in [-].
 ///
@@ -3581,6 +3581,28 @@ mod tests {
             assert_eq!(voice.severity, 0.0);
             assert!(voice.poll(&mut noise, CONTROL_BLOCK).is_none());
         }
+    }
+
+    #[test]
+    fn control_block_is_shorter_than_v12_firing_interval() {
+        // A V12 at 8000 rpm fires every 1.25 ms:
+        // f_cycle = 8000 / 120 = 66.67 Hz -> 12 * 66.67 = 800 Hz -> T_fire = 1.25 ms.
+        // At 48 kHz, this is 60 samples.
+        // The control block must be strictly shorter than the firing interval so
+        // control-rate schedules and filters are not quantised coarser than the events
+        // they track.
+        const FS: f32 = 48_000.0;
+        let v12_firing_interval_sec = 120.0 / (12.0 * 8000.0); // 1.25 ms
+        let control_block_sec = CONTROL_BLOCK as f32 / FS;
+        assert!(
+            control_block_sec < v12_firing_interval_sec,
+            "CONTROL_BLOCK ({control_block_sec:.4} s) must be shorter than V12 firing interval ({v12_firing_interval_sec:.4} s)"
+        );
+        let firing_samples = (v12_firing_interval_sec * FS) as usize;
+        assert!(
+            CONTROL_BLOCK < firing_samples,
+            "CONTROL_BLOCK ({CONTROL_BLOCK}) must be fewer samples than firing interval ({firing_samples})"
+        );
     }
 
     #[test]
