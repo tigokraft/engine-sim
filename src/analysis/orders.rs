@@ -943,6 +943,38 @@ mod tests {
         assert!(table.level(4.0).unwrap().frames > 0);
     }
 
+    /// A supplied sweep is exact between its endpoints.
+    #[test]
+    fn a_supplied_sweep_is_linear_between_its_endpoints() {
+        let curve = RpmCurve::sweep(1_000.0, 7_000.0, 6.0);
+        assert!((curve.seconds() - 6.0).abs() < 1e-9);
+        assert!((curve.at(0.0) - 1_000.0).abs() < 1e-9);
+        assert!((curve.at(3.0) - 4_000.0).abs() < 1e-9);
+        assert!((curve.at(6.0) - 7_000.0).abs() < 1e-9);
+    }
+
+    /// A hand-logged curve keeps the points it was given and interpolates
+    /// between them, however they arrived.
+    #[test]
+    fn a_logged_curve_passes_through_its_points() {
+        // Deliberately out of order and unevenly spaced, as a curve read off a
+        // tachometer arrives.
+        let points = [(2.0, 4_000.0), (0.0, 900.0), (3.0, 4_200.0), (1.0, 2_500.0)];
+        let curve = RpmCurve::from_points(&points, 1.0 / 240.0);
+
+        assert!((curve.seconds() - 3.0).abs() < 0.01);
+        for (t, rpm) in points {
+            assert!(
+                (curve.at(t) - rpm).abs() < 1.0,
+                "{t} s came back as {:.0} rpm, not {rpm:.0}",
+                curve.at(t)
+            );
+        }
+        // Between two logged points, and past the end where it holds.
+        assert!((curve.at(1.5) - 3_250.0).abs() < 10.0);
+        assert!((curve.at(99.0) - 4_200.0).abs() < 1.0);
+    }
+
     #[test]
     fn a_speed_curve_interpolates_and_clamps() {
         let curve = RpmCurve::new(vec![1_000.0, 2_000.0, 3_000.0], 0.5);
