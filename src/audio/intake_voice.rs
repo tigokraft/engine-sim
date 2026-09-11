@@ -48,6 +48,22 @@ pub fn induction_rarefaction_pa(mass_flow: f32, runner_area: f32, speed_of_sound
     }
 }
 
+/// Acoustic water hammer pressure pulse from intake valve closing slam [Pa]:
+///
+/// $$\Delta p_{\text{slam}} = \frac{L}{A} \max\left(0, -\frac{d\dot{m}}{dt}\right)$$
+///
+/// At intake valve closing (IVC), the inertia of the moving air column in the runner
+/// slams into the shutting valve, converting kinetic energy into a sharp positive
+/// pressure wavefront that travels up the runner and radiates from the mouth.
+#[inline]
+pub fn valve_slam_pa(d_mdot_dt: f32, runner_length: f32, runner_area: f32) -> f32 {
+    if runner_area <= 1e-7 {
+        0.0
+    } else {
+        (runner_length.max(0.0) / runner_area) * (-d_mdot_dt).max(0.0)
+    }
+}
+
 /// 1D digital waveguide network representing the complete intake system.
 #[derive(Debug, Clone)]
 pub struct IntakeNetwork {
@@ -412,5 +428,34 @@ mod tests {
 
         // Zero mass flow produces no pressure pulse
         assert_eq!(induction_rarefaction_pa(0.0, area, c), 0.0);
+    }
+
+    #[test]
+    fn valve_slam_scales_with_flow_derivative_and_runner_length() {
+        let d_mdot = -15.0f32;
+        let l1 = 0.25f32;
+        let l2 = 0.50f32;
+        let area = 0.0014f32;
+
+        let p1 = valve_slam_pa(d_mdot, l1, area);
+        let p2 = valve_slam_pa(d_mdot, l2, area);
+
+        assert!(
+            p1 > 0.0,
+            "water hammer slam must be a positive pressure surge"
+        );
+        assert!(
+            (p2 - 2.0 * p1).abs() < 1e-4,
+            "doubling runner length must double water hammer amplitude"
+        );
+
+        let p_double_derivative = valve_slam_pa(2.0 * d_mdot, l1, area);
+        assert!(
+            (p_double_derivative - 2.0 * p1).abs() < 1e-4,
+            "doubling flow shutoff rate must double water hammer amplitude"
+        );
+
+        // Opening valve (flow increasing) produces zero slam pulse
+        assert_eq!(valve_slam_pa(15.0, l1, area), 0.0);
     }
 }

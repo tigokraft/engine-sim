@@ -2100,6 +2100,7 @@ pub struct EngineSynth {
     intake: IntakeVoice,
     intake_network: IntakeNetwork,
     intake_excitations: Vec<f32>,
+    prev_cylinder_intake_flow: Vec<f32>,
     turbo: TurboVoice,
     backfire: BackfireVoice,
     mechanical: MechanicalVoice,
@@ -2201,6 +2202,7 @@ impl EngineSynth {
             intake: IntakeVoice::new(fs),
             intake_network: IntakeNetwork::new(&config.intake, config.cylinders.len(), fs),
             intake_excitations: vec![0.0; n_cyl],
+            prev_cylinder_intake_flow: vec![0.0; n_cyl],
             turbo: TurboVoice::new(fs),
             backfire: BackfireVoice::new(fs),
             mechanical: MechanicalVoice::from_spec(&config.mechanical, fs),
@@ -2332,6 +2334,7 @@ impl EngineSynth {
         self.cycle.reset();
         self.excitations.fill(0.0);
         self.intake_excitations.fill(0.0);
+        self.prev_cylinder_intake_flow.fill(0.0);
         self.bank_excitations.fill(0.0);
         self.radiated.fill(0.0);
         for smoother in self.blowdown_pa.iter_mut() {
@@ -2637,13 +2640,24 @@ impl EngineSynth {
             let flow = self.cycle.intake_at(cylinder, blend);
             induction += flow;
 
-            let runner_area = if !self.config.intake.runners.is_empty() {
-                self.config.intake.runners[index % self.config.intake.runners.len()].area as f32
+            let prev_flow = self.prev_cylinder_intake_flow[index];
+            let d_flow_dt = (flow - prev_flow) * self.config.sample_rate;
+            self.prev_cylinder_intake_flow[index] = flow;
+
+            let (runner_len, runner_area) = if !self.config.intake.runners.is_empty() {
+                let r = &self.config.intake.runners[index % self.config.intake.runners.len()];
+                (r.length as f32, r.area as f32)
             } else {
-                self.config.intake.runner_area() as f32
+                (
+                    self.config.intake.runner_length() as f32,
+                    self.config.intake.runner_area() as f32,
+                )
             };
-            self.intake_excitations[index] =
+            let p_rarefaction =
                 crate::audio::intake_voice::induction_rarefaction_pa(flow, runner_area, c_intake);
+            let p_slam =
+                crate::audio::intake_voice::valve_slam_pa(d_flow_dt, runner_len, runner_area);
+            self.intake_excitations[index] = p_rarefaction + p_slam;
         }
         induction
     }
