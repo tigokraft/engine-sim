@@ -673,19 +673,22 @@ impl SynthConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Blowdown excitation
+// Backfire excitation
 // ---------------------------------------------------------------------------
 
-/// One in-flight exhaust blowdown pulse.
+/// One in-flight backfire pop.
 ///
-/// The envelope is the product of two exponentials — a fast rise as the valve
-/// cracks and the flow chokes, and a slower fall as the cylinder empties —
-/// evaluated recursively so a running pulse costs two multiplies and an add.
-/// The waveform under it is a positive pressure step roughened by broadband
-/// noise, which is what a choked orifice actually radiates: a step in mean
-/// pressure plus the turbulence of the jet.
+/// A pop is unburnt fuel finding enough heat to light in the pipework, and
+/// unlike a blowdown it is not a cylinder event at all — there is no valve, no
+/// port and no trace of it anywhere in the solver's cycle, so it is the one
+/// exhaust excitation that still has to be synthesised. The envelope is the
+/// product of two exponentials — a near-instant rise as the charge goes off,
+/// and a fall set by how much of it there was — evaluated recursively so a
+/// running pop costs two multiplies and an add. The waveform under it is almost
+/// entirely broadband, which is what an unmetered charge burning in open pipe
+/// radiates.
 #[derive(Debug, Clone, Copy, Default)]
-struct Blowdown {
+struct Pop {
     amplitude: f32,
     noise_depth: f32,
     attack_coeff: f32,
@@ -695,16 +698,15 @@ struct Blowdown {
     active: bool,
 }
 
-impl Blowdown {
-    /// Starts a pulse, `age` samples into its own envelope.
+impl Pop {
+    /// Starts a pop, `age` samples into its own envelope.
     ///
-    /// The fractional `age` is what buys sample-accurate firing. Crank phase
-    /// almost never crosses a cylinder's trigger exactly on a sample boundary,
-    /// and quantising to the nearest sample adds up to half a sample of jitter
-    /// to every pulse — at 48 kHz that is a 10 microsecond random walk on the
-    /// firing instant, which is audible on a steady note as a faint rasp.
-    /// Advancing the envelope analytically to its true starting point removes
-    /// it.
+    /// The fractional `age` is what buys sample-accurate onsets. A pop is polled
+    /// for at the control rate but does not begin on a control boundary, and
+    /// quantising to one would put every pop in the engine on a 32-sample grid —
+    /// which a rapid string of them during a shift cut would make audible as a
+    /// buzz at the control rate. Advancing the envelope analytically to its true
+    /// starting point removes it.
     fn trigger(
         &mut self,
         sample_rate: f32,
@@ -719,10 +721,9 @@ impl Blowdown {
         self.attack_coeff = 1.0 - (-1.0 / (ta * sample_rate)).exp();
         self.decay_coeff = (-1.0 / (td * sample_rate)).exp();
 
-        // Peak of (1 - e^-t/ta) e^-t/td, so pulses of different lengths hit the
-        // same level for the same pressure difference. Without this, a pulse at
-        // 7000 rpm — where the decay is a fifth as long — would be quiet purely
-        // because its envelope never has time to rise.
+        // Peak of (1 - e^-t/ta) e^-t/td, so pops of different lengths hit the
+        // same level for the same severity. Without this, a short pop would be
+        // quiet purely because its envelope never has time to rise.
         let ratio = ta / (ta + td);
         let peak = (td / (ta + td)) * ratio.powf(ta / td);
 
@@ -745,8 +746,8 @@ impl Blowdown {
         }
         self.attack_state += (1.0 - self.attack_state) * self.attack_coeff;
         self.decay_state *= self.decay_coeff;
-        // Below -100 dB the pulse is inaudible and only costs cycles; retiring
-        // it also keeps the slot available for the next firing.
+        // Below -100 dB the pop is inaudible and only costs cycles; retiring it
+        // also keeps the slot available for the next one.
         if self.decay_state < 1e-5 {
             self.active = false;
             return 0.0;
@@ -756,20 +757,20 @@ impl Blowdown {
     }
 }
 
-/// Fixed pool of overlapping pulses.
+/// Fixed pool of overlapping pops.
 ///
-/// Pulses overlap whenever the decay outlasts the firing interval, which on a
-/// four-cylinder bank happens above roughly 5000 rpm. Four slots covers that
-/// with margin; allocating per pulse is not an option in a callback, and
-/// stealing the oldest slot when the pool is exhausted degrades gracefully
-/// (the pulse being stolen is by then the quietest one present).
+/// Pops overlap whenever one is still ringing as the next lights off, which a
+/// long overrun on a hot pipe does readily. Four slots covers that with margin;
+/// allocating per pop is not an option in a callback, and stealing the oldest
+/// slot when the pool is exhausted degrades gracefully (the pop being stolen is
+/// by then the quietest one present).
 #[derive(Debug, Clone, Copy, Default)]
-struct PulsePool {
-    slots: [Blowdown; 4],
+struct PopPool {
+    slots: [Pop; 4],
     next: usize,
 }
 
-impl PulsePool {
+impl PopPool {
     fn trigger(
         &mut self,
         sample_rate: f32,
@@ -801,7 +802,7 @@ impl PulsePool {
     }
 
     fn reset(&mut self) {
-        self.slots = [Blowdown::default(); 4];
+        self.slots = [Pop::default(); 4];
         self.next = 0;
     }
 }
@@ -2040,7 +2041,7 @@ pub struct EngineSynth {
     /// One backfire pool per bank. A backfire is unburnt fuel lighting off in
     /// the pipework, so it is a bank event and fires into the collector rather
     /// than down any one cylinder's primary.
-    backfire_pulses: Vec<PulsePool>,
+    backfire_pulses: Vec<PopPool>,
     /// Excitation presented to each bank's collector this sample.
     bank_excitations: Vec<f32>,
     /// Pressure radiated from each bank's mouth this sample.
@@ -2138,7 +2139,7 @@ impl EngineSynth {
             network,
             cycle: CyclePlayer::new(fs),
             excitations: vec![0.0; n_cyl],
-            backfire_pulses: vec![PulsePool::default(); config.bank_count],
+            backfire_pulses: vec![PopPool::default(); config.bank_count],
             bank_excitations: vec![0.0; config.bank_count],
             radiated: vec![0.0; config.bank_count],
             intake: IntakeVoice::new(fs),
