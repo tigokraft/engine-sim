@@ -1258,8 +1258,8 @@ impl IntakeVoice {
     /// One sample, at the instantaneous induction flow the cylinders are drawing.
     #[inline(always)]
     fn process(&mut self, noise: &mut Noise, mass_flow: f32) -> f32 {
-        // Radiated power grows faster than flow does; the 3/2 exponent keeps
-        // idle from being buried while still opening up under load.
+        // Orifice noise is dipole: acoustic sound power scales as u^6, so
+        // acoustic pressure amplitude scales as u^3.
         let flow = (mass_flow / REFERENCE_INTAKE_FLOW).clamp(0.0, 1.6);
         let g = (flow * flow.sqrt() * self.throttle_gain).min(1.5);
         if g < 1e-6 {
