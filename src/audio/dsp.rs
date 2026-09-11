@@ -91,7 +91,7 @@ use crate::audio::filters::{
 };
 use crate::audio::intake_voice::IntakeNetwork;
 use crate::audio::structure::{combustion_drive, StructuralPath, StructuralSpec};
-use crate::audio::waveguide::ExhaustNetwork;
+use crate::audio::waveguide::{ExhaustNetwork, ExhaustTemperatures};
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
 
 pub use crate::physics::engine_block::CYCLE_TABLE;
@@ -193,8 +193,23 @@ pub struct EngineSnapshot {
     pub rpm: f32,
     /// Per-cylinder `P_cylinder(theta_EVO) - P_exhaust_manifold(bank)` [Pa].
     pub blowdown_delta: [f32; MAX_CYLINDERS],
-    /// Bulk exhaust runner gas temperature [K].
+    /// Exhaust gas temperature at the port, before any pipe has cooled it [K].
+    ///
+    /// The hottest station in the system and the head of the gradient; what the
+    /// individual pipe sections are at is [`Self::primary_temperature`],
+    /// [`Self::collector_temperature`] and [`Self::tailpipe_temperature`].
     pub exhaust_temperature: f32,
+    /// Gas temperature in each cylinder's primary runner [K], in cylinder order.
+    ///
+    /// Every resonance a pipe has is `c / 4L` with `c = sqrt(gamma R T)`, so
+    /// this is what decides where the exhaust note sits — and it is a state,
+    /// integrated from the heat the runner wall has taken, not a constant. A
+    /// cold header is the better part of an octave below a hot one.
+    pub primary_temperature: [f32; MAX_CYLINDERS],
+    /// Gas temperature arriving at the collector and the silencers [K].
+    pub collector_temperature: f32,
+    /// Gas temperature in the tailpipe [K].
+    pub tailpipe_temperature: f32,
     /// Ratio of specific heats of the exhaust gas [-].
     pub exhaust_gamma: f32,
     /// Specific gas constant of the exhaust gas [J/(kg K)].
@@ -271,6 +286,9 @@ impl Default for EngineSnapshot {
             rpm: 0.0,
             blowdown_delta: [0.0; MAX_CYLINDERS],
             exhaust_temperature: 300.0,
+            primary_temperature: [300.0; MAX_CYLINDERS],
+            collector_temperature: 300.0,
+            tailpipe_temperature: 300.0,
             exhaust_gamma: 1.33,
             exhaust_gas_constant: 287.0,
             intake_mass_flow: 0.0,
@@ -295,6 +313,19 @@ impl Default for EngineSnapshot {
 }
 
 impl EngineSnapshot {
+    /// Puts every exhaust station at one temperature.
+    ///
+    /// For callers with no thermal model behind them — a test rig, or a
+    /// snapshot assembled by hand. The physics path fills the stations
+    /// individually, because a real exhaust has a gradient down it.
+    pub fn with_uniform_exhaust_temperature(mut self, temperature: f32) -> Self {
+        self.exhaust_temperature = temperature;
+        self.primary_temperature = [temperature; MAX_CYLINDERS];
+        self.collector_temperature = temperature;
+        self.tailpipe_temperature = temperature;
+        self
+    }
+
     /// Replaces any non-finite field with a safe value.
     ///
     /// The physics has a NaN watchdog, but it runs *after* a macro step, so a
@@ -320,6 +351,14 @@ impl EngineSnapshot {
             *p = p.clamp(0.0, 5.0e6);
         }
         guard!(exhaust_temperature, 200.0, 2_500.0);
+        for t in self.primary_temperature.iter_mut() {
+            if !t.is_finite() {
+                *t = fallback.exhaust_temperature;
+            }
+            *t = t.clamp(200.0, 2_500.0);
+        }
+        guard!(collector_temperature, 200.0, 2_500.0);
+        guard!(tailpipe_temperature, 200.0, 2_500.0);
         guard!(exhaust_gamma, 1.05, 1.70);
         guard!(exhaust_gas_constant, 150.0, 600.0);
         guard!(intake_mass_flow, 0.0, 50.0);
@@ -2104,6 +2143,19 @@ pub struct EngineSynth {
 
     // Control-rate parameters: advanced in blocks, read when retuning filters.
     exhaust_temperature: Smoothed,
+    /// Gas temperature in each primary, glided; parallel to `config.cylinders`.
+    ///
+    /// Allocated once, like every other per-cylinder vector here. A warm-up
+    /// moves these over minutes, but a throttle transient moves them in a
+    /// breath, and a delay line whose length steps rather than glides clicks.
+    primary_temperature: Vec<Smoothed>,
+    collector_temperature: Smoothed,
+    tailpipe_temperature: Smoothed,
+    /// Scratch the control path fills before handing it to the network.
+    ///
+    /// Held rather than built per call: it is one `MAX_CYLINDERS` array and the
+    /// callback may not allocate.
+    stations: ExhaustTemperatures,
     exhaust_gamma: Smoothed,
     exhaust_gas_constant: Smoothed,
     intake_flow: Smoothed,
@@ -2179,6 +2231,15 @@ impl EngineSynth {
         let blowdown_pa = (0..config.cylinders.len())
             .map(|_| Smoothed::new(0.0, fs, 0.005))
             .collect();
+        let primary_temperature = (0..n_cyl)
+            .map(|i| {
+                Smoothed::new(
+                    snapshot.primary_temperature[i.min(MAX_CYLINDERS - 1)],
+                    fs,
+                    0.080,
+                )
+            })
+            .collect();
 
         let mut synth = Self {
             banks,
@@ -2201,6 +2262,10 @@ impl EngineSynth {
             crank_omega_delta: 0.0,
             control_countdown: 0,
             exhaust_temperature: Smoothed::new(snapshot.exhaust_temperature, fs, 0.080),
+            primary_temperature,
+            collector_temperature: Smoothed::new(snapshot.collector_temperature, fs, 0.080),
+            tailpipe_temperature: Smoothed::new(snapshot.tailpipe_temperature, fs, 0.080),
+            stations: ExhaustTemperatures::uniform(snapshot.collector_temperature),
             exhaust_gamma: Smoothed::new(snapshot.exhaust_gamma, fs, 0.080),
             exhaust_gas_constant: Smoothed::new(snapshot.exhaust_gas_constant, fs, 0.080),
             intake_flow: Smoothed::new(0.0, fs, 0.020),
@@ -2299,6 +2364,13 @@ impl EngineSynth {
         }
         self.exhaust_temperature
             .set_target(snapshot.exhaust_temperature);
+        for (i, smoother) in self.primary_temperature.iter_mut().enumerate() {
+            smoother.set_target(snapshot.primary_temperature[i.min(MAX_CYLINDERS - 1)]);
+        }
+        self.collector_temperature
+            .set_target(snapshot.collector_temperature);
+        self.tailpipe_temperature
+            .set_target(snapshot.tailpipe_temperature);
         self.exhaust_gamma.set_target(snapshot.exhaust_gamma);
         self.exhaust_gas_constant
             .set_target(snapshot.exhaust_gas_constant);
@@ -2415,7 +2487,12 @@ impl EngineSynth {
         let cycle_hz = self.cycle_hz.value();
         let rpm = cycle_hz * 120.0;
 
-        self.network.tune(gamma, gas_constant, temperature);
+        for (i, smoother) in self.primary_temperature.iter_mut().enumerate() {
+            self.stations.primaries[i.min(MAX_CYLINDERS - 1)] = smoother.advance(block);
+        }
+        self.stations.collector = self.collector_temperature.advance(block);
+        self.stations.tailpipe = self.tailpipe_temperature.advance(block);
+        self.network.tune(gamma, gas_constant, &self.stations);
         // The Transit-Time Decision Rule, applied where the reflection it is
         // talking about actually happens: the closed valve at the head of each
         // primary. Every cylinder has its own primary now, so each one gets the
@@ -2826,6 +2903,9 @@ mod tests {
             rpm: 3_000.0,
             blowdown_delta: [4.0e5; MAX_CYLINDERS],
             exhaust_temperature: 950.0,
+            primary_temperature: [950.0; MAX_CYLINDERS],
+            collector_temperature: 950.0,
+            tailpipe_temperature: 950.0,
             exhaust_gamma: 1.33,
             exhaust_gas_constant: 287.0,
             intake_mass_flow: 0.20,
@@ -3014,13 +3094,12 @@ mod tests {
     #[test]
     fn hotter_exhaust_raises_every_resonance_by_sqrt_of_the_ratio() {
         let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
-        let mut snapshot = loaded_snapshot();
-        snapshot.exhaust_temperature = 400.0;
+        let snapshot = loaded_snapshot().with_uniform_exhaust_temperature(400.0);
         synth.set_snapshot(&snapshot);
         render(&mut synth, 24_000);
         let cold_delay = synth.network.primary_delay_samples(0);
 
-        snapshot.exhaust_temperature = 1_200.0;
+        let snapshot = snapshot.with_uniform_exhaust_temperature(1_200.0);
         synth.set_snapshot(&snapshot);
         render(&mut synth, 48_000);
         let hot_delay = synth.network.primary_delay_samples(0);
@@ -3283,10 +3362,10 @@ mod tests {
         // not allowed to do.
         assert!(!std::mem::needs_drop::<EngineSnapshot>());
 
-        // Three cycle tables, the per-cylinder blowdown and intake flow arrays,
-        // sixteen scalars and one padded bool. Every byte accounted for is a byte
-        // that is not a pointer.
-        let expected = 3 * CYCLE_TABLE * 4 + 2 * MAX_CYLINDERS * 4 + 16 * 4 + 4;
+        // Three cycle tables, the per-cylinder blowdown, intake flow and primary
+        // temperature arrays, eighteen scalars and one padded bool. Every byte
+        // accounted for is a byte that is not a pointer.
+        let expected = 3 * CYCLE_TABLE * 4 + 3 * MAX_CYLINDERS * 4 + 18 * 4 + 4;
         assert_eq!(std::mem::size_of::<EngineSnapshot>(), expected);
     }
 
@@ -3297,6 +3376,9 @@ mod tests {
             rpm: f32::NAN,
             blowdown_delta: [f32::INFINITY; MAX_CYLINDERS],
             exhaust_temperature: f32::NAN,
+            primary_temperature: [f32::NAN; MAX_CYLINDERS],
+            collector_temperature: f32::INFINITY,
+            tailpipe_temperature: f32::NAN,
             exhaust_gamma: -1.0,
             exhaust_gas_constant: 0.0,
             intake_mass_flow: f32::NAN,
@@ -3474,7 +3556,6 @@ mod tests {
         EngineSnapshot {
             rpm: 800.0,
             blowdown_delta: [1.0e5; MAX_CYLINDERS],
-            exhaust_temperature: 700.0,
             intake_mass_flow: 0.025,
             throttle: 0.04,
             turbo_rpm: 0.0,
@@ -3483,6 +3564,7 @@ mod tests {
             indicated_torque: 30.0,
             ..loaded_snapshot()
         }
+        .with_uniform_exhaust_temperature(700.0)
     }
 
     /// Peak level inside each successive window of `window` frames.

@@ -1378,6 +1378,40 @@ impl BankCrossover {
 // Exhaust waveguide network
 // ---------------------------------------------------------------------------
 
+/// Gas temperature at each station of the exhaust, in flow order [K].
+///
+/// One temperature for the whole system would say a header and a tailpipe are
+/// the same thing acoustically, and they are not: gas leaves the port near
+/// 1200 K and reaches the tailpipe two or three hundred Kelvin down, which is a
+/// sixth off the speed of sound and therefore a sixth off every resonance the
+/// back half of the system has. The gradient is [`crate::physics::thermal`]'s,
+/// section by section.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExhaustTemperatures {
+    /// Gas in each cylinder's primary runner [K], in cylinder order.
+    pub primaries: [f32; crate::audio::dsp::MAX_CYLINDERS],
+    /// Gas at the collector, the crossover and the silencers [K].
+    pub collector: f32,
+    /// Gas in the tailpipe, and therefore at the mouth [K].
+    pub tailpipe: f32,
+}
+
+impl ExhaustTemperatures {
+    /// Every station at one temperature, for a system with no gradient yet.
+    pub fn uniform(temperature: f32) -> Self {
+        Self {
+            primaries: [temperature; crate::audio::dsp::MAX_CYLINDERS],
+            collector: temperature,
+            tailpipe: temperature,
+        }
+    }
+
+    /// The temperature of cylinder `i`'s primary [K].
+    pub fn primary(&self, cylinder: usize) -> f32 {
+        self.primaries[cylinder.min(self.primaries.len() - 1)]
+    }
+}
+
 /// Complete physical 1D exhaust waveguide network.
 ///
 /// Instantiated from an [`ExhaustSystem`] geometry description:
@@ -1444,8 +1478,13 @@ impl ExhaustNetwork {
 
         let gamma = snapshot.exhaust_gamma;
         let r = snapshot.exhaust_gas_constant;
-        let temp = snapshot.exhaust_temperature;
-        let c = speed_of_sound(gamma, r, temp);
+        let stations = ExhaustTemperatures {
+            primaries: snapshot.primary_temperature,
+            collector: snapshot.collector_temperature,
+            tailpipe: snapshot.tailpipe_temperature,
+        };
+        let temp = stations.collector;
+        let c = speed_of_sound(gamma, r, stations.tailpipe);
 
         // Map cylinders to banks
         let mut bank_cylinders = vec![Vec::new(); n_banks];
@@ -1463,7 +1502,14 @@ impl ExhaustNetwork {
             } else {
                 crate::physics::plumbing::PipeSection::from_diameter(0.45, 0.040, 850.0)
             };
-            let prim = WaveguidePipe::new(spec.length, spec.area, sample_rate, gamma, r, temp);
+            let prim = WaveguidePipe::new(
+                spec.length,
+                spec.area,
+                sample_rate,
+                gamma,
+                r,
+                stations.primary(i),
+            );
             let valve = ValveTermination::new(spec.area);
             primaries.push(prim);
             valves.push(valve);
@@ -1561,12 +1607,12 @@ impl ExhaustNetwork {
                 sample_rate,
                 gamma,
                 r,
-                temp,
+                stations.tailpipe,
             );
             // The mouth's reflection filter already holds part of the round
             // trip; leave it in the pipe as well and the tailpipe plays flat.
             tailpipe.set_boundary_phase_delay(mouth.phase_delay_samples());
-            tailpipe.tune(gamma, r, temp);
+            tailpipe.tune(gamma, r, stations.tailpipe);
             tailpipes.push(tailpipe);
             mouths.push(mouth);
         }
@@ -1611,28 +1657,31 @@ impl ExhaustNetwork {
     }
 
     /// Retunes propagation delay and acoustic filters across the whole network.
-    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
-        let c = speed_of_sound(gamma, gas_constant, temperature);
-        for p in &mut self.primaries {
-            p.tune(gamma, gas_constant, temperature);
+    ///
+    /// Each station is retuned against its own gas, so the pitch of a primary
+    /// and the pitch of the tailpipe move independently as the exhaust warms.
+    pub fn tune(&mut self, gamma: f32, gas_constant: f32, stations: &ExhaustTemperatures) {
+        for (i, p) in self.primaries.iter_mut().enumerate() {
+            p.tune(gamma, gas_constant, stations.primary(i));
         }
         for coll in &mut self.collectors {
-            coll.tune(gamma, gas_constant, temperature);
+            coll.tune(gamma, gas_constant, stations.collector);
         }
-        self.crossover.tune(gamma, gas_constant, temperature);
+        self.crossover.tune(gamma, gas_constant, stations.collector);
         for p in &mut self.pre_cross_pipes {
-            p.tune(gamma, gas_constant, temperature);
+            p.tune(gamma, gas_constant, stations.collector);
         }
         for chain in &mut self.silencers {
             for element in chain {
-                element.tune(gamma, gas_constant, temperature);
+                element.tune(gamma, gas_constant, stations.collector);
             }
         }
+        let c_tail = speed_of_sound(gamma, gas_constant, stations.tailpipe);
         for tp in &mut self.tailpipes {
-            tp.tune(gamma, gas_constant, temperature);
+            tp.tune(gamma, gas_constant, stations.tailpipe);
         }
         for m in &mut self.mouths {
-            m.tune(c);
+            m.tune(c_tail);
         }
     }
 

@@ -528,6 +528,15 @@ impl SnapshotSource {
             .ring
             .downsample_from(self.evo_angle, |s| s.intake_flow.max(0.0));
 
+        // The exhaust section by section. Each primary is at the temperature its
+        // own wall has let its gas reach, so an engine whose header is still
+        // cold resonates low and climbs as it warms — and the collector and the
+        // tailpipe, further down the gradient, are cooler again.
+        let mut primary_temperature = [0.0f32; MAX_CYLINDERS];
+        for (i, slot) in primary_temperature.iter_mut().enumerate() {
+            *slot = block.thermal.exhaust.primary_gas(i) as f32;
+        }
+
         let n_cylinders = block.firing.len().max(1) as f64;
         let cycle_work = block.ring.indicated_work(block.crankcase_pressure) * n_cylinders;
         let mean_indicated_torque = cycle_work / crate::physics::cylinder::CYCLE_ANGLE;
@@ -536,6 +545,9 @@ impl SnapshotSource {
             rpm: rpm as f32,
             blowdown_delta,
             exhaust_temperature: manifold_temperature as f32,
+            primary_temperature,
+            collector_temperature: block.thermal.exhaust.collector_gas() as f32,
+            tailpipe_temperature: block.thermal.exhaust.tailpipe_gas() as f32,
             exhaust_gamma: gamma as f32,
             exhaust_gas_constant: gas_constant as f32,
             intake_mass_flow: intake_mass_flow as f32,
