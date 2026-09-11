@@ -748,7 +748,12 @@ impl CylinderModel {
         } else {
             0.0
         };
-        let richness_efficiency = (self.air_fuel_ratio / STOICH_AFR).min(1.0);
+        let phi = STOICH_AFR / self.air_fuel_ratio.max(1e-3);
+        let richness_efficiency = if phi > 1.0 {
+            (1.0 / phi) * (1.0 - 0.15 * (phi - 1.0)).max(0.7)
+        } else {
+            1.0
+        };
         let heat_release = st.latch.fuel_mass
             * self.fuel_lhv
             * (self.wiebe.combustion_efficiency * richness_efficiency)
@@ -845,7 +850,12 @@ impl CylinderModel {
         } else {
             0.0
         };
-        let richness_efficiency = (self.air_fuel_ratio / STOICH_AFR).min(1.0);
+        let phi = STOICH_AFR / self.air_fuel_ratio.max(1e-3);
+        let richness_efficiency = if phi > 1.0 {
+            (1.0 / phi) * (1.0 - 0.15 * (phi - 1.0)).max(0.7)
+        } else {
+            1.0
+        };
         let heat_release = st.latch.fuel_mass
             * self.fuel_lhv
             * (self.wiebe.combustion_efficiency * richness_efficiency)

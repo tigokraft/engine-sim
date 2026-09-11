@@ -1328,6 +1328,11 @@ impl EngineBlock {
         let dfco = self.ecu.update_dfco(self.throttle, rpm);
         self.model.fuel_cut = dfco || limiter == LimiterCut::Fuel;
         self.model.wiebe.spark_angle = self.ecu.spark_angle(load, rpm);
+        self.model.wiebe.duration = self.ecu.wiebe_duration(afr);
+        for bank in &mut self.exhaust_banks {
+            bank.plenum.gamma = self.model.gas.gamma_burned;
+            bank.plenum.gas_constant = self.model.gas.r_burned;
+        }
         let ports = self.port_conditions();
 
         // Destructured so the observer can borrow the ring while the solver

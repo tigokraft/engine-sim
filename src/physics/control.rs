@@ -273,6 +273,12 @@ impl EngineControlUnit {
             .map_or(1.0, |h| h.combustion_factor())
     }
 
+    /// Calibrated Wiebe duration adjusted for flame speed at the given AFR [rad].
+    pub fn wiebe_duration(&self, afr: f64) -> f64 {
+        let speed_factor = afr_flame_speed_factor(afr);
+        self.base_wiebe_duration / speed_factor
+    }
+
     /// Evaluates the rev limiter intervention for the current speed.
     ///
     /// - `HardCut`: 100% intervention when RPM >= redline.

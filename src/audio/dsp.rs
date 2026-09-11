@@ -3263,6 +3263,64 @@ mod tests {
     }
 
     #[test]
+    fn enrichment_lowers_the_pipe_resonances() {
+        use crate::audio::{EngineControls, SnapshotSource};
+        use crate::environment::Environment;
+        use crate::physics::engine_block::EngineBlock;
+
+        let mut stoich_block = EngineBlock::cross_plane_v8(Environment::default());
+        let mut rich_block = EngineBlock::cross_plane_v8(Environment::default());
+
+        stoich_block.ecu.wot_afr = 14.7;
+        stoich_block.ecu.stoich_afr = 14.7;
+        stoich_block.ecu.idle_afr = 14.7;
+        stoich_block.ecu.accel_enrichment_gain = 0.0;
+
+        rich_block.ecu.wot_afr = 11.5;
+        rich_block.ecu.stoich_afr = 11.5;
+        rich_block.ecu.idle_afr = 11.5;
+        rich_block.ecu.accel_enrichment_gain = 0.0;
+
+        let dt = 1.0 / 120.0;
+        let rpm = 4_000.0;
+        let mut stoich_source = SnapshotSource::new(&stoich_block);
+        let mut rich_source = SnapshotSource::new(&rich_block);
+
+        let mut stoich_snap = EngineSnapshot::default();
+        let mut rich_snap = EngineSnapshot::default();
+
+        for _ in 0..(5.0 / dt) as usize {
+            stoich_block.update(dt, rpm);
+            rich_block.update(dt, rpm);
+            stoich_snap = stoich_source.sample(&stoich_block, rpm, dt, EngineControls::wide_open());
+            rich_snap = rich_source.sample(&rich_block, rpm, dt, EngineControls::wide_open());
+        }
+
+        assert!(
+            rich_snap.exhaust_temperature < stoich_snap.exhaust_temperature,
+            "enrichment must lower EGT: rich {:.1} K vs stoich {:.1} K",
+            rich_snap.exhaust_temperature,
+            stoich_snap.exhaust_temperature
+        );
+
+        let (stoich_prim, stoich_coll, stoich_tail) = settled_delays(&stoich_snap);
+        let (rich_prim, rich_coll, rich_tail) = settled_delays(&rich_snap);
+
+        assert!(
+            rich_prim > stoich_prim,
+            "primary resonance must be lowered by enrichment: delay {rich_prim:.2} > {stoich_prim:.2}"
+        );
+        assert!(
+            rich_coll > stoich_coll,
+            "collector resonance must be lowered by enrichment: delay {rich_coll:.2} > {stoich_coll:.2}"
+        );
+        assert!(
+            rich_tail > stoich_tail,
+            "tailpipe resonance must be lowered by enrichment: delay {rich_tail:.2} > {stoich_tail:.2}"
+        );
+    }
+
+    #[test]
     fn hotter_exhaust_raises_every_resonance_by_sqrt_of_the_ratio() {
         let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
         let snapshot = loaded_snapshot().with_uniform_exhaust_temperature(400.0);
