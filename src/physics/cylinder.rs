@@ -171,6 +171,23 @@ impl Default for GasProperties {
 }
 
 impl GasProperties {
+    /// Adjusts burned gas properties for air-fuel ratio.
+    ///
+    /// Rich mixtures produce more CO, H2, and unburnt hydrocarbons with lower
+    /// gamma_burned. Lean mixtures with excess air raise gamma_burned towards air.
+    pub fn for_afr(afr: f64) -> Self {
+        let stoich = 14.7;
+        let phi = stoich / afr.clamp(8.0, 25.0);
+        let gamma_burned = (1.26 - 0.06 * (phi - 1.0)).clamp(1.20, 1.32);
+        let r_burned = (291.0 + 8.0 * (phi - 1.0)).clamp(280.0, 310.0);
+        Self {
+            r_unburned: 287.0,
+            r_burned,
+            gamma_unburned: 1.35,
+            gamma_burned,
+        }
+    }
+
     /// Specific gas constant at a burned mass fraction, linearly blended.
     pub fn r_specific(&self, burned_fraction: f64) -> f64 {
         let x = burned_fraction.clamp(0.0, 1.0);

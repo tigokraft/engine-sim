@@ -148,6 +148,9 @@ pub struct EngineControlUnit {
     /// Maximum knock retard clamp [deg].
     pub max_knock_retard: f64,
 
+    /// Base Wiebe burn duration [rad].
+    pub base_wiebe_duration: f64,
+
     // --- Limiter calibration ---
     /// Rev limiter speed ceiling [rev/min].
     pub redline: f64,
@@ -169,6 +172,17 @@ impl Default for EngineControlUnit {
     fn default() -> Self {
         Self::new(6_500.0)
     }
+}
+
+/// Flame speed multiplier relative to stoichiometric [-].
+///
+/// Gasoline flame speed peaks slightly rich at equivalence ratio phi ≈ 1.1
+/// (AFR ≈ 13.3:1). At lean mixtures (phi < 1.0) or very rich mixtures (phi > 1.3),
+/// flame speed falls and burn duration lengthens.
+pub fn afr_flame_speed_factor(afr: f64) -> f64 {
+    let phi = STOICH_AFR / afr.clamp(8.0, 25.0);
+    // Normalized so phi = 1.0 (stoichiometric) gives 1.0, peaks near phi = 1.1
+    (1.0 + 0.5 * (phi - 1.0) - 2.5 * (phi - 1.1).powi(2) + 0.025).clamp(0.4, 1.15)
 }
 
 impl EngineControlUnit {
@@ -197,6 +211,8 @@ impl EngineControlUnit {
             knock_decay: 1.0,
             max_knock_retard: 15.0,
 
+            base_wiebe_duration: 1.0471975511965976, // 60 deg
+
             redline,
             limiter_mode: LimiterMode::HardCut,
             limiter_cut_type: LimiterCut::Spark,
@@ -205,6 +221,48 @@ impl EngineControlUnit {
 
             cylinder_health: [CylinderHealth::healthy(); MAX_CYLINDERS],
         }
+    }
+
+    /// Evaluates target AFR from load and speed, applying WOT enrichment,
+    /// lean cruise, and transient acceleration enrichment.
+    pub fn schedule_afr(&mut self, load: f64, rpm: f64, throttle: f64, dt: f64) -> f64 {
+        if dt > 1e-6 {
+            let throttle_rate = (throttle - self.prev_throttle) / dt;
+            if throttle_rate > 0.2 {
+                self.accel_enrichment = (self.accel_enrichment
+                    + self.accel_enrichment_gain * throttle_rate * dt)
+                    .min(2.5);
+            } else {
+                let decay = (-dt / self.accel_enrichment_decay.max(1e-3)).exp();
+                self.accel_enrichment *= decay;
+            }
+        }
+        self.prev_throttle = throttle;
+
+        let target = self.target_afr(load, rpm, throttle);
+        (target - self.accel_enrichment).clamp(10.0, 20.0)
+    }
+
+    /// Base steady-state target AFR against load, speed and throttle.
+    pub fn target_afr(&self, load: f64, rpm: f64, throttle: f64) -> f64 {
+        // High load or wide throttle: WOT enrichment for peak power and charge cooling
+        if throttle >= 0.70 || load >= 0.85 {
+            let t_blend = ((throttle - 0.70) / 0.25).clamp(0.0, 1.0);
+            let l_blend = ((load - 0.70) / 0.25).clamp(0.0, 1.0);
+            let wot_blend = t_blend.max(l_blend);
+            return self.stoich_afr + wot_blend * (self.wot_afr - self.stoich_afr);
+        }
+
+        // Moderate speed and light-to-medium load: lean cruise (only at part throttle)
+        if throttle < 0.50 && (1_500.0..=3_800.0).contains(&rpm) && (0.25..=0.65).contains(&load) {
+            let rpm_factor = (1.0 - ((rpm - 2_650.0) / 1_150.0).abs()).clamp(0.0, 1.0);
+            let load_factor = (1.0 - ((load - 0.45) / 0.20).abs()).clamp(0.0, 1.0);
+            let cruise_blend = rpm_factor * load_factor;
+            return self.stoich_afr + cruise_blend * (self.cruise_afr - self.stoich_afr);
+        }
+
+        // Idle or light low-speed load: stoichiometric
+        self.idle_afr
     }
 
     /// Sets the health of a specific cylinder.
@@ -253,5 +311,66 @@ mod tests {
         assert!(ecu.cylinder_health(3).spark_ok);
         assert!(!ecu.cylinder_health(3).fuel_ok);
         assert_eq!(ecu.cylinder_health(3).combustion_factor(), 0.0);
+    }
+
+    #[test]
+    fn afr_enriches_at_wot_and_leans_at_cruise() {
+        let mut ecu = EngineControlUnit::default();
+
+        // Idle: near stoichiometric
+        let afr_idle = ecu.schedule_afr(0.15, 800.0, 0.0, 0.01);
+        assert!((afr_idle - 14.7).abs() < 0.1);
+
+        // Lean cruise: 2500 rpm, 0.45 load
+        let afr_cruise = ecu.schedule_afr(0.45, 2500.0, 0.25, 0.01);
+        assert!(afr_cruise > 15.0, "cruise AFR should be lean: {afr_cruise}");
+
+        // Wide-open throttle: rich near 12.5 (steady state)
+        ecu.accel_enrichment = 0.0;
+        ecu.prev_throttle = 1.0;
+        let afr_wot = ecu.schedule_afr(1.0, 5000.0, 1.0, 0.01);
+        assert!(
+            (afr_wot - 12.5).abs() < 0.2,
+            "WOT AFR should be near 12.5: {afr_wot}"
+        );
+    }
+
+    #[test]
+    fn accel_enrichment_temporarily_pulls_mixture_rich() {
+        let mut ecu = EngineControlUnit::default();
+        let steady_afr = ecu.schedule_afr(0.4, 2500.0, 0.2, 0.01);
+
+        // Sudden throttle snap: 0.2 -> 0.8 in 20 ms
+        let snap_afr = ecu.schedule_afr(0.6, 2500.0, 0.8, 0.02);
+        assert!(
+            snap_afr < steady_afr - 0.5,
+            "throttle snap should enrich mixture: steady={steady_afr}, snap={snap_afr}"
+        );
+
+        // After some time, enrichment decays back
+        for _ in 0..50 {
+            ecu.schedule_afr(0.6, 2500.0, 0.8, 0.02);
+        }
+        let settled_afr = ecu.schedule_afr(0.6, 2500.0, 0.8, 0.02);
+        assert!(
+            settled_afr > snap_afr + 0.5,
+            "enrichment must decay: settled={settled_afr}, snap={snap_afr}"
+        );
+    }
+
+    #[test]
+    fn flame_speed_peaks_slightly_rich() {
+        let speed_stoich = afr_flame_speed_factor(14.7);
+        let speed_rich = afr_flame_speed_factor(13.2); // phi ≈ 1.11
+        let speed_lean = afr_flame_speed_factor(16.0);
+
+        assert!(
+            speed_rich > speed_stoich,
+            "flame speed should peak slightly rich: rich={speed_rich} > stoich={speed_stoich}"
+        );
+        assert!(
+            speed_lean < speed_stoich,
+            "flame speed should drop when lean: lean={speed_lean} < stoich={speed_stoich}"
+        );
     }
 }

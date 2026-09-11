@@ -1108,6 +1108,8 @@ pub struct EngineBlock {
     pub block_mass: f64,
     /// Block temperature, and the chamber wall the solver runs against.
     pub thermal: EngineThermal,
+    /// Driver throttle demand, `0..=1` [-].
+    pub throttle: f64,
     /// Engine control unit: fuelling, timing, knock retard, limiters, and cylinder health.
     pub ecu: EngineControlUnit,
 }
@@ -1151,7 +1153,10 @@ impl EngineBlock {
         let master = ThermoState::at_ambient(&model.geometry, &model.gas, &environment);
 
         let thermal = EngineThermal::soaked(180.0, &exhaust, environment.temperature);
-        let ecu = EngineControlUnit::default();
+        let ecu = EngineControlUnit {
+            base_wiebe_duration: model.wiebe.duration,
+            ..EngineControlUnit::default()
+        };
 
         Self {
             model,
@@ -1170,6 +1175,7 @@ impl EngineBlock {
             intake_system,
             block_mass: 180.0,
             thermal,
+            throttle: 1.0,
             ecu,
         }
     }
@@ -1291,6 +1297,10 @@ impl EngineBlock {
     /// torque over the cylinders at their own phases.
     pub fn update(&mut self, frame_dt: f64, rpm: f64) -> BlockOutput {
         self.omega = rpm * 2.0 * PI / 60.0;
+        let load = (self.intake.pressure() / self.environment.pressure.max(1.0)).clamp(0.0, 1.5);
+        let afr = self.ecu.schedule_afr(load, rpm, self.throttle, frame_dt);
+        self.model.air_fuel_ratio = afr;
+        self.model.gas = GasProperties::for_afr(afr);
         let ports = self.port_conditions();
 
         // Destructured so the observer can borrow the ring while the solver

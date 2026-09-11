@@ -745,8 +745,11 @@ impl CylinderModel {
         } else {
             0.0
         };
-        let heat_release =
-            st.latch.fuel_mass * self.fuel_lhv * self.wiebe.combustion_efficiency * dxb_dt;
+        let richness_efficiency = (self.air_fuel_ratio / STOICH_AFR).min(1.0);
+        let heat_release = st.latch.fuel_mass
+            * self.fuel_lhv
+            * (self.wiebe.combustion_efficiency * richness_efficiency)
+            * dxb_dt;
 
         let motored = st.latch.motored_pressure(volume);
         let gas_velocity = self.woschni_velocity(theta, pressure, motored, omega, st);
@@ -839,8 +842,11 @@ impl CylinderModel {
         } else {
             0.0
         };
-        let heat_release =
-            st.latch.fuel_mass * self.fuel_lhv * self.wiebe.combustion_efficiency * dxb_chem;
+        let richness_efficiency = (self.air_fuel_ratio / STOICH_AFR).min(1.0);
+        let heat_release = st.latch.fuel_mass
+            * self.fuel_lhv
+            * (self.wiebe.combustion_efficiency * richness_efficiency)
+            * dxb_chem;
 
         // --- wall loss -------------------------------------------------------
         let motored = st.latch.motored_pressure(volume);
