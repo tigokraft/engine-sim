@@ -1037,7 +1037,15 @@ fn markdown(all: &[Calibrated]) -> String {
             ),
             c.worst_null.map_or_else(
                 || "—".into(),
-                |(order, db)| format!("{db:+.1} dB on {}", trim(order))
+                |(order, db)| format!(
+                    "{db:+.1} dB on {}{}",
+                    trim(order),
+                    if c.comb_is_unambiguous() {
+                        ""
+                    } else {
+                        ", not enforced"
+                    }
+                )
             ),
             c.tilt
                 .map_or_else(|| "—".into(), |t| format!("{t:+.1} dB/oct")),
@@ -1071,9 +1079,14 @@ fn markdown(all: &[Calibrated]) -> String {
     let _ = writeln!(
         out,
         "**Resonance placement** is compared against the analytic modes of the \
-         declared geometry in the gas the solver actually delivers, sampled from \
-         a block run to its thermal plateau at mid-range, wide open. Tolerance \
-         {PLACEMENT_TOLERANCE_PCT:.0} %; a peak further than \
+         declared geometry, in the gas this render actually had: the block is \
+         primed as the render primes it and stepped along the same sweep to its \
+         midpoint, because the exhaust warms on a time constant of tens of \
+         seconds and a sweep lasts eight. A prediction taken off a block at its \
+         thermal plateau would sit a tenth high on every mode for no reason but \
+         that. Tolerance {PLACEMENT_TOLERANCE_PCT:.0} %, and each measured peak \
+         is given to at most one prediction — the nearest — so a sparse \
+         spectrum cannot report one peak as three modes. A peak further than \
          {PLACEMENT_WINDOW_PCT:.0} % from a prediction is reported as *not \
          found* rather than as that mode in the wrong place.\n"
     );
