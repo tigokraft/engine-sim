@@ -328,6 +328,49 @@ pub fn calibration_sweep(preset: &EnginePreset) -> RenderScript {
     )
 }
 
+/// A script that follows a speed curve measured outside the simulator.
+///
+/// What a reference recording needs: the engine has to be put through the
+/// speeds a tachometer says it went through, and a real pull is not a straight
+/// line — it holds an idle, climbs, bounces off a limiter and falls away. The
+/// curve is cut into `steps` straight legs, which is what it already is between
+/// its own samples, so nothing is interpolated twice.
+///
+/// The throttle is *inferred*, because a recording does not carry one: wide open
+/// where the engine is gaining speed, shut where it is losing it, and an idle
+/// where it is holding. From the outside that is what a pull, a lift and an idle
+/// look like. It is the one part of a reference render that is a guess rather
+/// than a measurement, and it is worth knowing which way it can bite: a
+/// recording of a car accelerating on part throttle will be rendered wide open,
+/// which puts more flow and a hotter pipe into the synth than the recording had.
+pub fn following(
+    name: &'static str,
+    note: &'static str,
+    rpm: &crate::analysis::orders::RpmCurve,
+    steps: usize,
+) -> RenderScript {
+    let steps = steps.max(1);
+    let seconds = rpm.seconds().max(f64::MIN_POSITIVE);
+    let leg = seconds / steps as f64;
+
+    // A rev a second is a hold, whatever the last decimal place says.
+    let deadband = leg;
+    let segments = (0..steps)
+        .map(|i| {
+            let (from, to) = (rpm.at(i as f64 * leg), rpm.at((i + 1) as f64 * leg));
+            let throttle = if to - from > deadband {
+                1.0
+            } else if from - to > deadband {
+                0.0
+            } else {
+                IDLE_THROTTLE
+            };
+            Segment::ramp(leg, (from, to), (throttle, throttle))
+        })
+        .collect();
+    RenderScript::new(name, note, segments)
+}
+
 /// Length of the calibration sweep [s].
 ///
 /// The same eight seconds [`sweep_up`] spends on its ramp, so a resonance read
