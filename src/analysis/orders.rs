@@ -1069,6 +1069,17 @@ mod tests {
             .collect()
     }
 
+    /// A fixed draw of white noise, so a test of it is the same every run.
+    fn noise(seconds: f64) -> Vec<f32> {
+        let mut state = 0x2545_F491u32;
+        (0..(seconds * RATE) as usize)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+            })
+            .collect()
+    }
+
     /// A tone that tracks `order` of an engine sweeping `from` to `to`.
     ///
     /// The phase is the running integral of the instantaneous frequency, which
@@ -1402,6 +1413,69 @@ mod tests {
             (found.hz - wanted).abs() < 0.25 * bin,
             "{wanted:.2} Hz came back as {:.2} Hz, and the bin is {bin:.2} Hz wide",
             found.hz
+        );
+    }
+
+    /// White noise has a flat floor, and a one-pole filter tilts it by the
+    /// 6 dB an octave a single pole is worth.
+    ///
+    /// The tilt is measured against a signal whose slope is known from theory
+    /// rather than from a golden file: above its corner a one-pole lowpass
+    /// falls as `1 / f`, which is -6.02 dB per octave, and the measurement has
+    /// to find that without being dragged around by the scatter left in the
+    /// average.
+    #[test]
+    fn the_tilt_reads_a_one_pole_slope_as_six_db_an_octave() {
+        let white = noise(4.0);
+        let flat = AverageSpectrum::of(&white, RATE)
+            .tilt_db_per_octave(200.0, 12_000.0)
+            .expect("no tilt from white noise");
+        assert!(
+            flat.abs() < 0.6,
+            "white noise tilted {flat:.2} dB per octave"
+        );
+
+        // A one-pole lowpass at 100 Hz, so the whole measured band is above its
+        // corner and on its asymptote.
+        let k = (-std::f64::consts::TAU * 100.0 / RATE).exp() as f32;
+        let mut y = 0.0f32;
+        let pink: Vec<f32> = white
+            .iter()
+            .map(|&x| {
+                y = (1.0 - k) * x + k * y;
+                y
+            })
+            .collect();
+        let tilted = AverageSpectrum::of(&pink, RATE)
+            .tilt_db_per_octave(200.0, 12_000.0)
+            .expect("no tilt from filtered noise");
+        assert!(
+            (tilted - (-6.02)).abs() < 0.6,
+            "a single pole read {tilted:.2} dB per octave, not -6.02"
+        );
+    }
+
+    /// A peak riding on the floor must not become the floor: the median over an
+    /// octave is there to ignore it, and a tone 40 dB up has to leave the
+    /// slope where it was.
+    #[test]
+    fn a_loud_tone_does_not_tilt_the_floor() {
+        let white = noise(4.0);
+        let bare = AverageSpectrum::of(&white, RATE)
+            .tilt_db_per_octave(200.0, 12_000.0)
+            .unwrap();
+
+        let with_tone: Vec<f32> = white
+            .iter()
+            .zip(tone(400.0, 0.5, 4.0))
+            .map(|(n, t)| n + t)
+            .collect();
+        let dragged = AverageSpectrum::of(&with_tone, RATE)
+            .tilt_db_per_octave(200.0, 12_000.0)
+            .unwrap();
+        assert!(
+            (dragged - bare).abs() < 0.3,
+            "one tone moved the floor from {bare:.2} to {dragged:.2} dB per octave"
         );
     }
 
