@@ -28,6 +28,10 @@
 //!
 //! Every profile is built from the preset's own idle and redline, so a V12 is
 //! swept over a V12's rev range rather than over a borrowed one.
+//!
+//! [`calibration_sweep`] is a seventh, kept out of that list on purpose: it is
+//! one unbroken pull with no hold at either end, which is what a resonance
+//! measurement needs and what a limiter measurement is not.
 
 use crate::audio::EngineControls;
 use crate::bench::EnginePreset;
@@ -293,6 +297,43 @@ pub fn limiter_bounce(preset: &EnginePreset) -> RenderScript {
         ],
     )
 }
+
+/// One unbroken pull from idle to the redline: the calibration sweep.
+///
+/// Deliberately not one of the six profiles above, and not part of
+/// [`catalogue`]. Those bracket their sweeps with a hold at one speed, which is
+/// what makes them good at exposing an idle or a limiter and bad at exposing a
+/// resonance: a held speed leaves its own order lines standing in a long-term
+/// average, at fixed frequencies, looking exactly like plumbing. Here every
+/// part of the render is sweeping, so anything that stands still in the average
+/// is a pipe.
+///
+/// Used by `examples/calibrate.rs` to compare the synth against a reference and
+/// by the timbre regression in [`crate::analysis::timbre`] to catch spectral
+/// drift, and it is the same sweep in both: a regression against a number
+/// recorded through a different pull would be a regression against the pull.
+///
+/// The throttle opens from a quarter to wide, which is what a pull *is*, and
+/// the speed is linear in time so the order tracker knows exactly how fast each
+/// order is moving through its analysis window.
+pub fn calibration_sweep(preset: &EnginePreset) -> RenderScript {
+    RenderScript::new(
+        "calibration_sweep",
+        "one unbroken pull, for order balance and resonance placement",
+        vec![Segment::ramp(
+            CALIBRATION_SECONDS,
+            (preset.idle, preset.redline),
+            (0.25, 1.0),
+        )],
+    )
+}
+
+/// Length of the calibration sweep [s].
+///
+/// The same eight seconds [`sweep_up`] spends on its ramp, so a resonance read
+/// off one is comparable with the same resonance read off the other, and long
+/// enough that the analysis gets thirty-odd frames to average.
+pub const CALIBRATION_SECONDS: f64 = 8.0;
 
 #[cfg(test)]
 mod tests {
