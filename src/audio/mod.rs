@@ -13,6 +13,7 @@
 //!   them.
 //! - [`radiation`] — what an open end does: reflect, lengthen, and radiate.
 //! - [`stream`] — the `cpal` output stream and the lock-free queue feeding it.
+//! - [`structure`] — the block as a radiating body, not as an EQ on the bus.
 //!
 //! # Wiring it up
 //!
@@ -58,6 +59,7 @@ pub mod filters;
 pub mod intake_voice;
 pub mod radiation;
 pub mod stream;
+pub mod structure;
 pub mod waveguide;
 
 pub use dsp::{
@@ -68,6 +70,7 @@ pub use filters::MufflerGeometry;
 pub use stream::{
     AudioScope, AudioSettings, AudioStats, EngineAudio, StreamInfo, PREFERRED_SAMPLE_RATE,
 };
+pub use structure::StructuralSpec;
 
 use crate::physics::cylinder::{wrap_cycle, CYCLE_ANGLE};
 use crate::physics::engine_block::EngineBlock;
@@ -568,6 +571,11 @@ impl SynthConfig {
     pub fn from_block(block: &EngineBlock, sample_rate: f32) -> Self {
         let evo = block.model.valves.exhaust.open_angle;
         let bank_count = block.firing.bank_count().max(1);
+        // A block is as long as its longest bank, whatever the other one does.
+        let cylinders_per_bank = (0..bank_count)
+            .map(|bank| block.firing.cylinders_on_bank(bank as u8).len())
+            .max()
+            .unwrap_or(1);
 
         let cylinders = block
             .firing
@@ -584,7 +592,11 @@ impl SynthConfig {
             bank_count,
             exhaust: block.exhaust.clone(),
             intake: block.intake_system.clone(),
-            block_mass: block.block_mass,
+            structure: StructuralSpec::new(
+                block.block_mass,
+                block.model.geometry.bore,
+                cylinders_per_bank,
+            ),
             ..Self::uniform(sample_rate, block.firing.len().max(1), bank_count)
         }
     }

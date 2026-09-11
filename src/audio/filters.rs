@@ -996,6 +996,11 @@ impl ExhaustRunner {
 // ---------------------------------------------------------------------------
 // Engine block resonance
 // ---------------------------------------------------------------------------
+//
+// The block's first mode, and nothing else. What is built on top of it — the
+// bending, pan and bore-wall families, and the three excitations that drive
+// them — lives in [`crate::audio::structure`], because a radiating body is not
+// a filter.
 
 /// Dressed block mass whose first rumble mode sits at [`BLOCK_REFERENCE_HZ`] [kg].
 ///
@@ -1011,12 +1016,6 @@ pub const BLOCK_MIN_HZ: f32 = 60.0;
 
 /// Highest block resonance the model will produce [Hz].
 pub const BLOCK_MAX_HZ: f32 = 120.0;
-
-/// Speed at or below which block rumble is at full level [rev/min].
-pub const BLOCK_RUMBLE_FLOOR_RPM: f32 = 700.0;
-
-/// Speed at which block rumble has tapered away entirely [rev/min].
-pub const BLOCK_RUMBLE_TAPER_RPM: f32 = 4_000.0;
 
 /// First structural mode of a block of the given dressed mass [Hz].
 ///
@@ -1036,103 +1035,6 @@ pub const BLOCK_RUMBLE_TAPER_RPM: f32 = 4_000.0;
 pub fn block_resonance_hz(dressed_mass: f32) -> f32 {
     let mass = dressed_mass.max(1.0);
     (BLOCK_REFERENCE_HZ * (BLOCK_REFERENCE_MASS / mass).sqrt()).clamp(BLOCK_MIN_HZ, BLOCK_MAX_HZ)
-}
-
-/// The structural rumble of the block and oil pan, as a speed-dependent EQ.
-///
-/// # What is being modelled
-///
-/// Not everything an engine radiates leaves through the tailpipe. Each firing
-/// hammers the block, and the block — together with the sump full of oil bolted
-/// under it — answers at its own low modes. That is the component a listener
-/// reads as *size*: the difference between a large engine and a small one at
-/// idle is far more this than it is the exhaust note, which at 850 rpm is a
-/// series of discrete cracks with very little between them.
-///
-/// # Why the gain falls with speed
-///
-/// The block is being driven by an impulse train whose fundamental climbs
-/// straight through the resonance and out the other side. At idle a V8's firing
-/// frequency is around 57 Hz, sitting right in the mode and pumping it once per
-/// cylinder; by 4000 rpm it is at 267 Hz and the block is being driven well
-/// above resonance, where a mass-dominated structure barely responds. The
-/// radiated exhaust power has meanwhile climbed by an order of magnitude and
-/// buries what is left. So the gain is scheduled to be highest at idle and gone
-/// by [`BLOCK_RUMBLE_TAPER_RPM`] — which is also, conveniently, exactly the
-/// schedule that stops the low end from turning to mud under load.
-#[derive(Debug, Clone)]
-pub struct BlockResonator {
-    /// One section per output channel; both carry identical coefficients.
-    sections: [Biquad; 2],
-    sample_rate: f32,
-    centre_hz: f32,
-    q: f32,
-    max_gain_db: f32,
-    gain_db: f32,
-}
-
-impl BlockResonator {
-    /// A resonator for a block of `dressed_mass` kilograms.
-    ///
-    /// `max_gain_db` is the boost at [`BLOCK_RUMBLE_FLOOR_RPM`] and below.
-    pub fn new(sample_rate: f32, dressed_mass: f32, q: f32, max_gain_db: f32) -> Self {
-        let mut resonator = Self {
-            sections: [Biquad::default(); 2],
-            sample_rate,
-            centre_hz: block_resonance_hz(dressed_mass),
-            q: q.clamp(0.3, 12.0),
-            max_gain_db: max_gain_db.max(0.0),
-            gain_db: 0.0,
-        };
-        resonator.tune(0.0);
-        resonator
-    }
-
-    /// Retunes for a new block mass [kg]. Coefficients follow on the next
-    /// [`BlockResonator::tune`].
-    pub fn set_mass(&mut self, dressed_mass: f32) {
-        self.centre_hz = block_resonance_hz(dressed_mass);
-    }
-
-    /// Rebuilds the peak for the current engine speed [rev/min].
-    ///
-    /// Call at the control rate with an already-smoothed speed: the peaking
-    /// design runs a `powf` and two trigonometric functions, and the whole point
-    /// of the control block is to keep those off the per-sample path.
-    pub fn tune(&mut self, rpm: f32) {
-        let taper = smoothstep(BLOCK_RUMBLE_FLOOR_RPM, BLOCK_RUMBLE_TAPER_RPM, rpm);
-        self.gain_db = self.max_gain_db * (1.0 - taper);
-        let coeffs = BiquadCoeffs::peaking(self.sample_rate, self.centre_hz, self.q, self.gain_db);
-        for section in self.sections.iter_mut() {
-            section.set_coeffs(coeffs);
-        }
-    }
-
-    /// Centre of the peak [Hz].
-    pub fn centre_frequency(&self) -> f32 {
-        self.centre_hz
-    }
-
-    /// Boost currently applied at the centre [dB].
-    pub fn gain_db(&self) -> f32 {
-        self.gain_db
-    }
-
-    /// Filters one sample of one channel.
-    ///
-    /// Channels above the second fold onto the last section. The block is a
-    /// single physical object radiating a wavelength of four metres at 80 Hz, so
-    /// there is nothing to image: both channels get the same response, and the
-    /// separate state exists only because they carry different signals.
-    #[inline(always)]
-    pub fn process(&mut self, channel: usize, x: f32) -> f32 {
-        self.sections[channel.min(self.sections.len() - 1)].process(x)
-    }
-
-    /// Clears state.
-    pub fn reset(&mut self) {
-        self.sections.iter_mut().for_each(Biquad::reset);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1659,57 +1561,6 @@ mod tests {
         assert!(block_resonance_hz(90.0) > block_resonance_hz(260.0));
         // Degenerate input must not divide by zero.
         assert!(block_resonance_hz(0.0).is_finite());
-    }
-
-    #[test]
-    fn block_resonator_boosts_at_idle_and_steps_aside_at_speed() {
-        let fs = 48_000.0;
-        let mut resonator = BlockResonator::new(fs, BLOCK_REFERENCE_MASS, 1.1, 9.0);
-
-        resonator.tune(700.0);
-        approx(resonator.gain_db(), 9.0, 1e-3);
-        let centre = resonator.centre_frequency();
-        approx(centre, 80.0, 1e-3);
-
-        // The peak really is a peak, and really is 9 dB.
-        let at = |resonator: &BlockResonator, f: f32| {
-            let coeffs =
-                BiquadCoeffs::peaking(fs, resonator.centre_frequency(), 1.1, resonator.gain_db());
-            magnitude_at(coeffs, fs, f)
-        };
-        // Loose tolerance on the centre: `magnitude_at` correlates over 4096
-        // samples, which is only about seven cycles of 80 Hz, so the estimator
-        // itself carries a couple of percent here.
-        approx(at(&resonator, centre), 10f32.powf(9.0 / 20.0), 0.10);
-        // A peak, not a shelf: back to unity well above it. Probed high rather
-        // than low because `magnitude_at` needs several cycles inside its
-        // correlation window and there are not many of those below 80 Hz.
-        approx(at(&resonator, 640.0), 1.0, 0.05);
-        approx(at(&resonator, 4_000.0), 1.0, 0.05);
-        // And it really is monotone down the skirt.
-        assert!(at(&resonator, 160.0) < at(&resonator, centre));
-        assert!(at(&resonator, 640.0) < at(&resonator, 160.0));
-
-        // And it tapers away with engine speed.
-        resonator.tune(2_000.0);
-        let mid = resonator.gain_db();
-        resonator.tune(BLOCK_RUMBLE_TAPER_RPM);
-        assert!(
-            (0.0..1e-3).contains(&resonator.gain_db()),
-            "still boosting at speed"
-        );
-        assert!(mid > 0.0 && mid < 9.0, "no taper in between: {mid}");
-
-        // Mass moves the peak, and both channels stay in step.
-        resonator.set_mass(400.0);
-        resonator.tune(700.0);
-        approx(resonator.centre_frequency(), BLOCK_MIN_HZ, 1e-3);
-        let mut noise = Noise::new(3);
-        for _ in 0..48_000 {
-            let x = noise.next_bipolar();
-            let (l, r) = (resonator.process(0, x), resonator.process(1, x));
-            assert!(l.is_finite() && (l - r).abs() < 1e-6, "channels diverged");
-        }
     }
 
     #[test]

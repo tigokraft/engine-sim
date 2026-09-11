@@ -85,6 +85,15 @@ pub struct EnginePreset {
     /// Sets where the structural rumble sits: a heavy iron block rings low and
     /// an alloy one rings high.
     pub block_mass: f64,
+    /// Distance between adjacent bore centres [m].
+    ///
+    /// The one piece of block geometry a cylinder model cannot imply. It sets
+    /// how long the block is, and therefore where its bending and pan modes sit,
+    /// and it sets how much metal is left between one bore and the next, which
+    /// is what the bore-wall modes ring on. Production practice is 1.15 to 1.30
+    /// bores; a siamesed high-output engine goes tighter and reads brighter and
+    /// thinner for it. See [`crate::audio::structure`].
+    pub bore_spacing: f64,
     /// Speed at which ignition is cut [rev/min].
     pub redline: f64,
     /// Speed the idle governor holds [rev/min].
@@ -124,9 +133,11 @@ impl EnginePreset {
 
     /// The synth configuration for this engine, voiced for its induction and mechanical spec.
     pub fn synth_config(&self, block: &EngineBlock, sample_rate: f32) -> SynthConfig {
-        SynthConfig::from_block(block, sample_rate)
+        let mut config = SynthConfig::from_block(block, sample_rate)
             .with_induction(self.induction)
-            .with_mechanical(self.mechanical)
+            .with_mechanical(self.mechanical);
+        config.structure = config.structure.with_bore_spacing(self.bore_spacing);
+        config
     }
 
     /// Whether a turbo is fitted.
@@ -198,6 +209,8 @@ impl EnginePreset {
                 trumpet_flanged: true,
             },
             block_mass: 110.0,
+            // A production four on 96 mm centres: 5 mm of iron between the bores.
+            bore_spacing: 0.096,
             redline: 7_400.0,
             idle: 850.0,
             inertia: 0.22,
@@ -251,6 +264,8 @@ impl EnginePreset {
                 trumpet_flanged: true,
             },
             block_mass: 210.0,
+            // The small-block V8's 4.40 inch bore centres, and its 9 mm of deck iron.
+            bore_spacing: 0.1118,
             redline: 7_000.0,
             idle: 750.0,
             inertia: 0.45,
@@ -295,6 +310,9 @@ impl EnginePreset {
                 trumpet_flanged: false,
             },
             block_mass: 180.0,
+            // Tighter than the cross-plane and shorter for it, which is half of why a
+            // flat-plane sounds so much harder.
+            bore_spacing: 0.104,
             redline: 8_600.0,
             idle: 900.0,
             inertia: 0.30,
@@ -351,6 +369,8 @@ impl EnginePreset {
                 trumpet_flanged: true,
             },
             block_mass: 220.0,
+            // Siamesed: 2.75 mm of wall, which is about as thin as a block is cast.
+            bore_spacing: 0.09,
             redline: 8_500.0,
             idle: 900.0,
             inertia: 0.40,
@@ -396,6 +416,8 @@ impl EnginePreset {
                 trumpet_flanged: true,
             },
             block_mass: 260.0,
+            // Twelve of these make the longest block in the catalogue.
+            bore_spacing: 0.1045,
             redline: 8_500.0,
             idle: 800.0,
             inertia: 0.48,
@@ -462,6 +484,9 @@ impl EnginePreset {
                 trumpet_flanged: false,
             },
             block_mass: 95.0,
+            // Rotor housing pitch rather than a bore pitch — two housings and the
+            // intermediate plate between them.
+            bore_spacing: 0.115,
             redline: 8_800.0,
             idle: 950.0,
             inertia: 0.20,
@@ -509,6 +534,8 @@ impl EnginePreset {
                 trumpet_flanged: true,
             },
             block_mass: 125.0,
+            // The same architecture as the atmospheric four, per the note above.
+            bore_spacing: 0.096,
             redline: 6_900.0,
             idle: 820.0,
             inertia: 0.24,
@@ -568,6 +595,8 @@ impl EnginePreset {
                 trumpet_flanged: true,
             },
             block_mass: 235.0,
+            // A short-stroke turbo V8 on tight centres.
+            bore_spacing: 0.09,
             redline: 7_100.0,
             idle: 760.0,
             inertia: 0.44,
@@ -617,6 +646,8 @@ impl EnginePreset {
                 trumpet_flanged: true,
             },
             block_mass: 195.0,
+            // Ninety-one millimetres, the inline-six figure, and a long block with it.
+            bore_spacing: 0.091,
             redline: 7_200.0,
             idle: 780.0,
             inertia: 0.33,
@@ -991,6 +1022,32 @@ mod tests {
                 (200.0..600.0).contains(&derived),
                 "{}: quarter-wave {derived} Hz is out of plausible range",
                 preset.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_preset_is_cast_on_production_bore_centres() {
+        use crate::audio::structure::MIN_BORE_WALL;
+
+        for preset in EnginePreset::catalogue() {
+            let bore = preset.model.geometry.bore;
+            let ratio = preset.bore_spacing / bore;
+            assert!(
+                (1.05..=1.35).contains(&ratio),
+                "{}: {:.3} bores between centres is not a block anyone casts",
+                preset.name,
+                ratio
+            );
+            // And the wall the bore-wall modes ring on is real metal, not the
+            // model's floor: a spacing that had to be clamped is a spacing that
+            // was not describing this engine.
+            let wall = 0.5 * (preset.bore_spacing - bore);
+            assert!(
+                wall >= MIN_BORE_WALL as f64,
+                "{}: {:.1} mm of wall between the bores",
+                preset.name,
+                wall * 1e3
             );
         }
     }
