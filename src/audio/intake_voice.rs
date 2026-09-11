@@ -33,6 +33,21 @@ pub const INTAKE_AIR_GAMMA: f32 = 1.40;
 /// Specific gas constant of fresh air [J/(kg K)].
 pub const INTAKE_GAS_CONSTANT: f32 = 287.0;
 
+/// Induction rarefaction acoustic pressure pulse at valve opening [Pa]:
+///
+/// $$p' = -\rho c u = -\frac{c \dot{m}}{A}$$
+///
+/// As the piston descends with the intake valve open, it pulls air into the cylinder,
+/// launching a negative pressure (rarefaction) wave up the runner toward the mouth.
+#[inline]
+pub fn induction_rarefaction_pa(mass_flow: f32, runner_area: f32, speed_of_sound: f32) -> f32 {
+    if runner_area <= 1e-7 {
+        0.0
+    } else {
+        -speed_of_sound * mass_flow.max(0.0) / runner_area
+    }
+}
+
 /// 1D digital waveguide network representing the complete intake system.
 #[derive(Debug, Clone)]
 pub struct IntakeNetwork {
@@ -384,5 +399,18 @@ mod tests {
             let rad = network.step(&excitations);
             assert!(rad.is_finite());
         }
+    }
+
+    #[test]
+    fn induction_rarefaction_matches_physical_formula() {
+        let mdot = 0.045f32;
+        let area = 0.0015f32;
+        let c = 340.0f32;
+        let p_prime = induction_rarefaction_pa(mdot, area, c);
+        assert!((p_prime - (-c * mdot / area)).abs() < 1e-4);
+        assert!(p_prime < 0.0, "rarefaction must be negative pressure");
+
+        // Zero mass flow produces no pressure pulse
+        assert_eq!(induction_rarefaction_pa(0.0, area, c), 0.0);
     }
 }

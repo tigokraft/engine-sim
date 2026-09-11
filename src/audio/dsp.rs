@@ -2099,6 +2099,7 @@ pub struct EngineSynth {
     radiated: Vec<f32>,
     intake: IntakeVoice,
     intake_network: IntakeNetwork,
+    intake_excitations: Vec<f32>,
     turbo: TurboVoice,
     backfire: BackfireVoice,
     mechanical: MechanicalVoice,
@@ -2199,6 +2200,7 @@ impl EngineSynth {
             radiated: vec![0.0; config.bank_count],
             intake: IntakeVoice::new(fs),
             intake_network: IntakeNetwork::new(&config.intake, config.cylinders.len(), fs),
+            intake_excitations: vec![0.0; n_cyl],
             turbo: TurboVoice::new(fs),
             backfire: BackfireVoice::new(fs),
             mechanical: MechanicalVoice::from_spec(&config.mechanical, fs),
@@ -2272,6 +2274,11 @@ impl EngineSynth {
         &mut self.intake_network
     }
 
+    /// Excitation presented to the intake network this sample, per cylinder [Pa].
+    pub fn intake_excitations(&self) -> &[f32] {
+        &self.intake_excitations
+    }
+
     /// Master-cycle phase, `0..1` over 720 crank degrees.
     #[inline(always)]
     fn cycle_phase(&self) -> f32 {
@@ -2324,6 +2331,7 @@ impl EngineSynth {
         }
         self.cycle.reset();
         self.excitations.fill(0.0);
+        self.intake_excitations.fill(0.0);
         self.bank_excitations.fill(0.0);
         self.radiated.fill(0.0);
         for smoother in self.blowdown_pa.iter_mut() {
@@ -2600,10 +2608,16 @@ impl EngineSynth {
         let blend = self.cycle.advance();
         if !turning {
             self.excitations.fill(0.0);
+            self.intake_excitations.fill(0.0);
             return 0.0;
         }
         let phase = self.cycle_phase();
         let mut induction = 0.0;
+        let c_intake = crate::audio::filters::speed_of_sound(
+            crate::audio::intake_voice::INTAKE_AIR_GAMMA,
+            crate::audio::intake_voice::INTAKE_GAS_CONSTANT,
+            crate::audio::intake_voice::INTAKE_AMBIENT_TEMPERATURE_K,
+        );
         for index in 0..self.config.cylinders.len() {
             let tap = self.config.cylinders[index];
             let variation = self.variation[index];
@@ -2620,7 +2634,16 @@ impl EngineSynth {
             // jitter are properties of *combustion* — how long the flame takes
             // to develop, and how much that varies — and a valve opening on the
             // intake side does not wait for a flame.
-            induction += self.cycle.intake_at(cylinder, blend);
+            let flow = self.cycle.intake_at(cylinder, blend);
+            induction += flow;
+
+            let runner_area = if !self.config.intake.runners.is_empty() {
+                self.config.intake.runners[index % self.config.intake.runners.len()].area as f32
+            } else {
+                self.config.intake.runner_area() as f32
+            };
+            self.intake_excitations[index] =
+                crate::audio::intake_voice::induction_rarefaction_pa(flow, runner_area, c_intake);
         }
         induction
     }
