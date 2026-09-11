@@ -497,14 +497,6 @@ impl ExhaustThermal {
         }
     }
 
-    /// Gas temperature entering the silencers and the tailpipe [K].
-    pub fn downstream_gas(&self) -> f64 {
-        match self.secondaries.last() {
-            Some(section) => section.gas_outlet,
-            None => self.collector_gas(),
-        }
-    }
-
     /// Gas temperature arriving at the collector [K].
     pub fn collector_gas(&self) -> f64 {
         if self.primaries.is_empty() {
