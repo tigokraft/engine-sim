@@ -4147,6 +4147,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_rig_and_knock_radiate_only_through_the_block() {
+        // Neither the valvetrain nor the end gas has any business in the
+        // exhaust: one is outside the cylinder entirely and the other happens
+        // with the valve shut. Both reach the listener by shaking the block or
+        // not at all, and switching the block off must take them with it.
+        let level = |structure: f64, knock: f32| {
+            let mut config = SynthConfig::cross_plane_v8(FS);
+            config.exhaust_level = 0.0;
+            config.intake_level = 0.0;
+            config.structure_level = structure;
+            let mut synth = EngineSynth::new(config);
+            synth.exhaust_level.snap(0.0);
+            let mut snapshot = loaded_snapshot();
+            snapshot.knock_intensity = knock;
+            // A cylinder that never changes pressure, so the third source into
+            // the block — combustion — contributes nothing and the two under
+            // test are on their own.
+            snapshot.cylinder_pressure = [TEST_MANIFOLD_PA; CYCLE_TABLE];
+            synth.set_snapshot(&snapshot);
+            render(&mut synth, 48_000);
+            rms(&render(&mut synth, 96_000))
+        };
+
+        let default_level = SynthConfig::default().structure_level;
+        assert_eq!(
+            level(0.0, 6.0),
+            0.0,
+            "the rig and a knocking cylinder found a way out with the block mute"
+        );
+
+        let rig_only = level(default_level, 0.0);
+        let knocking = level(default_level, 6.0);
+        assert!(rig_only > 1e-5, "the rig never reached the block");
+        assert!(
+            knocking > 1.2 * rig_only,
+            "knock never reached the block: {knocking:.6} against {rig_only:.6}"
+        );
+    }
+
+    #[test]
+    fn structural_output_is_bounded_and_free_of_dc() {
+        // A resonator chain driven by a signal with a standing offset is the
+        // classic way to lose headroom to something nobody can hear.
+        for rpm in [0.0, 800.0, 3_000.0, 7_000.0] {
+            let mut config = SynthConfig::cross_plane_v8(FS);
+            config.exhaust_level = 0.0;
+            config.intake_level = 0.0;
+            let mut synth = EngineSynth::new(config);
+            synth.exhaust_level.snap(0.0);
+            let mut snapshot = loaded_snapshot();
+            snapshot.rpm = rpm;
+            snapshot.knock_intensity = 4.0;
+            synth.set_snapshot(&snapshot);
+            render(&mut synth, 48_000);
+            let out = render(&mut synth, 4 * 48_000);
+
+            assert!(out.iter().all(|s| s.is_finite()), "{rpm} rpm: not finite");
+            assert!(peak(&out) < 1.0, "{rpm} rpm: peak {}", peak(&out));
+            let mean = out.iter().map(|&s| s as f64).sum::<f64>() / out.len() as f64;
+            assert!(
+                mean.abs() < 1e-4,
+                "{rpm} rpm: {mean} of standing offset on the structural path"
+            );
+        }
+    }
+
     // -- waveguide damping ---------------------------------------------------
 
     #[test]
