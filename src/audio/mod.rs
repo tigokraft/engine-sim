@@ -65,7 +65,8 @@ pub mod waveguide;
 
 pub use dsp::{
     BlowOffVoicing, CentrifugalVoicing, CylinderTap, EngineSnapshot, EngineSynth, ImpulsiveSpec,
-    MechanicalSpec, RootsVoicing, SourceRate, SynthConfig, TurboVoicing, MAX_CYLINDERS,
+    MechanicalSpec, RootsVoicing, SourceRate, SynthConfig, TurboVoicing, WastegateVoicing,
+    MAX_CYLINDERS,
 };
 pub use filters::MufflerGeometry;
 pub use propagation::{Aperture, AperturePath, AperturePositions, Listener, PropagationModel};
@@ -227,6 +228,8 @@ pub enum Induction {
         voice: TurboVoicing,
         /// Optional blow-off / dump valve fitted to the charge pipe.
         blow_off: Option<BlowOffVoicing>,
+        /// Optional wastegate chatter voicing under high boost.
+        wastegate: Option<WastegateVoicing>,
     },
     /// A Roots or twin-screw positive displacement supercharger, crank-order locked.
     RootsSupercharged {
@@ -263,6 +266,7 @@ impl Induction {
                 level: 0.028,
             },
             blow_off: None,
+            wastegate: None,
         }
     }
 
@@ -287,6 +291,7 @@ impl Induction {
                 level: 0.020,
             },
             blow_off: None,
+            wastegate: None,
         }
     }
 
@@ -314,6 +319,7 @@ impl Induction {
                 level: 0.031,
             },
             blow_off: None,
+            wastegate: None,
         }
     }
 
@@ -357,14 +363,34 @@ impl Induction {
                 shaft,
                 voice,
                 blow_off: _,
+                wastegate,
             } => Self::Turbocharged {
                 shaft,
                 voice,
                 blow_off: Some(bov),
+                wastegate,
             },
             Self::CentrifugalSupercharged { voice, blow_off: _ } => Self::CentrifugalSupercharged {
                 voice,
                 blow_off: Some(bov),
+            },
+            other => other,
+        }
+    }
+
+    /// Equips wastegate chatter to this turbocharged configuration.
+    pub const fn with_wastegate(self, wg: WastegateVoicing) -> Self {
+        match self {
+            Self::Turbocharged {
+                shaft,
+                voice,
+                blow_off,
+                wastegate: _,
+            } => Self::Turbocharged {
+                shaft,
+                voice,
+                blow_off,
+                wastegate: Some(wg),
             },
             other => other,
         }
@@ -421,6 +447,14 @@ impl Induction {
         match *self {
             Self::Turbocharged { blow_off, .. } => blow_off,
             Self::CentrifugalSupercharged { blow_off, .. } => blow_off,
+            _ => None,
+        }
+    }
+
+    /// The wastegate chatter voicing, if one is fitted.
+    pub fn wastegate_voice(&self) -> Option<WastegateVoicing> {
+        match *self {
+            Self::Turbocharged { wastegate, .. } => wastegate,
             _ => None,
         }
     }
@@ -751,12 +785,19 @@ impl SynthConfig {
         self.roots = induction.roots_voice();
         self.centrifugal = induction.centrifugal_voice();
         self.blow_off = induction.blow_off_voice();
+        self.wastegate = induction.wastegate_voice();
         self
     }
 
     /// Fits an atmospheric blow-off / dump valve.
     pub fn with_blow_off(mut self, blow_off: BlowOffVoicing) -> Self {
         self.blow_off = Some(blow_off);
+        self
+    }
+
+    /// Fits wastegate chatter.
+    pub fn with_wastegate(mut self, wastegate: WastegateVoicing) -> Self {
+        self.wastegate = Some(wastegate);
         self
     }
 }

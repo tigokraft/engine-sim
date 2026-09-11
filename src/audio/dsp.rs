@@ -570,6 +570,35 @@ impl Default for BlowOffVoicing {
     }
 }
 
+/// What a fluttering wastegate valve sounds like under high boost.
+///
+/// Under heavy throttle near peak boost, as the wastegate cracks open to regulate
+/// turbine enthalpy, the valve flap rapidly hunts against exhaust gas pulsations,
+/// producing a metallic fluttering rattle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WastegateVoicing {
+    /// Gate hunting flutter oscillation frequency [Hz].
+    pub flutter_hz: f32,
+    /// Center frequency of the metallic gate rattle resonance [Hz].
+    pub rattle_hz: f32,
+    /// Boost threshold (fraction of reference shaft speed) to crack the gate [-].
+    pub threshold: f32,
+    /// Level of the wastegate chatter in the mix [-].
+    pub level: f32,
+}
+
+impl Default for WastegateVoicing {
+    /// A typical internal wastegate hunting at ~65 Hz with a ~1.8 kHz metallic rattle.
+    fn default() -> Self {
+        Self {
+            flutter_hz: 65.0,
+            rattle_hz: 1_800.0,
+            threshold: 0.75,
+            level: 0.025,
+        }
+    }
+}
+
 /// How an impulsive mechanical source sets its recurrence rate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SourceRate {
@@ -687,6 +716,8 @@ pub struct SynthConfig {
     pub centrifugal: Option<CentrifugalVoicing>,
     /// Blow-off / dump valve, or `None` if not fitted.
     pub blow_off: Option<BlowOffVoicing>,
+    /// Wastegate chatter, or `None` if not fitted.
+    pub wastegate: Option<WastegateVoicing>,
     /// Unburnt fuel per cycle above which backfires become possible [kg].
     pub backfire_fuel_threshold: f64,
     /// Runner temperature above which backfires become possible [K].
@@ -799,6 +830,7 @@ impl SynthConfig {
             roots: None,
             centrifugal: None,
             blow_off: None,
+            wastegate: None,
             // A cut charge on the shipped V8 carries 24-36 mg of fuel to the
             // exhaust, so 12 mg puts a real spark cut at 2-3x the threshold —
             // enough to crackle hard, while a partial misfire stays below it.
@@ -2145,6 +2177,80 @@ impl BlowOffVoice {
     }
 }
 
+/// Scaling that normalises [`WastegateVoice`] to roughly unity RMS during peak hunting.
+const WASTEGATE_UNITY_RMS: f32 = 3.2;
+
+/// Wastegate chatter voice.
+///
+/// Under high boost and heavy throttle, the wastegate valve disk flutters and
+/// hunts against exhaust gas pressure pulsations, producing a rapid metallic
+/// rattle modulated at the valve flutter rate.
+#[derive(Debug, Clone)]
+struct WastegateVoice {
+    phase: f32,
+    gain: Smoothed,
+    flutter_hz: Smoothed,
+    filter: Biquad,
+    sample_rate: f32,
+}
+
+impl WastegateVoice {
+    fn new(sample_rate: f32) -> Self {
+        Self {
+            phase: 0.0,
+            gain: Smoothed::new(0.0, sample_rate, 0.025),
+            flutter_hz: Smoothed::new(65.0, sample_rate, 0.050),
+            filter: Biquad::new(BiquadCoeffs::bandpass(sample_rate, 1_800.0, 2.5)),
+            sample_rate,
+        }
+    }
+
+    fn tune(&mut self, voicing: &WastegateVoicing, throttle: f32, turbo_rpm: f32, ref_rpm: f32) {
+        let shaft_load = turbo_rpm / ref_rpm.max(1.0);
+        // Gate flutters only when boost exceeds threshold AND throttle is applied.
+        let boost_excess =
+            (shaft_load - voicing.threshold).max(0.0) / (1.0 - voicing.threshold).max(0.05);
+        let load_factor = (throttle - 0.50).max(0.0) / 0.50;
+        let activity = (boost_excess * load_factor).clamp(0.0, 1.0);
+
+        self.gain.set_target(activity * activity);
+        self.flutter_hz.set_target(voicing.flutter_hz);
+        self.filter.set_coeffs(BiquadCoeffs::bandpass(
+            self.sample_rate,
+            voicing.rattle_hz,
+            2.5,
+        ));
+    }
+
+    #[inline(always)]
+    fn process(&mut self, noise: &mut Noise) -> f32 {
+        let gain = self.gain.next_value();
+        let flutter_hz = self.flutter_hz.next_value();
+
+        self.phase += flutter_hz / self.sample_rate;
+        if self.phase >= 1.0 {
+            self.phase -= self.phase.floor();
+        }
+        if gain < 1e-5 {
+            return 0.0;
+        }
+
+        // Cubed raised cosine gives sharp fluttering pulses
+        let cycle = 0.5 - 0.5 * (TAU * self.phase).cos();
+        let burst = cycle * cycle * cycle;
+
+        let rattle = self.filter.process(noise.next_bipolar());
+        rattle * burst * gain * WASTEGATE_UNITY_RMS
+    }
+
+    fn reset(&mut self) {
+        self.phase = 0.0;
+        self.gain.snap(0.0);
+        self.flutter_hz.snap(65.0);
+        self.filter.reset();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Backfire
 // ---------------------------------------------------------------------------
@@ -2407,6 +2513,7 @@ pub struct EngineSynth {
     roots: RootsVoice,
     centrifugal: CentrifugalVoice,
     blow_off: BlowOffVoice,
+    wastegate: WastegateVoice,
     backfire: BackfireVoice,
     mechanical: MechanicalVoice,
     knock: KnockVoice,
@@ -2611,6 +2718,7 @@ impl EngineSynth {
             roots: RootsVoice::new(fs),
             centrifugal: CentrifugalVoice::new(fs),
             blow_off: BlowOffVoice::new(fs),
+            wastegate: WastegateVoice::new(fs),
             backfire: BackfireVoice::new(fs),
             mechanical: MechanicalVoice::from_spec(&config.mechanical, fs),
             knock: KnockVoice::new(fs),
@@ -2772,6 +2880,7 @@ impl EngineSynth {
         self.roots.reset();
         self.centrifugal.reset();
         self.blow_off.reset();
+        self.wastegate.reset();
         self.mechanical.reset();
         self.knock.reset();
         self.propagation.reset();
@@ -2916,6 +3025,18 @@ impl EngineSynth {
                 .turbo
                 .map_or(130_000.0, |t| t.reference_rpm as f32);
             self.blow_off.tune(
+                &voicing,
+                self.snapshot.throttle,
+                self.snapshot.turbo_rpm,
+                ref_rpm,
+            );
+        }
+        if let Some(voicing) = self.config.wastegate {
+            let ref_rpm = self
+                .config
+                .turbo
+                .map_or(130_000.0, |t| t.reference_rpm as f32);
+            self.wastegate.tune(
                 &voicing,
                 self.snapshot.throttle,
                 self.snapshot.turbo_rpm,
@@ -3180,7 +3301,11 @@ impl EngineSynth {
             None => 0.0,
         };
         let blow_off = match self.config.blow_off {
-            Some(voicing) => self.blow_off.process(&mut self.noise) * voicing.level as f32,
+            Some(voicing) => self.blow_off.process(&mut self.noise) * voicing.level,
+            None => 0.0,
+        };
+        let wastegate = match self.config.wastegate {
+            Some(voicing) => self.wastegate.process(&mut self.noise) * voicing.level,
             None => 0.0,
         };
         let intake_rad =
@@ -3200,6 +3325,7 @@ impl EngineSynth {
             + roots
             + centrifugal
             + blow_off
+            + wastegate
             + self.structure.process(drive) * self.config.structure_level as f32;
         let intake_rad = intake_rad * self.config.intake_level as f32;
 
@@ -5552,6 +5678,42 @@ mod tests {
             voice.envelope < 0.05,
             "dump valve envelope should decay toward zero over half a second, got {}",
             voice.envelope
+        );
+    }
+
+    #[test]
+    fn wastegate_chatter_flutters_at_high_boost_under_load() {
+        let voicing = WastegateVoicing::default();
+        let ref_rpm = 130_000.0;
+        let mut noise = Noise::new(1234);
+        let mut voice = WastegateVoice::new(FS);
+
+        // Under low throttle or low boost, wastegate stays quiet
+        voice.tune(&voicing, 0.2, 50_000.0, ref_rpm);
+        let mut quiet_sum = 0.0f32;
+        for _ in 0..1000 {
+            quiet_sum += voice.process(&mut noise).abs();
+        }
+        assert_eq!(
+            quiet_sum, 0.0,
+            "wastegate must not chatter below boost and load threshold"
+        );
+
+        // Under high boost and heavy throttle, wastegate flutters
+        voice.tune(&voicing, 1.0, 125_000.0, ref_rpm);
+        // Advance smoothing
+        for _ in 0..500 {
+            voice.process(&mut noise);
+        }
+        let mut chatter_sum = 0.0f32;
+        for _ in 0..1000 {
+            let s = voice.process(&mut noise);
+            assert!(s.is_finite());
+            chatter_sum += s.abs();
+        }
+        assert!(
+            chatter_sum > 0.1,
+            "wastegate must chatter under high boost and heavy load, got sum {chatter_sum}"
         );
     }
 }
