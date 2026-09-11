@@ -2764,17 +2764,24 @@ impl EngineSynth {
         for index in 0..self.config.cylinders.len() {
             let tap = self.config.cylinders[index];
             let variation = self.variation[index];
+            let alive = self.blowdown_pa[index].value() > 1.0;
             // Strictly linear in the pressure difference, per the excitation
             // model; the curve it multiplies is normalised to a peak of one.
-            let amplitude = (self.blowdown_pa[index].value() / REFERENCE_BLOWDOWN).min(2.0)
-                * variation.amplitude_scale;
+            let amplitude = if alive {
+                (self.blowdown_pa[index].value() / REFERENCE_BLOWDOWN).min(2.0)
+                    * variation.amplitude_scale
+            } else {
+                0.0
+            };
             let cylinder = phase - tap.evo_phase;
             let combustion = cylinder - variation.phase_offset;
             self.excitations[index] = amplitude * self.cycle.exhaust_at(combustion, blend);
             // The same retard applies to the structural path, and for the same
             // reason: a cycle whose flame took longer to develop reaches the
             // block late as well as reaching the port late.
-            rise += self.cycle.pressure_slope_at(combustion, blend) * variation.amplitude_scale;
+            if alive {
+                rise += self.cycle.pressure_slope_at(combustion, blend) * variation.amplitude_scale;
+            }
             // Induction is read at the bare cylinder phase. The retard and the
             // jitter are properties of *combustion* — how long the flame takes
             // to develop, and how much that varies — and a valve opening on the

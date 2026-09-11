@@ -30,7 +30,7 @@
 use std::f64::consts::PI;
 
 use crate::environment::Environment;
-use crate::physics::control::{EngineControlUnit, LimiterCut};
+use crate::physics::control::{CylinderHealth, EngineControlUnit, LimiterCut};
 use crate::physics::cylinder::{wrap_cycle, CylinderGeometry, GasProperties, CYCLE_ANGLE};
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
 use crate::physics::thermal::{EngineThermal, OilViscosity};
@@ -1243,18 +1243,41 @@ impl EngineBlock {
         self.ring.cell(self.phase_index_of(cylinder) - 1)
     }
 
+    /// Returns the operational health of cylinder `i`.
+    pub fn cylinder_health(&self, cylinder: usize) -> CylinderHealth {
+        self.ecu.cylinder_health(cylinder)
+    }
+
+    /// Sets the operational health of cylinder `i`.
+    pub fn set_cylinder_health(&mut self, cylinder: usize, health: CylinderHealth) {
+        self.ecu.set_cylinder_health(cylinder, health);
+    }
+
     /// Exhaust valve opening cylinder pressure for cylinder `i` [Pa].
     ///
     /// Reads the master cylinder trace at the exhaust valve opening angle, or
     /// returns an override if one has been set for testing cylinder-to-cylinder
-    /// scatter.
+    /// scatter. When a cylinder is dead (no spark or no fuel), it produces
+    /// manifold pressure at EVO rather than a combustion blowdown pulse.
     pub fn cylinder_evo_pressure(&self, cylinder: usize) -> f64 {
         if let Some(Some(p)) = self.evo_overrides.get(cylinder) {
             return *p;
         }
-        self.ring
+        let factor = self.ecu.cylinder_combustion_factor(cylinder) as f64;
+        let fired_p = self
+            .ring
             .sample(self.model.valves.exhaust.open_angle)
-            .pressure
+            .pressure;
+        let bank_idx = self
+            .firing
+            .cylinders
+            .get(cylinder)
+            .map_or(0, |c| (c.bank as usize) % self.exhaust_banks.len().max(1));
+        let manifold_p = self
+            .exhaust_banks
+            .get(bank_idx)
+            .map_or(self.environment.pressure, |b| b.port_pressure());
+        manifold_p + factor * (fired_p - manifold_p)
     }
 
     /// Alias for [`cylinder_evo_pressure`].
@@ -1503,9 +1526,11 @@ impl EngineBlock {
 
         for i in 0..n {
             let sample = self.sample_of(i);
-            let torque = sample.indicated_torque(self.crankcase_pressure);
+            let factor = self.ecu.cylinder_combustion_factor(i) as f64;
+            let torque = sample.indicated_torque(self.crankcase_pressure) * factor;
             indicated_torque += torque;
-            cylinder_pressures.push(sample.pressure);
+            cylinder_pressures
+                .push(sample.pressure * factor + self.environment.pressure * (1.0 - factor));
             cylinder_torques.push(torque);
         }
 
@@ -1520,8 +1545,13 @@ impl EngineBlock {
         );
         let brake_torque = indicated_torque - friction_torque;
 
-        // Cycle-averaged quantities come from the ring, not the instant.
-        let cycle_work = self.ring.indicated_work(self.crankcase_pressure) * n as f64;
+        // Cycle-averaged quantities come from the ring, scaled by cylinder health.
+        let healthy_fraction = (0..n)
+            .map(|i| self.ecu.cylinder_combustion_factor(i) as f64)
+            .sum::<f64>()
+            / n.max(1) as f64;
+        let cycle_work =
+            self.ring.indicated_work(self.crankcase_pressure) * (n as f64 * healthy_fraction);
         let imep = cycle_work / displacement.max(1e-12);
         let mean_indicated_torque = cycle_work / CYCLE_ANGLE;
         let mean_brake_torque = mean_indicated_torque - friction_torque;
@@ -2306,6 +2336,25 @@ mod tests {
             "a cold engine's FMEP is {:.0} Pa against {:.0} Pa warm, which is no change at all",
             fmep[0],
             fmep[warming - 1]
+        );
+    }
+
+    #[test]
+    fn dead_cylinder_zeroes_blowdown_and_reduces_indicated_torque() {
+        let mut block = EngineBlock::cross_plane_v8(Environment::default());
+        for _ in 0..600 {
+            block.update(1.0 / 240.0, 3_000.0);
+        }
+        let healthy_evo = block.cylinder_evo_pressure(1);
+        assert!(healthy_evo > block.environment.pressure * 1.5);
+
+        block.set_cylinder_health(1, CylinderHealth::dead_plug());
+        let dead_evo = block.cylinder_evo_pressure(1);
+        let bank_idx = (block.firing.cylinders[1].bank as usize) % block.exhaust_banks.len().max(1);
+        let manifold_p = block.exhaust_banks[bank_idx].port_pressure();
+        assert!(
+            (dead_evo - manifold_p).abs() < 1e-3,
+            "dead cylinder EVO pressure ({dead_evo:.1}) must equal manifold ({manifold_p:.1})"
         );
     }
 }

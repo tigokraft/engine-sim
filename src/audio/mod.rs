@@ -486,7 +486,18 @@ impl SnapshotSource {
         } else {
             at_evo.burned_fraction
         };
-        let unburnt_fuel_mass = block.model.trapped_fuel_mass(at_evo.mass, burned_at_evo) + tip_in;
+        let dead_plug_count = (0..block.firing.len())
+            .filter(|&i| !block.ecu.is_spark_ok(i) && block.ecu.is_fuel_ok(i))
+            .count();
+        let dead_plug_fuel = if spark_cut || limiter_fuel {
+            0.0
+        } else {
+            let total = block.firing.len().max(1);
+            let unburnt_charge = block.model.trapped_fuel_mass(at_evo.mass, 0.0);
+            (unburnt_charge / total as f64) * dead_plug_count as f64
+        };
+        let unburnt_fuel_mass =
+            block.model.trapped_fuel_mass(at_evo.mass, burned_at_evo) + tip_in + dead_plug_fuel;
 
         let (gamma, gas_constant) = block
             .exhaust_banks

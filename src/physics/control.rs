@@ -239,6 +239,40 @@ impl EngineControlUnit {
         }
     }
 
+    /// Returns the operational health of cylinder `i`.
+    pub fn cylinder_health(&self, cylinder: usize) -> CylinderHealth {
+        self.cylinder_health
+            .get(cylinder)
+            .copied()
+            .unwrap_or_else(CylinderHealth::healthy)
+    }
+
+    /// Sets the operational health of cylinder `i`.
+    pub fn set_cylinder_health(&mut self, cylinder: usize, health: CylinderHealth) {
+        if cylinder < MAX_CYLINDERS {
+            self.cylinder_health[cylinder] = health;
+        }
+    }
+
+    /// Returns whether cylinder `i` has working spark.
+    pub fn is_spark_ok(&self, cylinder: usize) -> bool {
+        self.cylinder_health
+            .get(cylinder)
+            .is_none_or(|h| h.spark_ok)
+    }
+
+    /// Returns whether cylinder `i` has working fuel injection.
+    pub fn is_fuel_ok(&self, cylinder: usize) -> bool {
+        self.cylinder_health.get(cylinder).is_none_or(|h| h.fuel_ok)
+    }
+
+    /// Returns the combustion factor `[0.0, 1.0]` for cylinder `i`.
+    pub fn cylinder_combustion_factor(&self, cylinder: usize) -> f32 {
+        self.cylinder_health
+            .get(cylinder)
+            .map_or(1.0, |h| h.combustion_factor())
+    }
+
     /// Evaluates the rev limiter intervention for the current speed.
     ///
     /// - `HardCut`: 100% intervention when RPM >= redline.
@@ -398,22 +432,6 @@ impl EngineControlUnit {
 
         // Idle or light low-speed load: stoichiometric
         self.idle_afr
-    }
-
-    /// Sets the health of a specific cylinder.
-    pub fn set_cylinder_health(&mut self, cylinder: usize, health: CylinderHealth) {
-        if cylinder < MAX_CYLINDERS {
-            self.cylinder_health[cylinder] = health;
-        }
-    }
-
-    /// Returns the health of a specific cylinder.
-    pub fn cylinder_health(&self, cylinder: usize) -> CylinderHealth {
-        if cylinder < MAX_CYLINDERS {
-            self.cylinder_health[cylinder]
-        } else {
-            CylinderHealth::healthy()
-        }
     }
 }
 
@@ -786,5 +804,26 @@ mod tests {
                 "stutter limiter must alternate firing cuts"
             );
         }
+    }
+
+    #[test]
+    fn cylinder_health_reflects_dead_plug_and_injector() {
+        let mut ecu = EngineControlUnit::default();
+        assert!(ecu.is_spark_ok(0));
+        assert!(ecu.is_fuel_ok(0));
+        assert_eq!(ecu.cylinder_combustion_factor(0), 1.0);
+
+        ecu.set_cylinder_health(2, CylinderHealth::dead_plug());
+        assert!(!ecu.is_spark_ok(2));
+        assert!(ecu.is_fuel_ok(2));
+        assert_eq!(ecu.cylinder_combustion_factor(2), 0.0);
+
+        ecu.set_cylinder_health(3, CylinderHealth::dead_injector());
+        assert!(ecu.is_spark_ok(3));
+        assert!(!ecu.is_fuel_ok(3));
+        assert_eq!(ecu.cylinder_combustion_factor(3), 0.0);
+
+        ecu.set_cylinder_health(3, CylinderHealth::healthy());
+        assert_eq!(ecu.cylinder_combustion_factor(3), 1.0);
     }
 }
