@@ -39,6 +39,17 @@ use crate::physics::thermodynamics::{
 /// One cell per crank degree over the full four-stroke cycle.
 pub const PHASE_CELLS: usize = 720;
 
+/// Points in the downsampled cycle handed to the audio thread.
+///
+/// The audio thread plays the solver's own curves back at crank rate, so the
+/// table has to resolve the fastest thing in the cycle: the exhaust valve
+/// cracking open, which takes some tens of crank degrees. 128 points is 5.625
+/// degrees apiece — a handful of samples across that edge, which is enough to
+/// carry its slope — and the three tables together are 1.5 kB per frame, which
+/// is what keeps [`crate::audio::dsp::EngineSnapshot`] small enough to keep
+/// shovelling through a lock-free queue.
+pub const CYCLE_TABLE: usize = 128;
+
 // ---------------------------------------------------------------------------
 // Phase ring buffer
 // ---------------------------------------------------------------------------
@@ -195,6 +206,45 @@ impl PhaseRing {
     /// The whole ring, cell 0 first (0 to 1 crank degree).
     pub fn cells(&self) -> &[PhaseSample] {
         &self.cells
+    }
+
+    /// Downsamples one field of the logged cycle onto a fixed-size table.
+    ///
+    /// Cell zero of the result covers `origin`, so the caller chooses where the
+    /// cycle is cut. The audio thread cuts it at exhaust valve opening, which
+    /// makes the table's own index the phase a cylinder is at relative to its
+    /// firing event and saves the playback path a rotation per read.
+    ///
+    /// Each output point is the *mean* of the ring cells it spans, not the cell
+    /// that happens to land on it. 720 into 128 is 5.625 cells per point, so
+    /// plain decimation would step between taking five cells and six and would
+    /// fold everything above the new Nyquist back down — on a blowdown edge that
+    /// is precisely the content being carried. Box-averaging is the cheapest
+    /// anti-alias filter that is honest about it.
+    ///
+    /// Point `k` is therefore the cycle's mean over `[k, k+1) / CYCLE_TABLE` of
+    /// a cycle, and *stands at the centre of that span*. A player reading the
+    /// table at cycle phase `p` wants `p * CYCLE_TABLE - 0.5` as its fractional
+    /// index; reading it at `p * CYCLE_TABLE` would advance the whole cycle by
+    /// half a point, which at 128 points is 2.8 crank degrees of latency on
+    /// every event in it.
+    pub fn downsample_from(
+        &self,
+        origin: f64,
+        field: impl Fn(&PhaseSample) -> f64,
+    ) -> [f32; CYCLE_TABLE] {
+        let first = Self::cell_of(origin);
+        let mut table = [0.0f32; CYCLE_TABLE];
+        for (k, out) in table.iter_mut().enumerate() {
+            let from = k * PHASE_CELLS / CYCLE_TABLE;
+            let to = (k + 1) * PHASE_CELLS / CYCLE_TABLE;
+            let mut sum = 0.0;
+            for cell in from..to {
+                sum += field(&self.cells[(first + cell) % PHASE_CELLS]);
+            }
+            *out = (sum / (to - from) as f64) as f32;
+        }
+        table
     }
 
     /// Highest pressure anywhere in the logged cycle [Pa].
@@ -1420,6 +1470,86 @@ mod tests {
             let idx = PhaseRing::phase_index(deg(d));
             assert!((1..=PHASE_CELLS).contains(&idx), "index {idx} out of range");
         }
+    }
+
+    /// Plays a downsampled table back the way the audio thread does: linear
+    /// interpolation between the two points either side of a cycle phase.
+    fn playback(table: &[f32; CYCLE_TABLE], phase: f64) -> f64 {
+        let x = phase.rem_euclid(1.0) * CYCLE_TABLE as f64 - 0.5;
+        let i = x.floor().rem_euclid(CYCLE_TABLE as f64) as usize;
+        let frac = x - x.floor();
+        let a = table[i] as f64;
+        let b = table[(i + 1) % CYCLE_TABLE] as f64;
+        a + (b - a) * frac
+    }
+
+    #[test]
+    fn downsampled_cycle_plays_back_the_curve_it_came_from() {
+        // A two-cycle-per-revolution pressure curve — four periods over 720
+        // degrees, which is far faster than anything the solver's own pressure
+        // trace does and therefore a pessimistic test of the resampling.
+        let curve = |degrees: f64| 20.0e5 + 15.0e5 * (4.0 * 2.0 * PI * degrees / 720.0).sin();
+        let mut ring = PhaseRing::new();
+        for cell in 0..PHASE_CELLS {
+            ring.record(
+                deg(cell as f64 + 0.5),
+                PhaseSample {
+                    pressure: curve(cell as f64 + 0.5),
+                    ..PhaseSample::default()
+                },
+            );
+        }
+
+        let table = ring.downsample_from(0.0, |s| s.pressure);
+        // Read back at the original resolution. Box-averaging over 5.625 cells
+        // and interpolating between the results costs a little amplitude at
+        // this rate; 3 % of the swing is the whole of the error.
+        let mut worst = 0.0f64;
+        for cell in 0..PHASE_CELLS {
+            let degrees = cell as f64 + 0.5;
+            let played = playback(&table, degrees / 720.0);
+            worst = worst.max((played - curve(degrees)).abs());
+        }
+        assert!(worst < 0.03 * 15.0e5, "playback error {worst:.0} Pa");
+    }
+
+    #[test]
+    fn downsampling_cuts_the_cycle_at_the_origin_it_is_given() {
+        let mut ring = PhaseRing::new();
+        for cell in 0..PHASE_CELLS {
+            ring.record(
+                deg(cell as f64 + 0.5),
+                PhaseSample {
+                    pressure: cell as f64,
+                    ..PhaseSample::default()
+                },
+            );
+        }
+        // Cell zero of a table cut at 360 degrees is the mean of cells 360..365.
+        let table = ring.downsample_from(deg(360.0), |s| s.pressure);
+        approx(table[0] as f64, 362.0, 1e-3);
+        // And the table still spans the whole cycle, wrapping at the end.
+        let last = table[CYCLE_TABLE - 1] as f64;
+        approx(last, 356.5, 1.0);
+    }
+
+    #[test]
+    fn downsampling_averages_rather_than_decimates() {
+        // A cell-to-cell alternation is pure Nyquist for the ring and must not
+        // survive into a table running at a fifth of its rate.
+        let mut ring = PhaseRing::new();
+        for cell in 0..PHASE_CELLS {
+            ring.record(
+                deg(cell as f64 + 0.5),
+                PhaseSample {
+                    pressure: if cell % 2 == 0 { 1.0 } else { -1.0 },
+                    ..PhaseSample::default()
+                },
+            );
+        }
+        let table = ring.downsample_from(0.0, |s| s.pressure);
+        let worst = table.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+        assert!(worst <= 0.2, "alias survived downsampling: {worst}");
     }
 
     #[test]
