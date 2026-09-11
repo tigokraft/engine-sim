@@ -101,12 +101,16 @@ pub fn air_absorption_cutoff(distance: f32) -> f32 {
 /// lose high frequencies.
 #[inline]
 pub fn directivity_cutoff(angle_rad: f32, corner_hz: f32, sample_rate: f32) -> f32 {
+    let max_cutoff = 0.45 * sample_rate;
+    if corner_hz >= max_cutoff {
+        return max_cutoff;
+    }
     let half_angle = angle_rad.clamp(0.0, PI) * 0.5;
     let s = half_angle.sin();
     if s < 1e-3 {
-        0.45 * sample_rate
+        max_cutoff
     } else {
-        (corner_hz / s).clamp(corner_hz, 0.45 * sample_rate)
+        (corner_hz / s).clamp(corner_hz, max_cutoff)
     }
 }
 
@@ -120,7 +124,7 @@ pub fn distance_attenuation(distance: f32) -> f32 {
 }
 
 /// Default pressure reflection coefficient of hard ground (asphalt/road) [-].
-pub const GROUND_REFLECTION_COEFF: f32 = 0.95;
+pub const GROUND_REFLECTION_COEFF: f32 = 0.8;
 
 /// Ground bounce path difference between reflected and direct paths [m]:
 ///
@@ -258,10 +262,10 @@ pub struct Listener {
 }
 
 impl Default for Listener {
-    /// Default spectator position 3.5 m behind the vehicle, 1.2 m above ground.
+    /// Default listener position 1.8 m behind vehicle center, 1.2 m above ground.
     fn default() -> Self {
         Self {
-            position: [0.0, -3.5, 1.2],
+            position: [1.0, -0.5, 1.2],
             ear_spacing: LISTENER_EAR_SPACING,
         }
     }
@@ -457,6 +461,170 @@ impl AperturePath {
     #[inline]
     pub fn step_attenuated(&mut self, sample: f32, listener: &Listener) -> (f32, f32) {
         self.step_propagated(sample, listener)
+    }
+}
+
+/// Physical radiating aperture locations on the vehicle chassis [m] (X right, Y forward, Z up).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AperturePositions {
+    /// 3D position of each exhaust tailpipe [m].
+    pub tailpipes: Vec<[f64; 3]>,
+    /// 3D position of intake mouth (snorkel / airbox inlet / trumpets) [m].
+    pub intake: [f64; 3],
+    /// 3D position of engine block center of mass [m].
+    pub block: [f64; 3],
+}
+
+impl AperturePositions {
+    /// Standard front-engine single-exhaust layout (e.g. inline-4, inline-6).
+    pub fn front_engine_single() -> Self {
+        Self {
+            tailpipes: vec![[0.35, -2.2, 0.35]],
+            intake: [0.2, 1.3, 0.65],
+            block: [0.0, 0.8, 0.5],
+        }
+    }
+
+    /// Standard front-engine dual-exhaust layout (e.g. cross-plane V8, twin-turbo V8, V12).
+    pub fn front_engine_dual() -> Self {
+        Self {
+            tailpipes: vec![[-0.45, -2.4, 0.35], [0.45, -2.4, 0.35]],
+            intake: [0.0, 1.4, 0.65],
+            block: [0.0, 0.8, 0.5],
+        }
+    }
+
+    /// Mid-engine dual-exhaust layout (e.g. flat-plane V8, V10).
+    pub fn mid_engine_dual() -> Self {
+        Self {
+            tailpipes: vec![[-0.35, -2.1, 0.45], [0.35, -2.1, 0.45]],
+            intake: [0.0, 0.25, 0.75],
+            block: [0.0, -0.4, 0.45],
+        }
+    }
+
+    /// Front-mid rotary layout (e.g. RX-7).
+    pub fn rotary() -> Self {
+        Self {
+            tailpipes: vec![[0.40, -2.0, 0.32]],
+            intake: [-0.2, 1.1, 0.60],
+            block: [0.0, 0.5, 0.40],
+        }
+    }
+}
+
+impl Default for AperturePositions {
+    fn default() -> Self {
+        Self::front_engine_dual()
+    }
+}
+
+/// Acoustic propagation model placing vehicle radiator apertures in 3D space relative to a listener.
+#[derive(Debug, Clone)]
+pub struct PropagationModel {
+    /// Listener position and ear geometry.
+    pub listener: Listener,
+    /// Acoustic paths from each exhaust tailpipe.
+    pub tailpipe_paths: Vec<AperturePath>,
+    /// Acoustic path from intake mouth.
+    pub intake_path: AperturePath,
+    /// Acoustic path from engine block structure.
+    pub block_path: AperturePath,
+}
+
+impl PropagationModel {
+    /// Creates a new propagation model from apertures and a listener at `sample_rate`.
+    pub fn new(
+        listener: Listener,
+        tailpipes: Vec<Aperture>,
+        intake: Aperture,
+        block: Aperture,
+        sample_rate: f32,
+    ) -> Self {
+        let tailpipe_paths = tailpipes
+            .into_iter()
+            .map(|ap| AperturePath::new(ap, sample_rate))
+            .collect();
+        let intake_path = AperturePath::new(intake, sample_rate);
+        let block_path = AperturePath::new(block, sample_rate);
+        Self {
+            listener,
+            tailpipe_paths,
+            intake_path,
+            block_path,
+        }
+    }
+
+    /// Resets all internal delay lines and filters.
+    pub fn reset(&mut self) {
+        for path in &mut self.tailpipe_paths {
+            path.reset();
+        }
+        self.intake_path.reset();
+        self.block_path.reset();
+    }
+
+    /// Sets common vehicle velocity vector [m/s] for all engine apertures.
+    pub fn set_velocity(&mut self, velocity: [f32; 3]) {
+        for path in &mut self.tailpipe_paths {
+            path.velocity = velocity;
+        }
+        self.intake_path.velocity = velocity;
+        self.block_path.velocity = velocity;
+    }
+
+    /// Advances the position of all apertures by `dt` seconds according to their velocities.
+    pub fn update_motion(&mut self, dt: f32) {
+        for path in &mut self.tailpipe_paths {
+            path.update_motion(dt);
+        }
+        self.intake_path.update_motion(dt);
+        self.block_path.update_motion(dt);
+    }
+
+    /// Propagates sound from all apertures to the listener's ears.
+    ///
+    /// - `tailpipe_pressures`: Radiated pressure from each tailpipe [Pa].
+    /// - `intake_pressure`: Radiated pressure from intake opening [Pa].
+    /// - `block_pressure`: Radiated structural sound from engine block [Pa].
+    ///
+    /// Returns stereo `(left, right)` acoustic pressure at listener's ears.
+    #[inline]
+    pub fn step(
+        &mut self,
+        tailpipe_pressures: &[f32],
+        intake_pressure: f32,
+        block_pressure: f32,
+    ) -> (f32, f32) {
+        let mut left = 0.0f32;
+        let mut right = 0.0f32;
+
+        let num_paths = self.tailpipe_paths.len().max(1);
+        for (i, path) in self.tailpipe_paths.iter_mut().enumerate() {
+            let mut sample = 0.0f32;
+            for (bank_idx, &p) in tailpipe_pressures.iter().enumerate() {
+                if bank_idx % num_paths == i {
+                    sample += p;
+                }
+            }
+            let (l, r) = path.step_propagated(sample, &self.listener);
+            left += l;
+            right += r;
+        }
+
+        let (in_l, in_r) = self
+            .intake_path
+            .step_propagated(intake_pressure, &self.listener);
+        left += in_l;
+        right += in_r;
+
+        let (bl_l, bl_r) = self
+            .block_path
+            .step_propagated(block_pressure, &self.listener);
+        left += bl_l;
+        right += bl_r;
+
+        (left, right)
     }
 }
 
@@ -812,6 +980,37 @@ mod tests {
         assert!(
             tailpipe_doppler > intake_doppler + 0.05,
             "Intake and tailpipe must have distinctly separate Doppler shifts during pass-by"
+        );
+    }
+
+    #[test]
+    fn propagation_model_propagates_all_apertures_to_stereo() {
+        let sample_rate = 48_000.0;
+        let listener = Listener::new([0.0, -3.5, 1.2]);
+        let tailpipes = vec![
+            Aperture::new([-0.4, -2.4, 0.35], 0.003, [0.0, -1.0, 0.0]),
+            Aperture::new([0.4, -2.4, 0.35], 0.003, [0.0, -1.0, 0.0]),
+        ];
+        let intake = Aperture::new([0.0, 1.5, 0.65], 0.004, [0.0, 1.0, 0.0]);
+        let block = Aperture::new([0.0, 0.8, 0.50], 0.20, [0.0, 0.0, 1.0]);
+
+        let mut model = PropagationModel::new(listener, tailpipes, intake, block, sample_rate);
+
+        // Feed impulse to tailpipe 0
+        let (l, r) = model.step(&[1.0, 0.0], 0.0, 0.0);
+        // Direct propagation will arrive after path delay, so initial sample is zero
+        assert_eq!((l, r), (0.0, 0.0));
+
+        // Step through until pulses arrive and verify finite output
+        let mut sum_energy = 0.0f32;
+        for _ in 0..1000 {
+            let (out_l, out_r) = model.step(&[0.0, 0.0], 0.0, 0.0);
+            assert!(out_l.is_finite() && out_r.is_finite());
+            sum_energy += out_l * out_l + out_r * out_r;
+        }
+        assert!(
+            sum_energy > 1e-6,
+            "Acoustic energy must arrive at the listener"
         );
     }
 }

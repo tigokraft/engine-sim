@@ -23,7 +23,8 @@
 use std::f64::consts::PI;
 
 use crate::audio::{
-    EngineControls, ImpulsiveSpec, Induction, MechanicalSpec, SnapshotSource, SynthConfig,
+    AperturePositions, EngineControls, ImpulsiveSpec, Induction, MechanicalSpec, SnapshotSource,
+    SynthConfig,
 };
 use crate::environment::Environment;
 use crate::physics::cylinder::{deg, CylinderGeometry};
@@ -113,6 +114,8 @@ pub struct EnginePreset {
     /// makes at the redline, or the engine plateaus below it and never bounces
     /// off the limiter.
     pub load: (f64, f64, f64),
+    /// Physical radiating aperture locations on the vehicle chassis [m].
+    pub aperture_positions: AperturePositions,
 }
 
 impl EnginePreset {
@@ -142,6 +145,7 @@ impl EnginePreset {
             .with_induction(self.induction)
             .with_mechanical(self.mechanical);
         config.structure = config.structure.with_bore_spacing(self.bore_spacing);
+        config.aperture_positions = self.aperture_positions.clone();
         config
     }
 
@@ -220,6 +224,7 @@ impl EnginePreset {
             idle: 850.0,
             inertia: 0.22,
             load: (3.0, 0.010, 7.0e-5),
+            aperture_positions: AperturePositions::front_engine_single(),
         }
     }
 
@@ -275,6 +280,7 @@ impl EnginePreset {
             idle: 750.0,
             inertia: 0.45,
             load: (6.0, 0.020, 1.3e-4),
+            aperture_positions: AperturePositions::front_engine_dual(),
         }
     }
 
@@ -322,6 +328,7 @@ impl EnginePreset {
             idle: 900.0,
             inertia: 0.30,
             load: (5.0, 0.014, 6.5e-5),
+            aperture_positions: AperturePositions::mid_engine_dual(),
         }
     }
 
@@ -380,6 +387,11 @@ impl EnginePreset {
             idle: 900.0,
             inertia: 0.40,
             load: (6.0, 0.017, 8.0e-5),
+            aperture_positions: AperturePositions {
+                tailpipes: vec![[-0.30, -2.1, 0.45], [0.30, -2.1, 0.45]],
+                intake: [0.0, 0.30, 0.75],
+                block: [0.0, -0.4, 0.45],
+            },
         }
     }
 
@@ -427,6 +439,11 @@ impl EnginePreset {
             idle: 800.0,
             inertia: 0.48,
             load: (7.0, 0.020, 1.2e-4),
+            aperture_positions: AperturePositions {
+                tailpipes: vec![[-0.45, -2.5, 0.35], [0.45, -2.5, 0.35]],
+                intake: [0.0, 1.6, 0.65],
+                block: [0.0, 0.7, 0.5],
+            },
         }
     }
 
@@ -496,6 +513,7 @@ impl EnginePreset {
             idle: 950.0,
             inertia: 0.20,
             load: (4.0, 0.013, 7.0e-5),
+            aperture_positions: AperturePositions::rotary(),
         }
     }
 
@@ -545,6 +563,11 @@ impl EnginePreset {
             idle: 820.0,
             inertia: 0.24,
             load: (2.6, 0.009, 5.5e-5),
+            aperture_positions: AperturePositions {
+                tailpipes: vec![[0.35, -2.2, 0.35]],
+                intake: [0.2, 1.4, 0.65],
+                block: [0.0, 0.8, 0.5],
+            },
         }
     }
 
@@ -606,6 +629,7 @@ impl EnginePreset {
             idle: 760.0,
             inertia: 0.44,
             load: (5.0, 0.016, 9.0e-5),
+            aperture_positions: AperturePositions::front_engine_dual(),
         }
     }
 
@@ -657,6 +681,11 @@ impl EnginePreset {
             idle: 780.0,
             inertia: 0.33,
             load: (3.6, 0.012, 7.0e-5),
+            aperture_positions: AperturePositions {
+                tailpipes: vec![[0.35, -2.3, 0.35]],
+                intake: [0.25, 1.4, 0.65],
+                block: [0.0, 0.7, 0.5],
+            },
         }
     }
 }
@@ -1220,6 +1249,37 @@ mod tests {
                     diff_synth_samples
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_preset_has_valid_aperture_positions() {
+        for preset in EnginePreset::catalogue() {
+            assert!(
+                !preset.aperture_positions.tailpipes.is_empty(),
+                "{}: has no tailpipes configured",
+                preset.name
+            );
+            for (i, tp) in preset.aperture_positions.tailpipes.iter().enumerate() {
+                assert!(
+                    tp[2] > 0.0,
+                    "{}: tailpipe {i} height <= 0 ({:?})",
+                    preset.name,
+                    tp
+                );
+            }
+            assert!(
+                preset.aperture_positions.intake[2] > 0.0,
+                "{}: intake height <= 0 ({:?})",
+                preset.name,
+                preset.aperture_positions.intake
+            );
+            assert!(
+                preset.aperture_positions.block[2] > 0.0,
+                "{}: block height <= 0 ({:?})",
+                preset.name,
+                preset.aperture_positions.block
+            );
         }
     }
 }

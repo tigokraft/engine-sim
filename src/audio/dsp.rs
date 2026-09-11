@@ -90,9 +90,10 @@ use crate::audio::filters::{
     OnePole, OversampledClipper, Smoothed,
 };
 use crate::audio::intake_voice::IntakeNetwork;
+use crate::audio::propagation::{Aperture, AperturePositions, Listener, PropagationModel};
 use crate::audio::structure::{combustion_drive, StructuralPath, StructuralSpec};
 use crate::audio::waveguide::{ExhaustNetwork, ExhaustTemperatures};
-use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
+use crate::physics::plumbing::{ExhaustSystem, IntakeSystem, ThrottleLayout};
 
 pub use crate::physics::engine_block::CYCLE_TABLE;
 
@@ -644,6 +645,8 @@ pub struct SynthConfig {
     /// in the catalogue renders every fixed profile clean — no clipping and no
     /// slew — with headroom in hand.
     pub master_gain: f64,
+    /// Physical radiating aperture locations on the vehicle chassis [m].
+    pub aperture_positions: AperturePositions,
 }
 
 impl Default for SynthConfig {
@@ -710,6 +713,11 @@ impl SynthConfig {
             structure_level: 0.07,
             mechanical: MechanicalSpec::default(),
             master_gain: 0.20,
+            aperture_positions: if banks > 1 {
+                AperturePositions::front_engine_dual()
+            } else {
+                AperturePositions::front_engine_single()
+            },
         }
     }
 
@@ -1237,16 +1245,9 @@ const CCV_MAX_AMPLITUDE_EXCURSION: f32 = 0.75;
 // Exhaust bank
 // ---------------------------------------------------------------------------
 
-/// One bank's place in the stereo image, and how many cylinders feed it.
-///
-/// The acoustics used to live here — a lumped runner and a muffler per bank.
-/// They are now in [`ExhaustNetwork`], which holds one primary per cylinder and
-/// a real collector, so what is left of a bank is where its tailpipe sits
-/// relative to the listener.
+/// One bank's cylinder count feeding the exhaust network.
 #[derive(Debug, Clone, Copy)]
 struct ExhaustBank {
-    pan_left: f32,
-    pan_right: f32,
     /// How many cylinders exhaust into this bank.
     ///
     /// Held here because it is the denominator of the Transit-Time Decision
@@ -1257,21 +1258,7 @@ struct ExhaustBank {
 
 impl ExhaustBank {
     fn new(config: &SynthConfig, index: usize) -> Self {
-        // Spread the banks across the image. A real vee engine's banks reach the
-        // listener along different paths, and separating them is what lets the
-        // uneven bank intervals be heard as two interleaved rhythms rather than
-        // one blurred train.
-        let spread = if config.bank_count > 1 {
-            let t = index as f32 / (config.bank_count - 1) as f32;
-            (t - 0.5) * 0.7
-        } else {
-            0.0
-        };
-        // Equal-power pan, so the summed level is flat across the image.
-        let angle = (spread * 0.5 + 0.5) * std::f32::consts::FRAC_PI_2;
         Self {
-            pan_left: angle.cos(),
-            pan_right: angle.sin(),
             cylinder_count: config
                 .cylinders
                 .iter()
@@ -2123,6 +2110,8 @@ pub struct EngineSynth {
     backfire: BackfireVoice,
     mechanical: MechanicalVoice,
     knock: KnockVoice,
+    propagation: PropagationModel,
+    tailpipe_pressures: Vec<f32>,
 
     /// Master-cycle phase over 720 crank degrees, as a fraction of [`PHASE_ONE`].
     ///
@@ -2242,6 +2231,71 @@ impl EngineSynth {
             })
             .collect();
 
+        let tailpipe_area = config.exhaust.tailpipe.area.max(1e-4) as f32;
+        let intake_area = config
+            .intake
+            .snorkel
+            .as_ref()
+            .map(|s| s.area)
+            .or_else(|| config.intake.airbox.as_ref().map(|a| a.area))
+            .unwrap_or(match config.intake.throttle {
+                ThrottleLayout::Single { bore } => std::f64::consts::PI * 0.25 * bore * bore,
+                ThrottleLayout::IndividualBodies { bore } => {
+                    std::f64::consts::PI * 0.25 * bore * bore * config.intake.runners.len() as f64
+                }
+            })
+            .max(1e-4) as f32;
+
+        // The block is a structural body radiating omnidirectionally as a monopole
+        // (ka <= 1 across the audible range), so its effective aperture area has
+        // corner frequency well above Nyquist.
+        let block_area = 1.0e-6f32;
+
+        let tailpipe_positions = if !config.aperture_positions.tailpipes.is_empty() {
+            &config.aperture_positions.tailpipes
+        } else {
+            &AperturePositions::front_engine_single().tailpipes
+        };
+
+        let tailpipes = tailpipe_positions
+            .iter()
+            .map(|&pos| {
+                Aperture::new(
+                    [pos[0] as f32, pos[1] as f32, pos[2] as f32],
+                    tailpipe_area,
+                    [0.0, -1.0, 0.0],
+                )
+            })
+            .collect();
+
+        let intake_aperture = Aperture::new(
+            [
+                config.aperture_positions.intake[0] as f32,
+                config.aperture_positions.intake[1] as f32,
+                config.aperture_positions.intake[2] as f32,
+            ],
+            intake_area,
+            [0.0, 1.0, 0.0],
+        );
+
+        let block_aperture = Aperture::new(
+            [
+                config.aperture_positions.block[0] as f32,
+                config.aperture_positions.block[1] as f32,
+                config.aperture_positions.block[2] as f32,
+            ],
+            block_area,
+            [0.0, 0.0, 1.0],
+        );
+
+        let propagation = PropagationModel::new(
+            Listener::default(),
+            tailpipes,
+            intake_aperture,
+            block_aperture,
+            fs,
+        );
+
         let mut synth = Self {
             banks,
             network,
@@ -2257,6 +2311,8 @@ impl EngineSynth {
             backfire: BackfireVoice::new(fs),
             mechanical: MechanicalVoice::from_spec(&config.mechanical, fs),
             knock: KnockVoice::new(fs),
+            propagation,
+            tailpipe_pressures: vec![0.0; config.bank_count],
             variation: vec![CycleVariation::default(); config.cylinders.len()],
             variation_depth: 0.0,
             phase_fixed: 0,
@@ -2326,6 +2382,16 @@ impl EngineSynth {
     /// Mutable reference to the intake waveguide network.
     pub fn intake_network_mut(&mut self) -> &mut IntakeNetwork {
         &mut self.intake_network
+    }
+
+    /// Acoustic propagation model placing apertures and listener in space.
+    pub fn propagation(&self) -> &PropagationModel {
+        &self.propagation
+    }
+
+    /// Mutable access to the acoustic propagation model.
+    pub fn propagation_mut(&mut self) -> &mut PropagationModel {
+        &mut self.propagation
     }
 
     /// Excitation presented to the intake network this sample, per cylinder [Pa].
@@ -2402,6 +2468,8 @@ impl EngineSynth {
         self.turbo.reset();
         self.mechanical.reset();
         self.knock.reset();
+        self.propagation.reset();
+        self.tailpipe_pressures.fill(0.0);
         self.dc = [DcBlocker::default(); 2];
         self.structure.reset();
         self.phase_fixed = 0;
@@ -2762,18 +2830,10 @@ impl EngineSynth {
             &self.bank_excitations,
             &mut self.radiated,
         );
-        let (mut left, mut right) = (0.0f32, 0.0f32);
-        for (bank, &out) in self.banks.iter().zip(self.radiated.iter()) {
-            let out = out * exhaust_level;
-            left += out * bank.pan_left;
-            right += out * bank.pan_right;
+        for (tp, &out) in self.tailpipe_pressures.iter_mut().zip(self.radiated.iter()) {
+            *tp = out * exhaust_level;
         }
 
-        // Intake, turbo, cylinder bore knock and the block itself are near the
-        // listener's centre line and share one mono source; only the exhaust is
-        // imaged, because only the exhaust has two outlets. The block is a
-        // single structural object sitting between the banks and radiating a
-        // four-metre wavelength at its lowest mode: there is nothing to image.
         let turbo = match self.config.turbo {
             Some(voicing) => self.turbo.process(&mut self.noise) * voicing.level as f32,
             None => 0.0,
@@ -2791,11 +2851,12 @@ impl EngineSynth {
         let drive = rise * self.combustion_scale
             + self.mechanical.process(&mut self.noise) * self.config.mechanical_level as f32
             + self.knock.process(&mut self.noise) * self.knock_scale;
-        let centre = intake_rad * self.config.intake_level as f32
-            + turbo
-            + self.structure.process(drive) * self.config.structure_level as f32;
-        left += centre;
-        right += centre;
+        let block_rad = turbo + self.structure.process(drive) * self.config.structure_level as f32;
+        let intake_rad = intake_rad * self.config.intake_level as f32;
+
+        let (left, right) = self
+            .propagation
+            .step(&self.tailpipe_pressures, intake_rad, block_rad);
 
         let gain = self.config.master_gain as f32 * self.fade_in.next_value();
         let mut out = [left, right];
