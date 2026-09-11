@@ -954,7 +954,7 @@ mod tests {
         let mut driveline = Driveline::new(&preset);
 
         // Ten seconds of a cold start: the governor is holding a fast idle.
-        let mut idle_for = |block: &mut EngineBlock, driveline: &mut Driveline, seconds: f64| {
+        let idle_for = |block: &mut EngineBlock, driveline: &mut Driveline, seconds: f64| {
             for _ in 0..(seconds / dt) as usize {
                 driveline.update(block, dt);
                 block.update(dt, driveline.rpm);
