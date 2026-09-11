@@ -545,6 +545,221 @@ pub fn track(samples: &[f32], sample_rate: f64, rpm: &RpmCurve, orders: &[f64]) 
 }
 
 // ---------------------------------------------------------------------------
+// Order balance
+// ---------------------------------------------------------------------------
+
+/// One order's level, measured against another order's [dB].
+#[derive(Debug, Clone, Copy)]
+pub struct BalanceLevel {
+    /// The order, in cycles per crank revolution.
+    pub order: f64,
+    /// How far this order sits above or below the reference order [dB], or
+    /// `None` where it was never resolvable.
+    pub relative_db: Option<f64>,
+}
+
+/// An order table with one order taken as its reference: the *balance* between
+/// orders, with the absolute level divided out.
+///
+/// This is the only form in which a recording and a render can be compared.
+/// A recording arrives at whatever level a microphone, a preamp, a distance and
+/// a mastering chain left it at, and a render arrives at whatever the preset's
+/// master gain asks for; the difference between two of its orders survives all
+/// of that and the absolute level of either survives none of it.
+///
+/// It is also what keeps the calibration loop physical, and that is the point
+/// of it rather than a side effect. A gain constant — anywhere from the
+/// excitation to the master fader — moves every order by the same number of
+/// decibels, so it cancels out of every figure in this table and cannot close
+/// a single disagreement in it. What *can* move one order relative to another
+/// is geometry: a length, a volume, a radius, a reflection. When this table
+/// disagrees with a reference, the fix is in the plumbing or it does not exist.
+#[derive(Debug, Clone)]
+pub struct Balance {
+    /// The order everything else is quoted against.
+    pub reference_order: f64,
+    /// The absolute level of that order [dBFS], kept only so a report can say
+    /// what was divided out.
+    pub reference_db: f64,
+    /// One row per order, in the order they were measured.
+    pub levels: Vec<BalanceLevel>,
+}
+
+impl Balance {
+    /// Builds a balance from levels already in decibels, relative to
+    /// `reference_order`.
+    ///
+    /// `levels` are absolute — dBFS from a render, or the crank's own comb in
+    /// dB — and `None` is an order that could not be measured, which is not the
+    /// same as one that was silent.
+    pub fn from_levels(reference_order: f64, levels: &[(f64, Option<f64>)]) -> Self {
+        let reference_db = levels
+            .iter()
+            .find(|(order, _)| (order - reference_order).abs() < 1e-9)
+            .and_then(|&(_, db)| db)
+            .unwrap_or(SILENCE_DB);
+        Self {
+            reference_order,
+            reference_db,
+            levels: levels
+                .iter()
+                .map(|&(order, db)| BalanceLevel {
+                    order,
+                    relative_db: db.map(|db| db - reference_db),
+                })
+                .collect(),
+        }
+    }
+
+    /// This order's level relative to the reference order [dB].
+    pub fn at(&self, order: f64) -> Option<f64> {
+        self.levels
+            .iter()
+            .find(|l| (l.order - order).abs() < 1e-9)
+            .and_then(|l| l.relative_db)
+    }
+
+    /// The same balance restricted to the orders in `orders`.
+    ///
+    /// What a comparison uses to answer a question about part of the comb —
+    /// the orders the crank actually drives, say, as against the ones it leaves
+    /// empty, which are a different question and take a different test.
+    pub fn only(&self, orders: &[f64]) -> Self {
+        Self {
+            reference_order: self.reference_order,
+            reference_db: self.reference_db,
+            levels: self
+                .levels
+                .iter()
+                .filter(|l| orders.iter().any(|o| (o - l.order).abs() < 1e-9))
+                .copied()
+                .collect(),
+        }
+    }
+
+    /// The loudest order in the balance, by level relative to the reference.
+    pub fn loudest(&self) -> Option<&BalanceLevel> {
+        self.levels
+            .iter()
+            .filter(|l| l.relative_db.is_some())
+            .max_by(|a, b| {
+                a.relative_db
+                    .unwrap_or(SILENCE_DB)
+                    .total_cmp(&b.relative_db.unwrap_or(SILENCE_DB))
+            })
+    }
+
+    /// How far this balance sits from `reference`, order by order.
+    ///
+    /// Only orders resolvable on both sides are compared; an order missing from
+    /// either is reported as uncompared rather than as agreement.
+    pub fn against(&self, reference: &Balance) -> Comparison {
+        let mut deltas = Vec::new();
+        let mut missing = 0usize;
+        for level in &self.levels {
+            let Some(mine) = level.relative_db else {
+                missing += 1;
+                continue;
+            };
+            let Some(theirs) = reference.at(level.order) else {
+                missing += 1;
+                continue;
+            };
+            deltas.push(OrderDelta {
+                order: level.order,
+                reference_db: theirs,
+                measured_db: mine,
+                delta_db: mine - theirs,
+            });
+        }
+        Comparison { deltas, missing }
+    }
+}
+
+impl OrderTable {
+    /// This table as a balance against one of its own orders.
+    ///
+    /// The firing order is the one to ask for: it is the order the engine
+    /// drives hardest, it is resolvable over the widest speed range, and it is
+    /// the one a listener hears as the note.
+    pub fn balance(&self, reference_order: f64) -> Balance {
+        let levels: Vec<(f64, Option<f64>)> = self
+            .levels
+            .iter()
+            .map(|l| (l.order, if l.frames > 0 { Some(l.mean_db) } else { None }))
+            .collect();
+        Balance::from_levels(reference_order, &levels)
+    }
+}
+
+/// One order's disagreement between a measurement and a reference [dB].
+#[derive(Debug, Clone, Copy)]
+pub struct OrderDelta {
+    /// The order.
+    pub order: f64,
+    /// Where the reference put it, relative to the reference order [dB].
+    pub reference_db: f64,
+    /// Where the measurement put it, on the same footing [dB].
+    pub measured_db: f64,
+    /// Measured minus reference: positive where the measurement is too loud.
+    pub delta_db: f64,
+}
+
+/// How far one order balance sits from another.
+#[derive(Debug, Clone)]
+pub struct Comparison {
+    /// One row per order compared, in the order they were measured.
+    pub deltas: Vec<OrderDelta>,
+    /// Orders that could not be compared because one side could not resolve
+    /// them.
+    pub missing: usize,
+}
+
+impl Comparison {
+    /// The largest disagreement on any order [dB].
+    pub fn max_abs_db(&self) -> f64 {
+        self.worst().map_or(0.0, |d| d.delta_db.abs())
+    }
+
+    /// Root-mean-square disagreement across the orders compared [dB].
+    ///
+    /// The headline figure, because a single order can disagree for a reason
+    /// that is about that order — a mode sitting on it at one engine speed —
+    /// while the whole comb sliding one way is about the model.
+    pub fn rms_db(&self) -> f64 {
+        if self.deltas.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = self.deltas.iter().map(|d| d.delta_db * d.delta_db).sum();
+        (sum / self.deltas.len() as f64).sqrt()
+    }
+
+    /// Mean disagreement across the orders compared [dB].
+    ///
+    /// A tilt in the comb rather than a scatter in it: if every order above the
+    /// reference is down and every order below it is up, this stays near zero
+    /// and [`Self::rms_db`] does not, and the two together say which it is.
+    pub fn mean_db(&self) -> f64 {
+        if self.deltas.is_empty() {
+            return 0.0;
+        }
+        self.deltas.iter().map(|d| d.delta_db).sum::<f64>() / self.deltas.len() as f64
+    }
+
+    /// The order that disagrees most.
+    pub fn worst(&self) -> Option<&OrderDelta> {
+        self.deltas
+            .iter()
+            .max_by(|a, b| a.delta_db.abs().total_cmp(&b.delta_db.abs()))
+    }
+
+    /// Whether every order compared agrees to within `tolerance_db`.
+    pub fn within(&self, tolerance_db: f64) -> bool {
+        !self.deltas.is_empty() && self.max_abs_db() <= tolerance_db
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Resonances
 // ---------------------------------------------------------------------------
 
