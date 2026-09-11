@@ -1167,6 +1167,12 @@ mod tests {
             let mut block = preset.block(Environment::default());
             let mut driveline = Driveline::new(&preset);
             driveline.redline = f64::INFINITY;
+            // The block's own limiter has to come out as well as the
+            // driveline's. On a spark-cut engine it makes no difference to the
+            // torque the block solves, but a fuel cut really does stop the
+            // combustion — so leaving it in would measure the limiter rather
+            // than the brake load, on exactly the engines that have one.
+            block.ecu.redline = f64::INFINITY;
             driveline.throttle_target = 1.0;
             let dt = 1.0 / 240.0;
 

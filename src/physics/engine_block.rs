@@ -1169,6 +1169,15 @@ impl EngineBlock {
         let thermal = EngineThermal::soaked(180.0, &exhaust, environment.temperature);
         let ecu = EngineControlUnit {
             base_wiebe_duration: model.combustion.duration(),
+            // There is no coil on a compression-ignition engine, so there is
+            // nothing for a spark cut to cut. The only way to stop a diesel
+            // firing is to stop fuelling it, which is also why a diesel on its
+            // limiter simply goes quiet instead of banging: a cylinder that got
+            // no fuel has none to send out of the exhaust unburnt.
+            limiter_cut_type: match model.combustion {
+                HeatRelease::Spark(_) => LimiterCut::Spark,
+                HeatRelease::Compression(_) => LimiterCut::Fuel,
+            },
             ..EngineControlUnit::default()
         };
 
