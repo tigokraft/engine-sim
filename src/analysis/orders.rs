@@ -1055,6 +1055,85 @@ pub fn resonances(samples: &[f32], sample_rate: f64, count: usize) -> Vec<Peak> 
     AverageSpectrum::of(samples, sample_rate).peaks(count, MIN_PROMINENCE_DB)
 }
 
+// ---------------------------------------------------------------------------
+// Resonance placement
+// ---------------------------------------------------------------------------
+
+/// How far either side of a prediction a peak is still the same mode [%].
+///
+/// A quarter of the frequency is about a third of an octave, which is wider
+/// than any error a length or a temperature can plausibly account for and
+/// narrower than the gap between a pipe's own harmonics — so a peak inside it
+/// is the mode that was predicted and a peak outside it is a different mode.
+/// Beyond it the honest answer is that the prediction was not found at all,
+/// which is a different finding from having found it in the wrong place.
+pub const PLACEMENT_WINDOW_PCT: f64 = 25.0;
+
+/// Where a predicted resonance actually landed.
+///
+/// The second comparison metric: a length, a volume and a temperature each
+/// predict a frequency, and this is whether the audio agrees. Unlike a level
+/// this is not a matter of taste or of gain — a pipe either resonates where its
+/// own geometry says it does or the geometry in the model is not the geometry
+/// it is being credited with.
+#[derive(Debug, Clone, Copy)]
+pub struct Placement {
+    /// Where the geometry says the mode is [Hz].
+    pub predicted_hz: f64,
+    /// The peak found nearest to it, inside the search window [Hz].
+    pub measured_hz: Option<f64>,
+    /// That peak's level [dBFS].
+    pub db: Option<f64>,
+    /// How far it stood above its surroundings [dB].
+    pub prominence_db: Option<f64>,
+}
+
+impl Placement {
+    /// Signed placement error [%], positive where the audio sits high.
+    pub fn error_pct(&self) -> Option<f64> {
+        let measured = self.measured_hz?;
+        (self.predicted_hz > 0.0)
+            .then(|| 100.0 * (measured - self.predicted_hz) / self.predicted_hz)
+    }
+
+    /// Whether the mode was found, and within `tolerance_pct` of its prediction.
+    pub fn within(&self, tolerance_pct: f64) -> bool {
+        self.error_pct().is_some_and(|e| e.abs() <= tolerance_pct)
+    }
+
+    /// The length that *would* put a quarter-wave mode where this one landed
+    /// [m], given the length it was predicted from.
+    ///
+    /// The stage's one rule, as arithmetic: a mode 8 % low is a pipe 8 % long,
+    /// and this says what the pipe would have to be instead. It is the only
+    /// honest way to answer a placement error, because the alternative — an
+    /// equaliser that moves the peak without moving the pipe — leaves the
+    /// delay, the reflection and every harmonic above it where they were.
+    pub fn implied_length(&self, predicted_from: f64) -> Option<f64> {
+        let measured = self.measured_hz?;
+        (measured > 0.0).then(|| predicted_from * self.predicted_hz / measured)
+    }
+}
+
+/// The peak nearest `predicted_hz`, if one lies within `window_pct` of it.
+pub fn place(predicted_hz: f64, peaks: &[Peak], window_pct: f64) -> Placement {
+    let window = predicted_hz * window_pct / 100.0;
+    let nearest = peaks
+        .iter()
+        .filter(|p| (p.hz - predicted_hz).abs() <= window)
+        .min_by(|a, b| {
+            (a.hz - predicted_hz)
+                .abs()
+                .total_cmp(&(b.hz - predicted_hz).abs())
+        });
+    Placement {
+        predicted_hz,
+        measured_hz: nearest.map(|p| p.hz),
+        db: nearest.map(|p| p.db),
+        prominence_db: nearest.map(|p| p.prominence_db),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
