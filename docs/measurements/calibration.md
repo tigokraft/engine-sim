@@ -53,7 +53,9 @@ Recorded rather than closed, as Stage 16 requires: each of these is a disagreeme
 
 4. **A primary's measured mode implies an acoustic length a few per cent off its declared centre line, in both directions.** The model's collector junction is memoryless, so the extra length a primary shows is its collector taper's own delay line; the residual runs from -6 % to +14 % across the catalogue with no consistent sign. No declared primary length is changed on the strength of it: a correction that scatters both ways is scatter, and fitting each preset to its own scatter would be the tone knob in different clothes.
 
-5. **Several predicted modes leave no peak at all.** The turbodiesel is the extreme — it radiates through its block rather than its pipe, so the exhaust chain barely reaches the listener and five of its twelve predicted modes are absent rather than misplaced. Absence is the honest report: a peak found more than 25 % from a prediction is a different mode, not that one in the wrong place.
+5. **The peak nearest a primary's quarter wave is not the primary's alone.** Stretching the inline-four's primaries by half, with nothing else touched, drops it from 403 Hz to 244 Hz where strict proportionality says 269, and shortening them by a quarter puts it at 428 Hz where proportionality says 537. It moves with the length, monotonically and by most of what the length says, but it is a mode of the primary *and* the taper and chain behind it — which is why the test suite asserts that it tracks the declared length to 20 % rather than asserting `c/4L`, and why a single placement tolerance does not hold across the catalogue.
+
+6. **Several predicted modes leave no peak at all.** The turbodiesel is the extreme — it radiates through its block rather than its pipe, so the exhaust chain barely reaches the listener and five of its twelve predicted modes are absent rather than misplaced. Absence is the honest report: a peak found more than 25 % from a prediction is a different mode, not that one in the wrong place.
 
 
 ## Inline-4
