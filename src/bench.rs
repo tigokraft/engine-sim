@@ -36,6 +36,11 @@ use crate::physics::thermodynamics::{CylinderModel, ValveEvent, ValveTrain, Wieb
 /// Speed below which the engine has stalled [rev/min].
 pub const STALL_RPM: f64 = 400.0;
 
+/// Fractional lift in the idle target on a stone-cold engine [-].
+///
+/// See [`Driveline::cold_idle_rise`], which is where it is used and why.
+pub const COLD_IDLE_RISE: f64 = 0.60;
+
 /// Pumping mean effective pressure with the throttle shut [Pa].
 ///
 /// A closed throttle plate is a brake: the piston draws its intake stroke
@@ -679,8 +684,17 @@ pub struct Driveline {
     pub manual_cut: bool,
     /// Speed at which the limiter cuts [rev/min].
     pub redline: f64,
-    /// Speed the governor holds [rev/min].
+    /// Speed the governor holds once the engine is warm [rev/min].
     pub idle: f64,
+    /// How far above the warm idle the governor holds a stone-cold engine [-].
+    ///
+    /// A cold engine is given a fast idle for reasons that are all real: the oil
+    /// is thick enough that the same throttle leaves less net torque, the fuel
+    /// that condenses on a cold port never burns, and the catalyst has to be lit
+    /// before it does anything. Six tenths puts an 850 rpm idle at 1360 cold,
+    /// which is where a production engine actually sits on a winter morning, and
+    /// it decays with [`EngineThermal::cold_fraction`] rather than on a timer.
+    pub cold_idle_rise: f64,
     /// Rotating inertia [kg m^2].
     pub inertia: f64,
     /// Brake load coefficients, see [`EnginePreset::load`].
@@ -702,11 +716,21 @@ impl Driveline {
             manual_cut: false,
             redline: preset.redline,
             idle: preset.idle,
+            cold_idle_rise: COLD_IDLE_RISE,
             inertia: preset.inertia,
             load: preset.load,
             pumping: CLOSED_THROTTLE_PMEP * preset.displacement() / (4.0 * PI),
             torque: 0.0,
         }
+    }
+
+    /// Speed the governor is holding for a given engine [rev/min].
+    ///
+    /// Not a constant: it is the warm idle lifted by how cold the block still
+    /// is, so a cold start idles fast and comes down as the engine warms rather
+    /// than stepping when a timer runs out.
+    pub fn idle_target(&self, block: &EngineBlock) -> f64 {
+        self.idle * (1.0 + self.cold_idle_rise * block.thermal.cold_fraction())
     }
 
     /// Whether the limiter is cutting, as distinct from the driver.
@@ -733,7 +757,9 @@ impl Driveline {
 
         // Idle governor: enough throttle to hold the idle speed, and no more.
         // This is what stops the engine stalling the moment the pedal comes up.
-        let governor = ((self.idle + 60.0 - self.rpm) / 500.0).clamp(0.0, 0.30);
+        // The speed it holds is the engine's own, and a cold one is held faster.
+        let target = self.idle_target(block);
+        let governor = ((target + 60.0 - self.rpm) / 500.0).clamp(0.0, 0.30);
         let effective = self.throttle.max(governor);
 
         // The block solves torque for a speed, not for a throttle, so the pedal
