@@ -77,6 +77,60 @@ pub fn dipole_orifice_amplitude(flow_ratio: f32) -> f32 {
     u * u * u
 }
 
+/// Calculates the geometric open area of a throttle body [m^2] from pedal position `0..=1`.
+///
+/// Follows the physical throttle plate geometry:
+/// $$A_{\text{open}}(\theta) = A_{\text{bore}} \cdot \left[1 - \cos\left(\theta \frac{\pi}{2}\right)\right] + A_{\text{leak}}$$
+/// where $A_{\text{leak}} = 0.008 \cdot A_{\text{bore}}$ represents idle bypass and edge leakage.
+#[inline]
+pub fn throttle_area(bore_diameter: f64, throttle_position: f32) -> f32 {
+    let t = (throttle_position as f64).clamp(0.0, 1.0);
+    let radius = bore_diameter.max(1e-4) * 0.5;
+    let bore_area = std::f64::consts::PI * radius * radius;
+    let leak_area = bore_area * 0.008;
+    let swept_area = bore_area * (1.0 - (t * std::f64::consts::FRAC_PI_2).cos());
+    ((swept_area + leak_area).min(bore_area)) as f32
+}
+
+/// Computes acoustic scattering across a throttle area restriction $A_{\text{th}}$.
+///
+/// Models an orifice of area $A_{\text{th}}$ connecting duct 1 ($A_1$) and duct 2 ($A_2$).
+/// Acoustic series resistance of the restriction:
+///
+/// $$Z_{\text{rest}} = \max\left(0, \frac{1}{A_{\text{th}}} - \frac{1}{\min(A_1, A_2)}\right)$$
+///
+/// Acoustic volume velocity through the restriction:
+///
+/// $$U = \frac{2 (p_1^+ - p_2^+)}{\frac{1}{A_1} + \frac{1}{A_2} + 2 Z_{\text{rest}}}$$
+///
+/// Scattered waves returning into each duct:
+///
+/// $$p_1^- = p_1^+ - \frac{U}{A_1}$$
+/// $$p_2^- = p_2^+ + \frac{U}{A_2}$$
+///
+/// When the throttle is shut ($A_{\text{th}} \approx A_{\text{leak}} \to 0$), $Z_{\text{rest}} \to \infty$,
+/// driving $U \to 0$, $p_1^- \to p_1^+$, $p_2^- \to p_2^+$ (rigid reflections, transmission vanishes).
+/// When wide open ($A_{\text{th}} \ge \min(A_1, A_2)$), $Z_{\text{rest}} = 0$, giving unimpeded transmission.
+#[inline]
+pub fn scatter_throttle_restriction(
+    p1_plus: f32,
+    p2_plus: f32,
+    area1: f32,
+    area2: f32,
+    throttle_area: f32,
+) -> (f32, f32) {
+    let a1 = area1.max(1e-7);
+    let a2 = area2.max(1e-7);
+    let a_th = throttle_area.max(1e-9);
+    let min_a = a1.min(a2);
+    let z_rest = (1.0 / a_th - 1.0 / min_a).max(0.0);
+    let denom = (1.0 / a1) + (1.0 / a2) + 2.0 * z_rest;
+    let u = (2.0 * (p1_plus - p2_plus)) / denom;
+    let p1_minus = p1_plus - (u / a1);
+    let p2_minus = p2_plus + (u / a2);
+    (p1_minus, p2_minus)
+}
+
 /// 1D digital waveguide network representing the complete intake system.
 #[derive(Debug, Clone)]
 pub struct IntakeNetwork {
@@ -104,6 +158,7 @@ pub struct IntakeNetwork {
     plenum_scatter_out: Vec<f32>,
     plenum_to_downstream: f32,
     downstream_to_plenum: f32,
+    itb_mouth_refl: Vec<f32>,
 
     /// Number of cylinders.
     cylinder_count: usize,
@@ -111,6 +166,12 @@ pub struct IntakeNetwork {
     sample_rate: f32,
     /// Current throttle position, `0..=1` [-].
     throttle: f32,
+    /// Throttle bore diameter [m].
+    throttle_bore: f64,
+    /// Plenum cavity cross-sectional area [m^2].
+    plenum_area: f32,
+    /// Downstream duct cross-sectional area [m^2].
+    downstream_area: f32,
     /// Throttle arrangement and geometry.
     layout: ThrottleLayout,
 }
@@ -208,6 +269,27 @@ impl IntakeNetwork {
         let runner_to_plenum = vec![0.0; n_cyl];
         let plenum_scatter_in = vec![0.0; n_cyl + 1];
         let plenum_scatter_out = vec![0.0; n_cyl + 1];
+        let itb_mouth_refl = vec![0.0; if is_itb { n_cyl } else { 0 }];
+
+        let throttle_bore = match intake.throttle {
+            ThrottleLayout::Single { bore } => bore,
+            ThrottleLayout::IndividualBodies { bore } => bore,
+        };
+        let plenum_len = 0.20f64;
+        let plenum_area = if is_itb {
+            0.0
+        } else {
+            (intake.plenum_volume / plenum_len).max(1e-5) as f32
+        };
+        let downstream_area = if is_itb {
+            0.0
+        } else {
+            intake
+                .airbox
+                .or(intake.snorkel)
+                .map(|s| s.area as f32)
+                .unwrap_or(0.00385)
+        };
 
         Self {
             runners,
@@ -224,9 +306,13 @@ impl IntakeNetwork {
             plenum_scatter_out,
             plenum_to_downstream: 0.0,
             downstream_to_plenum: 0.0,
+            itb_mouth_refl,
             cylinder_count: n_cyl,
             sample_rate,
             throttle: 0.0,
+            throttle_bore,
+            plenum_area,
+            downstream_area,
             layout: intake.throttle,
         }
     }
@@ -292,6 +378,7 @@ impl IntakeNetwork {
 
         if !self.itb_mouths.is_empty() {
             // Individual throttle bodies (ITBs)
+            let a_th = throttle_area(self.throttle_bore, self.throttle);
             let mut total_rad = 0.0f32;
             for i in 0..n_cyl {
                 let (p_at_valve, p_at_mouth) = self.runners[i].read_outputs();
@@ -301,8 +388,18 @@ impl IntakeNetwork {
                     0.0
                 };
                 let p_in_valve = self.valves[i].step(excit, p_at_valve);
-                let (p_refl, p_rad) = self.itb_mouths[i].step(p_at_mouth);
-                self.runners[i].push_inputs(p_in_valve, p_refl);
+                let runner_area = self.runners[i].area();
+                let prev_refl = self.itb_mouth_refl[i];
+                let (p_back_to_runner, p_to_mouth) = scatter_throttle_restriction(
+                    p_at_mouth,
+                    prev_refl,
+                    runner_area,
+                    runner_area,
+                    a_th,
+                );
+                let (new_refl, p_rad) = self.itb_mouths[i].step(p_to_mouth);
+                self.itb_mouth_refl[i] = new_refl;
+                self.runners[i].push_inputs(p_in_valve, p_back_to_runner);
                 total_rad += p_rad;
             }
             total_rad / (n_cyl as f32).sqrt().max(1.0)
@@ -341,10 +438,18 @@ impl IntakeNetwork {
                 }
             }
 
-            // 4. Downstream chain: plenum -> airbox -> snorkel -> mouth
-            let p_into_plenum_0 = self.plenum_scatter_out[n_cyl];
+            // 4. Scatter through throttle restriction between plenum exit and downstream duct
+            let a_th = throttle_area(self.throttle_bore, self.throttle);
+            let (p_back_to_plenum, p_to_downstream) = scatter_throttle_restriction(
+                p_plenum_at_exit,
+                self.downstream_to_plenum,
+                self.plenum_area,
+                self.downstream_area,
+                a_th,
+            );
 
-            let mut wave_forward = p_plenum_at_exit;
+            // 5. Downstream chain: airbox -> snorkel -> mouth
+            let mut wave_forward = p_to_downstream;
             let mut wave_backward = 0.0f32;
 
             if let Some(airbox) = &mut self.airbox_pipe {
@@ -363,14 +468,20 @@ impl IntakeNetwork {
 
             let radiated = if let Some(mouth) = &mut self.single_mouth {
                 let (refl, rad) = mouth.step(wave_forward);
-                self.downstream_to_plenum = refl;
+                self.downstream_to_plenum =
+                    if self.snorkel_pipe.is_some() || self.airbox_pipe.is_some() {
+                        wave_backward
+                    } else {
+                        refl
+                    };
                 rad
             } else {
                 0.0
             };
 
+            let p_into_plenum_0 = self.plenum_scatter_out[n_cyl];
             if let Some(plenum) = &mut self.plenum_pipe {
-                plenum.push_inputs(p_into_plenum_0, wave_backward);
+                plenum.push_inputs(p_into_plenum_0, p_back_to_plenum);
             }
 
             radiated
@@ -406,6 +517,7 @@ impl IntakeNetwork {
         self.plenum_scatter_out.fill(0.0);
         self.plenum_to_downstream = 0.0;
         self.downstream_to_plenum = 0.0;
+        self.itb_mouth_refl.fill(0.0);
     }
 }
 
@@ -483,5 +595,96 @@ mod tests {
             "doubling flow velocity must scale dipole amplitude by 2^3 = 8"
         );
         assert_eq!(dipole_orifice_amplitude(0.0), 0.0);
+    }
+
+    #[test]
+    fn throttle_area_sweeps_from_leak_to_bore() {
+        let bore = 0.070;
+        let bore_area = (std::f64::consts::PI * (bore * 0.5) * (bore * 0.5)) as f32;
+        let leak_area = bore_area * 0.008;
+
+        let a_shut = throttle_area(bore, 0.0);
+        let a_open = throttle_area(bore, 1.0);
+
+        assert!((a_shut - leak_area).abs() < 1e-6);
+        assert!((a_open - bore_area).abs() < 1e-6);
+
+        // Monotonic with pedal position
+        let mut prev = a_shut;
+        for i in 1..=10 {
+            let a = throttle_area(bore, i as f32 * 0.1);
+            assert!(a >= prev, "throttle area must increase monotonically");
+            prev = a;
+        }
+    }
+
+    #[test]
+    fn throttle_restriction_is_passive_and_conserves_continuity() {
+        let area = 0.002f32;
+        let a_open = area;
+        let a_shut = area * 0.008;
+
+        // Wide open throttle: transmission is high, reflection is minimal
+        let (refl_open, trans_open) = scatter_throttle_restriction(100.0, 0.0, area, area, a_open);
+        assert!(
+            (trans_open - 100.0).abs() < 1.0,
+            "open throttle must transmit wave: got {trans_open}"
+        );
+        assert!(
+            refl_open.abs() < 1.0,
+            "open throttle reflection must vanish: got {refl_open}"
+        );
+
+        // Shut throttle: reflection is nearly total rigid (+1.0), transmission is blocked
+        let (refl_shut, trans_shut) = scatter_throttle_restriction(100.0, 0.0, area, area, a_shut);
+        assert!(
+            refl_shut > 90.0,
+            "shut throttle must reflect incident wave: got {refl_shut}"
+        );
+        assert!(
+            trans_shut < 10.0,
+            "shut throttle must block transmission: got {trans_shut}"
+        );
+
+        // Passive: power out <= power in
+        let p_in = 100.0 * 100.0 * area;
+        let p_out_open = (refl_open * refl_open + trans_open * trans_open) * area;
+        let p_out_shut = (refl_shut * refl_shut + trans_shut * trans_shut) * area;
+        assert!(p_out_open <= p_in + 1e-3);
+        assert!(p_out_shut <= p_in + 1e-3);
+    }
+
+    #[test]
+    fn closing_the_throttle_attenuates_mouth_output_through_area_term() {
+        let system = IntakeSystem::default_for_cylinders(4);
+        let mut network_open = IntakeNetwork::new(&system, 4, 48_000.0);
+        let mut network_shut = IntakeNetwork::new(&system, 4, 48_000.0);
+
+        network_open.set_throttle(1.0);
+        network_shut.set_throttle(0.0);
+
+        let mut energy_open = 0.0f32;
+        let mut energy_shut = 0.0f32;
+
+        // Drive with periodic suction rarefaction pulses
+        for n in 0..2_400 {
+            let excit = if n % 240 == 0 { -5_000.0 } else { 0.0 };
+            let excits = [excit, 0.0, 0.0, 0.0];
+
+            let out_open = network_open.step(&excits);
+            let out_shut = network_shut.step(&excits);
+
+            energy_open += out_open * out_open;
+            energy_shut += out_shut * out_shut;
+        }
+
+        let rms_open = (energy_open / 2_400.0).sqrt();
+        let rms_shut = (energy_shut / 2_400.0).sqrt();
+
+        assert!(rms_open > 0.0, "open throttle must radiate sound");
+        assert!(
+            rms_shut < 0.20 * rms_open,
+            "shutting the throttle must attenuate mouth output by at least 5x: open={rms_open}, shut={rms_shut}"
+        );
     }
 }
