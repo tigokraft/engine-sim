@@ -1675,6 +1675,77 @@ mod tests {
         assert!(!absent.within(100.0));
     }
 
+    /// The crank's comb for an even-firing four: every even order, nothing
+    /// anywhere else, and no plumbing involved in saying so.
+    #[test]
+    fn an_even_firing_four_puts_nothing_on_the_odd_orders() {
+        let offsets: Vec<f64> = (0..4).map(|k| k as f64 * PI).collect();
+        let orders = half_orders();
+        let comb = firing_comb(&offsets, &orders);
+
+        for (&order, &amplitude) in orders.iter().zip(&comb) {
+            let even = (order / 2.0).fract().abs() < 1e-9;
+            if even {
+                assert!(
+                    (amplitude - 4.0).abs() < 1e-9,
+                    "order {order} came back at {amplitude:.3}, not the four \
+                     firings it is in phase with"
+                );
+            } else {
+                assert!(
+                    amplitude < 1e-9,
+                    "order {order} came back at {amplitude:.3e} on a crank that \
+                     cannot drive it"
+                );
+            }
+        }
+    }
+
+    /// The cross-plane V8's burble is a crank fact before it is a sound: its
+    /// uneven bank leaves order 1.5 a few decibels under the firing order,
+    /// where the flat-plane crank leaves it nothing at all.
+    #[test]
+    fn only_the_uneven_bank_puts_energy_on_the_half_orders() {
+        use crate::physics::engine_block::FiringOrder;
+
+        let orders = half_orders();
+        for (name, firing, burbles) in [
+            ("cross-plane", FiringOrder::cross_plane_v8(), true),
+            ("flat-plane", FiringOrder::flat_plane_v8(), false),
+        ] {
+            let banks: Vec<Vec<f64>> = (0..firing.bank_count())
+                .map(|b| firing.bank_offsets(b as u8))
+                .collect();
+            let balance = crank_balance(&banks, &orders, 4.0);
+
+            let half = balance.at(1.5).unwrap();
+            if burbles {
+                assert!(
+                    (half - (-3.7)).abs() < 0.2,
+                    "{name} put order 1.5 at {half:.2} dB under its firing order"
+                );
+            } else {
+                assert!(
+                    half < -100.0,
+                    "{name} put order 1.5 at {half:.2} dB, and an even bank \
+                     cannot drive it at all"
+                );
+            }
+            // Either way nothing stands above the firing order. It is not the
+            // *only* order at that level — a train of impulses is in phase
+            // again at every multiple of it, so 8, 12 and 24 tie with it — but
+            // nothing the crank drives exceeds it.
+            assert_eq!(balance.at(4.0), Some(0.0));
+            assert!(
+                balance
+                    .levels
+                    .iter()
+                    .all(|l| l.relative_db.unwrap_or(SILENCE_DB) <= 1e-9),
+                "{name} put something above its own firing order"
+            );
+        }
+    }
+
     /// A render shorter than one window has nothing to average.
     #[test]
     fn a_render_under_one_window_reports_no_frames() {
