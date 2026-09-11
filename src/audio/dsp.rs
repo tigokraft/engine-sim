@@ -7,9 +7,12 @@
 //! responsible for turning those into a continuous waveform no matter how
 //! irregularly they arrive. That division matters:
 //!
-//! - **The physics thread owns amplitude.** How hard a cylinder hits is a
-//!   thermodynamic fact (the blowdown pressure difference at EVO), and only the
-//!   solver knows it.
+//! - **The physics thread owns amplitude, and the shape.** How hard a cylinder
+//!   hits is a thermodynamic fact (the blowdown pressure difference at EVO), and
+//!   only the solver knows it. So is what the pulse *looks* like: the snapshot
+//!   carries the cylinder pressure and both port flows over the whole cycle, and
+//!   [`CyclePlayer`] plays them back at crank rate. There is no pulse shape to
+//!   choose here, and no constant that sets one.
 //! - **The audio thread owns timing.** Firing events are reconstructed here, by
 //!   integrating crank phase at the sample rate, rather than being sent as
 //!   discrete events. A physics thread running at 60 Hz would otherwise collapse
@@ -484,8 +487,6 @@ pub struct SynthConfig {
     pub exhaust: ExhaustSystem,
     /// Intake system geometry: runners, plenum, throttle, airbox, and snorkel.
     pub intake: IntakeSystem,
-    /// Blowdown duration in crank degrees, which sets the pulse decay [deg].
-    pub blowdown_degrees: f64,
     /// The turbocharger, or `None` for a naturally aspirated engine.
     ///
     /// `None` is not a level of zero. With no turbo fitted the voice is never
@@ -575,7 +576,6 @@ impl SynthConfig {
             bank_count: banks,
             exhaust,
             intake,
-            blowdown_degrees: 40.0,
             // Atmospheric by default: a turbo is something a preset fits, not
             // something every engine is born with.
             turbo: None,
@@ -1115,24 +1115,13 @@ impl Default for CycleVariation {
 /// an interval, so this never binds; it is here so that a caller who winds
 /// `combustion_variation_max` up to model a sick engine gets a rough idle
 /// rather than a scrambled one.
+///
+/// The offset is signed, and applied to the phase a cylinder reads the cycle at.
+/// It used to have to be a non-negative *delay* on a scheduled pulse, which
+/// meant carrying a mean retard for it to vary either side of; there is no
+/// schedule to delay any more, so the retard has gone and only the variation —
+/// which is the audible half, and the only stochastic one — is left.
 const CCV_MAX_PHASE_FRACTION: f32 = 0.3;
-
-/// Mean retard of the blowdown pulse behind nominal EVO, as a fraction of the
-/// firing interval [-].
-///
-/// The jitter has to be applied as a *delay* rather than as a move of the
-/// trigger angle (see [`Blowdown::pending`]), and a delay cannot be negative —
-/// so the nominal event is placed this far back and the draw varies either side
-/// of it. Equal to [`CCV_MAX_PHASE_FRACTION`] so the sum is never negative.
-///
-/// This is not a fudge to make the arithmetic work. Nominal EVO is a valve
-/// event; the blowdown that follows it is a *combustion* event, and the flame
-/// takes a real and variable number of crank degrees to develop before the
-/// cylinder is at the pressure that drives the pulse. A mean lag with variation
-/// around it is what that looks like. The lag itself is common to every
-/// cylinder, so acoustically it is latency and nothing else — only the
-/// variation is audible.
-const CCV_MEAN_RETARD_FRACTION: f32 = CCV_MAX_PHASE_FRACTION;
 
 /// Widest amplitude excursion allowed, as a fraction of nominal [-].
 const CCV_MAX_AMPLITUDE_EXCURSION: f32 = 0.75;
@@ -2567,15 +2556,6 @@ impl EngineSynth {
             self.excitations.fill(0.0);
             return 0.0;
         }
-        // Combustion lags the valve event by a real and variable number of crank
-        // degrees, common to every cylinder; only the variation around it is
-        // audible. Zero above CCV_THRESHOLD_RPM along with the variation it
-        // exists to carry.
-        let retard = if self.variation_depth > 0.0 {
-            CCV_MEAN_RETARD_FRACTION / self.config.cylinders.len() as f32
-        } else {
-            0.0
-        };
         let phase = self.cycle_phase;
         let mut induction = 0.0;
         for index in 0..self.config.cylinders.len() {
@@ -2589,7 +2569,7 @@ impl EngineSynth {
             self.excitations[index] = amplitude
                 * self
                     .cycle
-                    .exhaust_at(cylinder - retard - variation.phase_offset, blend);
+                    .exhaust_at(cylinder - variation.phase_offset, blend);
             // Induction is read at the bare cylinder phase. The retard and the
             // jitter are properties of *combustion* — how long the flame takes
             // to develop, and how much that varies — and a valve opening on the
@@ -3464,7 +3444,12 @@ mod tests {
             smoother.snap(idle_snapshot().blowdown_delta[i]);
         }
         synth.cycle.blend.snap(1.0);
-        synth.cycle_phase = 0.0;
+        // Open the window in the gap between two cylinders' events rather than
+        // on top of one. The jitter moves each event up to 0.0375 of a cycle
+        // either way, and an event straddling the boundary would be counted at
+        // both ends — an artefact of where the measurement starts, not of the
+        // firing path.
+        synth.cycle_phase = 0.09;
 
         let cycles = 5usize;
         let samples = (FS / (800.0 / 120.0)) as usize * cycles;
