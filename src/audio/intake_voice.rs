@@ -525,6 +525,64 @@ impl IntakeNetwork {
 mod tests {
     use super::*;
 
+    fn magnitude_at(signal: &[f32], frequency: f32, sample_rate: f32) -> f32 {
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (i, &x) in signal.iter().enumerate() {
+            let phase = std::f32::consts::TAU * frequency * i as f32 / sample_rate;
+            re += x as f64 * phase.sin() as f64;
+            im += x as f64 * phase.cos() as f64;
+        }
+        (2.0 * (re * re + im * im).sqrt() / signal.len() as f64) as f32
+    }
+
+    #[test]
+    fn intake_note_is_pitched_at_firing_order() {
+        // An engine's intake does not hiss: the cylinders draw sequentially,
+        // and the resulting rarefactions and valve closures produce a strongly
+        // pitched sound whose fundamental lands at the engine firing order
+        // f_firing = (N_cyl / 2) * (rpm / 60) = (N_cyl / 120) * rpm.
+        let fs = 48_000.0f32;
+        let system = IntakeSystem::default_for_cylinders(4);
+        let mut network = IntakeNetwork::new(&system, 4, fs);
+        network.set_throttle(0.8);
+
+        // 3000 rpm -> 50 rev/sec. For a 4-stroke 4-cylinder, firing order is 2nd order (100 Hz).
+        let rpm = 3_000.0f32;
+        let f_crank = rpm / 60.0;
+        let f_firing = 4.0 / 2.0 * f_crank; // 100 Hz
+        let period_samples = (fs / f_firing) as usize; // 480 samples per firing
+
+        let total_samples = 48_000;
+        let mut out = Vec::with_capacity(total_samples);
+
+        for n in 0..total_samples {
+            let mut excits = [0.0f32; 4];
+            let cyl = (n / period_samples) % 4;
+            let phase_in_event = n % period_samples;
+            if phase_in_event < 120 {
+                let flow = 0.05 * (std::f32::consts::PI * phase_in_event as f32 / 120.0).sin();
+                let d_flow = if phase_in_event > 100 {
+                    -0.05 * fs / 20.0
+                } else {
+                    0.0
+                };
+                excits[cyl] = induction_rarefaction_pa(flow, 0.0014, 343.0)
+                    + valve_slam_pa(d_flow, 0.25, 0.0014);
+            }
+            out.push(network.step(&excits));
+        }
+
+        let at_firing = magnitude_at(&out[4_800..], f_firing, fs);
+        let off1 = magnitude_at(&out[4_800..], f_firing * 0.61, fs);
+        let off2 = magnitude_at(&out[4_800..], f_firing * 1.43, fs);
+        let off = 0.5 * (off1 + off2);
+
+        assert!(
+            at_firing > 4.0 * off,
+            "intake note must be pitched at firing order (100 Hz): firing={at_firing:.3e} vs off={off:.3e}"
+        );
+    }
+
     #[test]
     fn intake_network_constructs_and_runs_stable() {
         let system = IntakeSystem::default_for_cylinders(4);
