@@ -307,6 +307,215 @@ impl IgnitionDelay {
     }
 }
 
+/// Where and how hard this cycle's charge lit itself.
+///
+/// Solved once per cycle, at the latch, because none of it is a function of the
+/// integrated state: the charge is pure air on a known isentrope from intake
+/// valve close until the moment it ignites, so where that moment falls is
+/// decided entirely by what was trapped. See
+/// [`DieselCombustion::autoignition`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Autoignition {
+    /// Crank angle at which the Livengood-Wu integral reached one [rad, cycle coords].
+    pub angle: f64,
+    /// Ignition delay measured from the start of injection [s].
+    pub delay: f64,
+    /// Fraction of the charge injected before ignition, and so burned premixed [-].
+    pub premixed_fraction: f64,
+}
+
+/// Crank-angle step the autoignition march takes [rad].
+///
+/// A quarter of a degree. The integrand is `1/tau` on a charge whose
+/// temperature is climbing through the steepest part of the compression, so it
+/// varies by a factor of ten over the last ten degrees before top dead centre;
+/// a quarter degree resolves that to well under a tenth of a degree of ignition
+/// angle, which is finer than the burn it decides.
+const AUTOIGNITION_STEP: f64 = PI / 720.0;
+
+/// How far past the start of injection the march looks before giving up [rad].
+///
+/// Sixty degrees. A charge that has not lit by then is on the expansion stroke
+/// with a falling temperature and is not going to: the cycle misfires, which is
+/// what a diesel cranking on a winter morning actually does.
+const AUTOIGNITION_WINDOW: f64 = PI / 3.0;
+
+/// Two-stage Wiebe heat release for a compression-ignition engine.
+///
+/// ```text
+/// x_b(theta) = f * wiebe(theta - theta_ign; delta_p, n_p)
+///            + (1 - f) * wiebe(theta - theta_ign; delta_d, n_d)
+/// ```
+///
+/// Two burns, not one, because a diesel really does burn twice. Fuel sprayed
+/// into air that is not yet hot enough to light it just sits there evaporating
+/// and mixing; when the air finally does reach the temperature, everything that
+/// arrived in the meantime goes off at once, in a *premixed* spike a few crank
+/// degrees wide. Only after that does the engine settle into the burn it is
+/// named for — *diffusion*, where the rate is set by how fast the spray can
+/// find oxygen, and which runs on for most of the expansion stroke.
+///
+/// The split `f` between them is not a parameter. It is the fraction of the
+/// charge the injector managed to deliver before ignition, so it falls straight
+/// out of the delay:
+///
+/// ```text
+/// f = (theta_ign - theta_inj) / delta_inj
+/// ```
+///
+/// which is why a cold diesel clatters and a hot one does not. A long delay
+/// piles up fuel; the pile goes off in one piece; `dP/dtheta` goes through the
+/// roof and the block is hit with it. Nothing about that is voiced. It is the
+/// arithmetic above and [`crate::audio::structure`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DieselCombustion {
+    /// Crank angle at which the injector opens [rad, cycle coords].
+    pub injection_angle: f64,
+    /// Crank angle over which the injector delivers the charge [rad].
+    pub injection_duration: f64,
+    /// Nominal duration of the premixed spike [rad].
+    pub premixed_duration: f64,
+    /// Nominal duration of the diffusion burn [rad].
+    pub diffusion_duration: f64,
+    /// Wiebe form factor of the premixed spike [-].
+    pub premixed_form_factor: f64,
+    /// Wiebe form factor of the diffusion burn [-].
+    pub diffusion_form_factor: f64,
+    /// Wiebe efficiency parameter `a`, shared by both stages [-].
+    pub efficiency_parameter: f64,
+    /// Fraction of the fuel's chemical energy that shows up as heat [-].
+    pub combustion_efficiency: f64,
+    /// The Arrhenius delay correlation the ignition angle is solved from.
+    pub delay: IgnitionDelay,
+}
+
+impl Default for DieselCombustion {
+    /// A direct-injection passenger diesel: injection 8 degrees before top dead
+    /// centre over 25 degrees, a 9-degree premixed spike and a 65-degree
+    /// diffusion tail.
+    fn default() -> Self {
+        Self {
+            injection_angle: deg(352.0),
+            injection_duration: deg(25.0),
+            premixed_duration: deg(9.0),
+            diffusion_duration: deg(65.0),
+            // Below one the Wiebe rate peaks almost at its own start, which is
+            // what a premixed spike is: everything already mixed, lighting at
+            // once. Above one it has to build, which is what diffusion is.
+            premixed_form_factor: 0.6,
+            diffusion_form_factor: 1.2,
+            efficiency_parameter: 5.0,
+            // A diesel runs lean and sooty: less of the fuel finds oxygen in
+            // time than in a homogeneous petrol charge.
+            combustion_efficiency: 0.95,
+            delay: IgnitionDelay::default(),
+        }
+    }
+}
+
+impl DieselCombustion {
+    /// Solves the ignition point for a charge trapped as `latch` describes.
+    ///
+    /// Marches the Livengood-Wu integral forward from the start of injection
+    /// along the motored compression isentrope — which is what the charge
+    /// genuinely rides, since nothing has burned yet — and stops where it
+    /// reaches one:
+    ///
+    /// ```text
+    /// I = integral_{theta_inj}^{theta_ign} dtheta / (omega tau(P_mot, T_mot)) = 1
+    /// ```
+    ///
+    /// Returns `None` when the integral never gets there inside
+    /// [`AUTOIGNITION_WINDOW`]: the charge was too cold to light and the cycle
+    /// misfires.
+    ///
+    /// `omega` is in the integrand, not decoration — the delay is a *time*, and
+    /// the faster the crank turns the more degrees of it go by. That is the
+    /// whole reason a diesel's ignition retards with speed without anyone
+    /// scheduling it.
+    pub fn autoignition(
+        &self,
+        latch: &CycleLatch,
+        geometry: &CylinderGeometry,
+        omega: f64,
+    ) -> Option<Autoignition> {
+        let omega = omega.abs().max(1e-3);
+        let mut integral = 0.0;
+        let mut travelled = 0.0;
+        while travelled < AUTOIGNITION_WINDOW {
+            // Midpoint of the step: second order, and it keeps the first
+            // sample off the injection angle itself where nothing has mixed.
+            let theta = self.injection_angle + travelled + 0.5 * AUTOIGNITION_STEP;
+            let pressure = latch.motored_pressure(geometry.safe_volume(theta));
+            let temperature = latch.end_gas_temperature(pressure);
+            integral += AUTOIGNITION_STEP / omega * self.delay.rate(pressure, temperature);
+            travelled += AUTOIGNITION_STEP;
+            if integral >= 1.0 {
+                return Some(Autoignition {
+                    angle: wrap_cycle(self.injection_angle + travelled),
+                    delay: travelled / omega,
+                    premixed_fraction: self.premixed_fraction(travelled),
+                });
+            }
+        }
+        None
+    }
+
+    /// Fraction of the charge delivered during a delay of `travelled` radians [-].
+    ///
+    /// Floored rather than allowed to reach zero because an injector that has
+    /// only just cracked open still has a spray cone in the chamber, and capped
+    /// short of one because the tail of the delivery is still arriving into a
+    /// fire however long the delay was.
+    pub fn premixed_fraction(&self, travelled: f64) -> f64 {
+        (travelled / self.injection_duration.max(1e-6)).clamp(0.02, 0.9)
+    }
+
+    /// True while either stage is still releasing heat.
+    pub fn is_burning(&self, theta: f64, ignition: &Autoignition) -> bool {
+        wrap_cycle(theta - ignition.angle) < self.premixed_duration.max(self.diffusion_duration)
+    }
+
+    /// Burned mass fraction of the two stages summed [-].
+    pub fn burned_fraction(&self, theta: f64, ignition: &Autoignition) -> f64 {
+        let phase = wrap_cycle(theta - ignition.angle);
+        let f = ignition.premixed_fraction;
+        f * self.stage_fraction(phase, self.premixed_duration, self.premixed_form_factor)
+            + (1.0 - f)
+                * self.stage_fraction(phase, self.diffusion_duration, self.diffusion_form_factor)
+    }
+
+    /// Burn rate of the two stages summed [1/rad].
+    pub fn dburned_dtheta(&self, theta: f64, ignition: &Autoignition) -> f64 {
+        let phase = wrap_cycle(theta - ignition.angle);
+        let f = ignition.premixed_fraction;
+        f * self.stage_rate(phase, self.premixed_duration, self.premixed_form_factor)
+            + (1.0 - f)
+                * self.stage_rate(phase, self.diffusion_duration, self.diffusion_form_factor)
+    }
+
+    /// One stage's Wiebe fraction at a phase past ignition [-].
+    fn stage_fraction(&self, phase: f64, duration: f64, form_factor: f64) -> f64 {
+        if phase >= duration {
+            return 1.0;
+        }
+        let tau = (phase / duration.max(1e-9)).max(0.0);
+        1.0 - (-self.efficiency_parameter * tau.powf(form_factor + 1.0)).exp()
+    }
+
+    /// One stage's Wiebe rate at a phase past ignition [1/rad].
+    fn stage_rate(&self, phase: f64, duration: f64, form_factor: f64) -> f64 {
+        if phase >= duration || phase < 0.0 {
+            return 0.0;
+        }
+        let duration = duration.max(1e-9);
+        let tau = phase / duration;
+        let a = self.efficiency_parameter;
+        let np1 = form_factor + 1.0;
+        a * np1 / duration * tau.powf(form_factor) * (-a * tau.powf(np1)).exp()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Wall heat transfer: Woschni
 // ---------------------------------------------------------------------------
@@ -1644,6 +1853,114 @@ mod tests {
         assert!(hot.ignition_delay(p, t).is_finite());
         // Cold end gas is effectively inert, not infinite.
         assert!(hot.ignition_delay(1e5, 300.0).is_finite());
+    }
+
+    /// A charge lit exactly at top dead centre, so the two-stage shape can be
+    /// looked at on its own without solving a cycle for it.
+    fn lit_at_tdc(premixed_fraction: f64) -> Autoignition {
+        Autoignition {
+            angle: deg(360.0),
+            delay: 1.0e-3,
+            premixed_fraction,
+        }
+    }
+
+    #[test]
+    fn two_stage_burn_spikes_before_it_humps() {
+        // The shape the whole stage exists for: a narrow premixed spike a
+        // degree or two after ignition, then a broad diffusion hump twenty-odd
+        // degrees later. One Wiebe cannot do that, which is why there are two.
+        let d = DieselCombustion::default();
+        let ign = lit_at_tdc(0.3);
+        let step = deg(0.1);
+        let samples: Vec<(f64, f64)> = (0..900)
+            .map(|i| {
+                let phase = i as f64 * step;
+                (phase, d.dburned_dtheta(ign.angle + phase, &ign))
+            })
+            .collect();
+
+        let peaks: Vec<(f64, f64)> = samples
+            .windows(3)
+            .filter(|w| w[1].1 > w[0].1 && w[1].1 >= w[2].1)
+            .map(|w| w[1])
+            .collect();
+        assert_eq!(
+            peaks.len(),
+            2,
+            "a two-stage release must have two peaks, found {}: {:?}",
+            peaks.len(),
+            peaks
+                .iter()
+                .map(|(p, _)| p.to_degrees())
+                .collect::<Vec<_>>()
+        );
+
+        let (premixed_at, premixed_rate) = peaks[0];
+        let (diffusion_at, diffusion_rate) = peaks[1];
+        assert!(
+            premixed_at < deg(5.0),
+            "the premixed spike arrived {:.1} degrees after ignition, not promptly",
+            premixed_at.to_degrees()
+        );
+        assert!(
+            diffusion_at > deg(10.0) && diffusion_at < deg(45.0),
+            "the diffusion hump landed at {:.1} degrees",
+            diffusion_at.to_degrees()
+        );
+        assert!(
+            premixed_rate > 2.0 * diffusion_rate,
+            "the spike ({premixed_rate:.2}/rad) is not sharper than the hump \
+             ({diffusion_rate:.2}/rad), so it is not a spike"
+        );
+    }
+
+    #[test]
+    fn two_stage_rate_integrates_back_to_its_own_fraction() {
+        let d = DieselCombustion::default();
+        for f in [0.05, 0.3, 0.6] {
+            let ign = lit_at_tdc(f);
+            let steps = 40_000;
+            let span = d.diffusion_duration.max(d.premixed_duration);
+            let h = span / steps as f64;
+            let mut x = 0.0;
+            for i in 0..steps {
+                x += d.dburned_dtheta(ign.angle + (i as f64 + 0.5) * h, &ign) * h;
+            }
+            // Both stages leave the usual exp(-a) unburned, so the pair does
+            // too, whatever the split between them. The tolerance is the
+            // quadrature's, not the model's: the spike's form factor is below
+            // one, so its rate starts with an infinite slope and the midpoint
+            // rule pays for that in the first degree.
+            approx(x, 1.0 - (-d.efficiency_parameter).exp(), 1e-3);
+            // The fraction the two stages report together is monotone and
+            // arrives at the whole charge.
+            let mut previous = 0.0;
+            for i in 0..=720 {
+                let at = d.burned_fraction(ign.angle + i as f64 * deg(0.1), &ign);
+                assert!(at >= previous - 1e-12, "burn ran backwards at step {i}");
+                previous = at;
+            }
+            assert!(
+                previous > 0.99,
+                "the charge never finished burning: {previous}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_longer_delay_puts_more_of_the_charge_in_the_spike() {
+        // The one link that makes the clatter physical rather than voiced: the
+        // split between the stages is the fraction the injector delivered while
+        // the air was still too cold to light it.
+        let d = DieselCombustion::default();
+        let short = d.premixed_fraction(deg(3.0));
+        let long = d.premixed_fraction(deg(12.0));
+        assert!(
+            long > short,
+            "a longer delay must pile up more premixed fuel: {long:.3} against {short:.3}"
+        );
+        assert!((0.0..=1.0).contains(&d.premixed_fraction(deg(180.0))));
     }
 
     #[test]
