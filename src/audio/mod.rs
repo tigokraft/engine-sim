@@ -592,7 +592,6 @@ impl SynthConfig {
             bank_count,
             exhaust: block.exhaust.clone(),
             intake: block.intake_system.clone(),
-            block_mass: block.block_mass,
             structure: StructuralSpec::new(
                 block.block_mass,
                 block.model.geometry.bore,

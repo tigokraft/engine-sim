@@ -41,10 +41,10 @@
 //!   intake noise ── bandpass(m_dot, throttle) ───────────────> centre ──┐
 //!   turbo whistle + surge flutter ──[if fitted]──────────────> centre ──┤
 //!   valvetrain clicks + FMEP rumble ──┐                                 │
-//!   dP/dtheta per cylinder ───────────┴> modal block ────────> centre ──┤
+//!   dP/dtheta per cylinder ───────────┼──> modal block ──────> centre ──┤
+//!   knock burst ──────────────────────┘    (bending, pan, bore walls)   │
 //!                                                                       ▼
-//!                            DC block ─> block resonance ─> soft clip ─> out
-//!                                        (60-120 Hz, gain falls with rpm)
+//!                                    DC block ─> soft clip ─> out
 //! ```
 //!
 //! # Idle and the "robotic" failure mode
@@ -64,7 +64,8 @@
 //!   as it physically must, through the block rather than through the air.
 //! - The exhaust path is bandpass-like end to end and leaves out the block
 //!   itself, which at idle is most of what a listener hears as size.
-//!   [`crate::audio::filters::BlockResonator`] puts it back.
+//!   [`crate::audio::structure`] puts it back, by radiating it rather than by
+//!   equalising the pipe.
 //!
 //! All four are scheduled to recede with engine speed, because all four describe
 //! things that stop mattering once combustion is loud and frequent.
@@ -85,8 +86,8 @@
 use std::f32::consts::TAU;
 
 use crate::audio::filters::{
-    firing_interval_seconds, soft_clip, waveguide_damping, Biquad, BiquadCoeffs, BlockResonator,
-    DcBlocker, ModalBank, Noise, OnePole, Smoothed,
+    firing_interval_seconds, soft_clip, waveguide_damping, Biquad, BiquadCoeffs, DcBlocker,
+    ModalBank, Noise, OnePole, Smoothed,
 };
 use crate::audio::intake_voice::IntakeNetwork;
 use crate::audio::structure::{combustion_drive, StructuralPath, StructuralSpec};
@@ -538,17 +539,6 @@ pub struct SynthConfig {
     pub backfire_fuel_threshold: f64,
     /// Runner temperature above which backfires become possible [K].
     pub backfire_temperature_threshold: f64,
-    /// Dressed mass of the engine block [kg].
-    ///
-    /// Sets where the structural rumble sits, via
-    /// [`crate::audio::filters::block_resonance_hz`]: a heavy iron block rings
-    /// low and an alloy one rings high, because the stiffness barely changes and
-    /// the mass does. Nothing else in the synth reads it.
-    pub block_mass: f64,
-    /// Sharpness of the block resonance [-].
-    pub block_resonance_q: f64,
-    /// Block rumble boost at idle, tapering to nothing with speed [dB].
-    pub block_resonance_db: f64,
     /// Mass and geometry the block's modes are derived from.
     ///
     /// The structural path is a second radiator, not a filter on the exhaust:
@@ -658,17 +648,6 @@ impl SynthConfig {
             backfire_fuel_threshold: 12.0e-6,
             backfire_temperature_threshold: 900.0,
             // A 4-litre iron-decked V8 with pan and accessories: 80 Hz.
-            block_mass: 180.0,
-            // Low enough that the peak is felt as weight rather than heard as a
-            // pitch. Past about 3 the block starts to sing a note of its own,
-            // which reads as a resonating cabinet, not an engine.
-            block_resonance_q: 1.1,
-            // A V8's firing fundamental at idle is 57 Hz, which sits on this
-            // peak's skirt — so the boost lands on the note itself, not just on
-            // the noise floor, and a little of it goes a long way. Past about
-            // 7 dB the idle stops being weighty and starts being louder than
-            // the redline, which is the wrong way round.
-            block_resonance_db: 5.5,
             structure: StructuralSpec::default(),
             // A healthy warm engine: COV of IMEP around 3 % where the lope
             // starts and 8 % at idle. A tired one would run higher, and this is
@@ -2149,8 +2128,6 @@ pub struct EngineSynth {
     snapshot: EngineSnapshot,
     noise: Noise,
     dc: [DcBlocker; 2],
-    /// Structural rumble of the block and pan, on the output bus.
-    block: BlockResonator,
     /// The block as a radiating body: modes of the casting, pan and bore walls.
     structure: StructuralPath,
     /// Structural drive per unit of knock voice output [-].
@@ -2236,15 +2213,9 @@ impl EngineSynth {
             dc: [DcBlocker::default(); 2],
             // The runner and muffler are both bandpass-like and between them
             // leave the bottom octave thin, where a large engine's felt weight
-            // actually lives. This fills it in with the block's own mode rather
-            // than a flat shelf, so the weight tracks the engine's mass and
-            // recedes as the firing frequency climbs past it.
-            block: BlockResonator::new(
-                fs,
-                config.block_mass as f32,
-                config.block_resonance_q as f32,
-                config.block_resonance_db as f32,
-            ),
+            // actually lives. The block's own bending mode fills it in — and it
+            // is filled in by being *radiated*, from a body the combustion is
+            // hammering, rather than by an equaliser sitting on the exhaust.
             structure: StructuralPath::new(fs, &config.structure.modes()),
             knock_scale: 0.0,
             combustion_scale: combustion_drive(1.0, config.structure.bore as f32),
@@ -2358,7 +2329,6 @@ impl EngineSynth {
         self.mechanical.reset();
         self.knock.reset();
         self.dc = [DcBlocker::default(); 2];
-        self.block.reset();
         self.structure.reset();
         self.phase_fixed = 0;
         self.crank_omega_delta = 0.0;
@@ -2459,7 +2429,6 @@ impl EngineSynth {
             self.network.set_valve_damping(cylinder, damping);
         }
         self.variation_depth = self.variation_depth_at(rpm);
-        self.block.tune(rpm);
         self.mechanical
             .tune(&self.snapshot, cycle_hz, self.config.cylinders.len());
         self.intake_network.set_throttle(throttle);
@@ -2750,11 +2719,9 @@ impl EngineSynth {
         let gain = self.config.master_gain as f32 * self.fade_in.next_value();
         let mut out = [left, right];
         for (i, sample) in out.iter_mut().enumerate() {
-            // DC first: the block resonator is a peaking section with real gain
-            // at 80 Hz, and the blowdown train's offset is exactly the kind of
-            // near-DC energy it would amplify into the clipper.
-            let blocked = self.dc[i].process(*sample);
-            *sample = soft_clip(self.block.process(i, blocked) * gain);
+            // The blowdown train carries a standing offset, and a DC offset
+            // costs headroom in the clipper without being audible at all.
+            *sample = soft_clip(self.dc[i].process(*sample) * gain);
         }
         (out[0], out[1])
     }
@@ -3970,39 +3937,78 @@ mod tests {
 
     // -- block resonance -----------------------------------------------------
 
+    /// Energy in the bottom octave, `low..high` Hz, of the left channel.
+    ///
+    /// Crude quadrature correlation on a handful of probe frequencies — enough
+    /// to compare two runs of the same signal, which is all these tests do.
+    fn band_energy(out: &[f32], low: f32, high: f32) -> f32 {
+        let mut total = 0.0f64;
+        let steps = 12;
+        for i in 0..steps {
+            let hz = low * (high / low).powf(i as f32 / (steps - 1) as f32);
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (n, frame) in out.chunks(2).enumerate() {
+                let phase = TAU as f64 * hz as f64 * n as f64 / FS as f64;
+                re += frame[0] as f64 * phase.sin();
+                im += frame[0] as f64 * phase.cos();
+            }
+            let frames = (out.len() / 2) as f64;
+            total += (re * re + im * im) / (frames * frames);
+        }
+        (total / steps as f64).sqrt() as f32
+    }
+
     #[test]
     fn block_rumble_is_strongest_at_idle_and_gone_at_speed() {
-        let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
-        synth.set_snapshot(&idle_snapshot());
-        render(&mut synth, 48_000);
-        let idle_db = synth.block.gain_db();
+        // The behaviour is the same as it always was; what has gone is the
+        // schedule that used to declare it. A modal bank driven by an impulse
+        // train answers hardest when the train's fundamental is sitting in the
+        // mode — 57 Hz at a V8's idle, right on the 80 Hz bending mode — and
+        // barely at all when the same train has climbed to 400 Hz and the
+        // structure is being driven well above resonance, where a mass is
+        // stiff. Nothing tapers it: the filter does it, because that is what
+        // the filter is a model of.
+        // What the block *adds* to the bottom octave, against the level of the
+        // whole engine: the difference between the mix with it and the mix
+        // without, which is the only thing a listener could call rumble.
+        let share_at = |snapshot: &EngineSnapshot| {
+            let band = |level: f64| {
+                let mut config = SynthConfig::cross_plane_v8(FS);
+                config.structure_level = level;
+                let mut synth = EngineSynth::new(config);
+                synth.set_snapshot(snapshot);
+                render(&mut synth, 2 * 48_000);
+                let out = render(&mut synth, 2 * 48_000);
+                (band_energy(&out, 60.0, 120.0), rms(&out))
+            };
+            let (silent, _) = band(0.0);
+            let (radiating, level) = band(SynthConfig::default().structure_level);
+            (radiating - silent) / level
+        };
 
+        let idle = share_at(&idle_snapshot());
         let mut fast = loaded_snapshot();
         fast.rpm = 6_000.0;
-        synth.set_snapshot(&fast);
-        render(&mut synth, 4 * 48_000);
-        let fast_db = synth.block.gain_db();
-
-        let configured = SynthConfig::default().block_resonance_db as f32;
+        let quick = share_at(&fast);
         assert!(
-            idle_db > 0.9 * configured,
-            "no rumble at idle: {idle_db} dB of a configured {configured}"
+            idle > 3.0 * quick,
+            "the block is no quieter at speed: {idle:.5} of the mix at idle \
+             against {quick:.5} at 6000 rpm"
         );
-        assert!(fast_db < 0.5, "still rumbling at 6000 rpm: {fast_db} dB");
     }
 
     #[test]
     fn a_heavier_block_rumbles_lower() {
-        let centre_for = |mass: f64| {
+        let first_mode_for = |mass: f64| {
             let mut config = SynthConfig::cross_plane_v8(FS);
-            config.block_mass = mass;
+            config.structure.dressed_mass = mass;
             let mut synth = EngineSynth::new(config);
             synth.set_snapshot(&idle_snapshot());
             render(&mut synth, 4_800);
-            synth.block.centre_frequency()
+            synth.structure.mode_frequencies()[0]
         };
-        let alloy_four = centre_for(95.0);
-        let iron_v8 = centre_for(240.0);
+        let alloy_four = first_mode_for(95.0);
+        let iron_v8 = first_mode_for(240.0);
         assert!(
             alloy_four > iron_v8 + 15.0,
             "mass barely moved the mode: {alloy_four} vs {iron_v8} Hz"
@@ -4011,36 +4017,52 @@ mod tests {
         for f in [alloy_four, iron_v8] {
             assert!((60.0..=120.0).contains(&f), "outside 60-120 Hz: {f}");
         }
+
+        // And it is audible, not merely tabulated: the heavier block puts its
+        // weight lower down.
+        let rumble_for = |mass: f64| {
+            let mut config = SynthConfig::cross_plane_v8(FS);
+            config.structure.dressed_mass = mass;
+            let mut synth = EngineSynth::new(config);
+            synth.set_snapshot(&idle_snapshot());
+            render(&mut synth, 2 * 48_000);
+            let out = render(&mut synth, 2 * 48_000);
+            (
+                band_energy(&out, 60.0, 75.0),
+                band_energy(&out, 100.0, 120.0),
+            )
+        };
+        let (heavy_low, heavy_high) = rumble_for(240.0);
+        let (light_low, light_high) = rumble_for(95.0);
+        assert!(
+            heavy_low / heavy_high > light_low / light_high,
+            "the heavy block did not sit lower: {:.3} against {:.3}",
+            heavy_low / heavy_high,
+            light_low / light_high
+        );
     }
 
     #[test]
     fn block_rumble_puts_weight_in_the_bottom_octave() {
-        // The audible claim: at idle the engine has more low-frequency energy
-        // with the resonator than without, and no more peak level than the
-        // clipper allows.
-        let low_energy = |db: f64| {
+        // The audible claim, unchanged from when a peaking filter made it: at
+        // idle the engine has more low-frequency energy with the block in the
+        // mix than without, and no more peak level than the clipper allows.
+        let low_energy = |level: f64| {
             let mut config = SynthConfig::cross_plane_v8(FS);
-            config.block_resonance_db = db;
+            config.structure_level = level;
             let mut synth = EngineSynth::new(config);
             synth.set_snapshot(&idle_snapshot());
             render(&mut synth, 48_000);
             let out = render(&mut synth, 2 * 48_000);
-            // Crude 80 Hz band energy by quadrature correlation on the left
-            // channel — enough to compare two runs of the same signal.
-            let (mut re, mut im) = (0.0f64, 0.0f64);
-            for (i, frame) in out.chunks(2).enumerate() {
-                let phase = TAU as f64 * 80.0 * i as f64 / FS as f64;
-                re += frame[0] as f64 * phase.sin();
-                im += frame[0] as f64 * phase.cos();
-            }
-            ((re * re + im * im).sqrt() / (out.len() / 2) as f64) as f32
+            assert!(peak(&out) < 1.0, "the block overloaded the clipper");
+            band_energy(&out, 60.0, 120.0)
         };
 
-        let flat = low_energy(0.0);
-        let resonant = low_energy(9.0);
+        let silent = low_energy(0.0);
+        let radiating = low_energy(SynthConfig::default().structure_level);
         assert!(
-            resonant > 1.5 * flat,
-            "the resonator added no weight: {resonant:.5} vs {flat:.5}"
+            radiating > 1.5 * silent,
+            "the block added no weight: {radiating:.5} vs {silent:.5}"
         );
     }
 
