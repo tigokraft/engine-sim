@@ -69,7 +69,7 @@ use rust_engine_sim::analysis::orders::{
 use rust_engine_sim::analysis::render::{
     read_wav, RenderPlan, OFFLINE_RATE, PHYSICS_HZ, PRIME_STEPS,
 };
-use rust_engine_sim::analysis::script::{self, RenderScript, Segment, CALIBRATION_SECONDS};
+use rust_engine_sim::analysis::script::{self, RenderScript, CALIBRATION_SECONDS};
 use rust_engine_sim::analysis::timbre;
 use rust_engine_sim::audio::dsp::{EngineSnapshot, SourceRate};
 use rust_engine_sim::audio::filters::{block_resonance_hz, speed_of_sound};
@@ -82,6 +82,13 @@ use rust_engine_sim::audio::SnapshotSource;
 use rust_engine_sim::bench::EnginePreset;
 use rust_engine_sim::environment::Environment;
 use rust_engine_sim::physics::plumbing::{Silencer, ThrottleLayout};
+
+/// Straight legs a reference recording's speed curve is rendered as.
+///
+/// Sixty-four over a pull of a few seconds is a leg every tenth of a second,
+/// which is finer than the analysis window the result is read through and
+/// coarse enough that the script stays a script rather than a sample stream.
+const REFERENCE_LEGS: usize = 64;
 
 /// Resonance peaks read out of the sweep average.
 ///
@@ -589,17 +596,15 @@ fn calibrate(preset: EnginePreset, recording: Option<&Recorded>) -> Result<Calib
     // The synth, over the reference's own speed range where there is one, and
     // over its own rev range otherwise.
     let script = match recording {
-        Some(recorded) => RenderScript::new(
+        // The recording's own curve, leg by leg, rather than a ramp between its
+        // endpoints: a real pull idles, climbs, holds and falls away, and a
+        // recording that ends where it started would otherwise be rendered as
+        // an engine that never moved.
+        Some(recorded) => script::following(
             "reference_match",
             "the reference recording's own pull, rendered",
-            vec![Segment::ramp(
-                recorded.rpm.seconds(),
-                (
-                    recorded.rpm.at(0.0),
-                    recorded.rpm.at(recorded.rpm.seconds()),
-                ),
-                (0.25, 1.0),
-            )],
+            &recorded.rpm,
+            REFERENCE_LEGS,
         ),
         None => script::calibration_sweep(&preset),
     };
@@ -765,14 +770,14 @@ fn record(path: &Path, rpm: RpmCurve, orders: &[f64]) -> Result<Recorded> {
     let rpm = stretch(&rpm, seconds);
     Ok(Recorded {
         provenance: format!(
-            "{} · {:.1} s · {:.0} channel{} at {:.0} Hz · {:.0}-{:.0} rpm supplied",
+            "{} · {:.1} s · {:.0} channel{} at {:.0} Hz · a supplied curve over {:.0}-{:.0} rpm",
             path.display(),
             seconds,
             audio.channels,
             if audio.channels == 1 { "" } else { "s" },
             audio.sample_rate,
-            rpm.at(0.0),
-            rpm.at(seconds),
+            rpm.range(0.0, seconds).0,
+            rpm.range(0.0, seconds).1,
         ),
         reference: Reference::extract(&mono, audio.sample_rate, &rpm, orders),
         rpm,
@@ -910,6 +915,10 @@ fn print_engine(calibrated: &Calibrated) {
             } else {
                 "FAIL"
             },
+        ),
+        (Some((order, db)), false) if calibrated.against_recording => println!(
+            "  quiet orders:  loudest {db:+.1} dB on order {}  [the reference's              own quiet orders, covered by the tolerance above]",
+            trim(order),
         ),
         (Some((order, db)), false) => println!(
             "  crank nulls:   loudest {db:+.1} dB on order {}  [not enforced: {}]",
