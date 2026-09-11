@@ -839,6 +839,116 @@ impl PulsePool {
 }
 
 // ---------------------------------------------------------------------------
+// Phase-resolved excitation
+// ---------------------------------------------------------------------------
+
+/// The solver's own cycle, ready to play back at crank rate.
+///
+/// # Why a table and not an envelope
+///
+/// A blowdown is not a shape anyone gets to choose. It is the cylinder emptying
+/// through a valve that is itself opening, and how fast that happens depends on
+/// port area, lift rate, bore and the pressure ratio across the seat. A
+/// two-exponential envelope can be made to *look* like one, but only for the
+/// engine its time constants were picked on: the same constants on a long-duration
+/// cam or a peripheral-port rotary describe an event that engine never has. The
+/// solver already computes the real curve 720 times a cycle, and this is it.
+///
+/// # What the pipe is driven with
+///
+/// ```text
+/// shape(phi) = [ P_cyl(phi) - P_manifold ]+  *  mdot_exh(phi) / max(mdot_exh)
+/// ```
+///
+/// normalised so its own peak is one. The pressure excess is the driver — a pipe
+/// end is pushed by the gas behind it being at a higher pressure than the gas in
+/// it — and the port flow is the *window* that driver acts through: it is zero
+/// while the valve is on its seat, and its rise and fall are the valve's own
+/// opening and closing ramps. So the crack at EVO is exactly as fast as the cam
+/// makes it and no faster, and the long tail over the exhaust stroke sits where
+/// the cylinder has come down to manifold pressure and stops driving anything.
+///
+/// Only the flow's *shape* is used, which is why it is normalised to its own
+/// peak: its magnitude is already in the pressure difference, and counting it
+/// twice would make the pulse grow as the square of the load.
+///
+/// The peak-one normalisation is what keeps the excitation model's one
+/// quantitative claim intact. Amplitude stays strictly
+/// `blowdown_delta / REFERENCE_BLOWDOWN`, exactly as it was when the envelope was
+/// parametric; all that has changed is that the curve under it is the solver's
+/// instead of an approximation of it.
+#[derive(Debug, Clone, Copy)]
+struct CycleTables {
+    /// Exhaust excitation shape over the cycle from EVO, peak one [-].
+    exhaust: [f32; CYCLE_TABLE],
+}
+
+impl Default for CycleTables {
+    /// A stopped engine: nothing to play.
+    fn default() -> Self {
+        Self {
+            exhaust: [0.0; CYCLE_TABLE],
+        }
+    }
+}
+
+impl CycleTables {
+    /// Derives the playable curves from one physics frame.
+    ///
+    /// Runs at the head of the callback, once per snapshot — a few hundred
+    /// multiplies at the physics frame rate, against the several thousand per
+    /// *sample* the network costs. It allocates nothing and branches on nothing
+    /// that depends on the signal.
+    fn from_snapshot(snapshot: &EngineSnapshot) -> Self {
+        let mut peak_flow = 0.0f32;
+        for &flow in snapshot.exhaust_port_flow.iter() {
+            peak_flow = peak_flow.max(flow);
+        }
+
+        let mut exhaust = [0.0f32; CYCLE_TABLE];
+        if peak_flow > 0.0 {
+            let manifold = snapshot.exhaust_manifold_pressure;
+            let mut peak = 0.0f32;
+            for (k, out) in exhaust.iter_mut().enumerate() {
+                let open = snapshot.exhaust_port_flow[k] / peak_flow;
+                let excess = (snapshot.cylinder_pressure[k] - manifold).max(0.0);
+                *out = open * excess;
+                peak = peak.max(*out);
+            }
+            if peak > 0.0 {
+                for out in exhaust.iter_mut() {
+                    *out /= peak;
+                }
+            }
+        }
+        Self { exhaust }
+    }
+
+    /// Reads a table at a cycle phase, `0..1` from EVO.
+    ///
+    /// Linearly interpolated between the two points either side, and offset by
+    /// half a point because each point is the mean of the span it covers and
+    /// therefore stands at that span's centre. Reading on the point boundaries
+    /// instead would advance every event in the cycle by 2.8 crank degrees.
+    #[inline(always)]
+    fn read(table: &[f32; CYCLE_TABLE], phase: f32) -> f32 {
+        let x = phase.rem_euclid(1.0) * CYCLE_TABLE as f32 - 0.5;
+        let floor = x.floor();
+        let frac = x - floor;
+        let i = (floor as i32).rem_euclid(CYCLE_TABLE as i32) as usize;
+        let a = table[i];
+        let b = table[(i + 1) % CYCLE_TABLE];
+        a + (b - a) * frac
+    }
+
+    /// Exhaust excitation at a cycle phase measured from EVO.
+    #[inline(always)]
+    fn exhaust_at(&self, phase: f32) -> f32 {
+        Self::read(&self.exhaust, phase)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cycle-to-cycle combustion variation
 // ---------------------------------------------------------------------------
 
@@ -1849,11 +1959,13 @@ pub struct EngineSynth {
     /// The pipes themselves: one primary per cylinder, a collector per bank,
     /// the crossover, the silencer chain, the tailpipes and their mouths.
     network: ExhaustNetwork,
-    /// One excitation pool per cylinder, because each cylinder has its own
-    /// primary to fire into. A shared per-bank pool could not produce the
-    /// cross-talk between unequal primaries that gives a header its character.
-    pulses: Vec<PulsePool>,
-    /// Excitation presented to the network this sample, parallel to `pulses`.
+    /// The solver's cycle, played back at crank rate.
+    ///
+    /// One set for the whole engine, because the block runs one master cylinder
+    /// and every other cylinder is that same cycle displaced in phase — which is
+    /// exactly how each of them reads it here.
+    cycle: CycleTables,
+    /// Excitation presented to the network this sample, one per cylinder.
     excitations: Vec<f32>,
     /// One backfire pool per bank. A backfire is unburnt fuel lighting off in
     /// the pipework, so it is a bank event and fires into the collector rather
@@ -1954,7 +2066,7 @@ impl EngineSynth {
         let mut synth = Self {
             banks,
             network,
-            pulses: vec![PulsePool::default(); n_cyl],
+            cycle: CycleTables::default(),
             excitations: vec![0.0; n_cyl],
             backfire_pulses: vec![PulsePool::default(); config.bank_count],
             bank_excitations: vec![0.0; config.bank_count],
@@ -2056,16 +2168,13 @@ impl EngineSynth {
         self.intake_flow.set_target(snapshot.intake_mass_flow);
         self.throttle.set_target(snapshot.throttle);
         self.knock.set_intensity(snapshot.knock_intensity);
+        self.cycle = CycleTables::from_snapshot(&snapshot);
     }
 
     /// Clears every filter and delay line without changing parameters.
     pub fn reset(&mut self) {
         self.network.reset();
-        for pool in self
-            .pulses
-            .iter_mut()
-            .chain(self.backfire_pulses.iter_mut())
-        {
+        for pool in self.backfire_pulses.iter_mut() {
             pool.reset();
         }
         self.excitations.fill(0.0);
@@ -2239,12 +2348,16 @@ impl EngineSynth {
     }
 
     /// Advances crank phase by one sample and fires any cylinder it passes.
+    ///
+    /// Returns whether the crank actually turned this sample. A stopped engine
+    /// has no phase to read the cycle at, and holding the last one would present
+    /// the pipes with a frozen slice of the blowdown as a DC offset.
     #[inline(always)]
-    fn advance_crank(&mut self, cycle_hz: f32) {
+    fn advance_crank(&mut self, cycle_hz: f32) -> bool {
         let nominal_omega = 4.0 * std::f32::consts::PI * cycle_hz;
         if nominal_omega <= 1e-6 {
             self.crank_omega_delta = 0.0;
-            return;
+            return false;
         }
 
         // Integrate intra-cycle crank speed ripple:
@@ -2288,83 +2401,82 @@ impl EngineSynth {
         // matters: past one cycle per sample the crossing test below would miss
         // events, and the result would be a phantom subharmonic.
         if !(1e-9..1.0).contains(&increment) {
-            return;
+            return false;
         }
 
         let previous = self.cycle_phase;
-        // Blowdown lasts a roughly fixed number of crank degrees, so its
-        // duration in seconds is inversely proportional to engine speed.
-        // Holding it fixed in time instead would smear the pulses into each
-        // other at high rpm and leave the note hollow at low rpm.
-        let cycle_seconds = 1.0 / cycle_hz.max(1e-3);
-        let decay =
-            (self.config.blowdown_degrees as f32 / 720.0 * cycle_seconds).clamp(0.0004, 0.020);
-        // Attack and noise content are deliberately *not* functions of
-        // amplitude. Making the pulse shape vary with loudness would leave
-        // the radiated level only roughly proportional to the pressure
-        // difference, and strict proportionality is the excitation model's
-        // one quantitative claim. Everything that shapes the pulse is a
-        // function of engine speed, which is orthogonal to it.
-        let attack = 0.00016;
-        let noise_depth = 0.5;
         let depth = self.variation_depth;
-        // Firing jitter is a delay in samples, so it needs the cycle in
-        // samples. Zero above CCV_THRESHOLD_RPM, where the mean retard
-        // switches off with the variation it exists to carry.
-        let cycle_samples = cycle_seconds * self.config.sample_rate;
-        let retard = if depth > 0.0 {
-            CCV_MEAN_RETARD_FRACTION / self.config.cylinders.len() as f32 * cycle_samples
-        } else {
-            0.0
-        };
 
         for index in 0..self.config.cylinders.len() {
             let tap = self.config.cylinders[index];
-            let variation = self.variation[index];
-            // Distance from the previous phase forward to this cylinder's
-            // trigger, wrapped into [0, 1). The trigger is the firing table
-            // and nothing else — jitter is applied to the pulse, not to the
-            // angle, so this test still fires each cylinder exactly once per
-            // cycle no matter what was drawn.
+            let alive = self.blowdown_pa[index].value() > 1.0;
+            // Distance from the previous phase forward to this cylinder's EVO,
+            // wrapped into [0, 1). Crossing it is no longer the start of a
+            // synthesised pulse — the excitation plays continuously now — but it
+            // is still the once-per-cycle instant this cylinder's combustion
+            // happens at, and so it is when the knock voice is struck.
             let ahead = (tap.evo_phase - previous).rem_euclid(1.0);
-            if ahead < increment {
-                let blowdown = self.blowdown_pa[index].value();
-                // Strictly linear in the pressure difference, per the excitation model.
-                let amplitude = (blowdown / REFERENCE_BLOWDOWN).min(2.0);
-                if amplitude > 1e-5 {
-                    // Fraction of this sample that has elapsed since the pulse
-                    // began, which is how far into its envelope it already is.
-                    let age = 1.0 - ahead / increment;
-                    self.pulses[index].trigger(
-                        self.config.sample_rate,
-                        amplitude * variation.amplitude_scale,
-                        attack,
-                        decay,
-                        noise_depth,
-                        age,
-                        retard + variation.phase_offset * cycle_samples,
-                    );
-                    self.knock.trigger();
-                    // Draw this cylinder's next cycle now that this one has
-                    // been committed to a slot.
-                    self.reroll_variation(index, depth);
-                }
+            if ahead < increment && alive {
+                self.knock.trigger();
+            }
+            // The next cycle's draw is taken half a cycle *away* from the event
+            // it governs, where the curve is flat. Drawing it at the event
+            // instead would move the phase a cylinder is reading its own
+            // blowdown at while that blowdown is happening, which can walk the
+            // edge back over a threshold it has already passed — the same
+            // double-firing hazard the old delay-scheduled jitter was built to
+            // avoid, in its new form.
+            let quiet = (tap.evo_phase + 0.5).rem_euclid(1.0);
+            if (quiet - previous).rem_euclid(1.0) < increment && alive {
+                self.reroll_variation(index, depth);
             }
         }
 
         self.cycle_phase = (previous + increment).rem_euclid(1.0);
+        true
+    }
+
+    /// Reads each cylinder's excitation out of the cycle at its own phase.
+    ///
+    /// Every cylinder plays the same curve, displaced by where its EVO sits in
+    /// the master cycle — which is the audio-side statement of the same thing
+    /// the phase ring does on the physics side.
+    #[inline(always)]
+    fn fill_excitations(&mut self, turning: bool) {
+        if !turning {
+            self.excitations.fill(0.0);
+            return;
+        }
+        // Combustion lags the valve event by a real and variable number of crank
+        // degrees, common to every cylinder; only the variation around it is
+        // audible. Zero above CCV_THRESHOLD_RPM along with the variation it
+        // exists to carry.
+        let retard = if self.variation_depth > 0.0 {
+            CCV_MEAN_RETARD_FRACTION / self.config.cylinders.len() as f32
+        } else {
+            0.0
+        };
+        let phase = self.cycle_phase;
+        for index in 0..self.config.cylinders.len() {
+            let tap = self.config.cylinders[index];
+            let variation = self.variation[index];
+            // Strictly linear in the pressure difference, per the excitation
+            // model; the curve it multiplies is normalised to a peak of one.
+            let amplitude = (self.blowdown_pa[index].value() / REFERENCE_BLOWDOWN).min(2.0)
+                * variation.amplitude_scale;
+            let local = phase - tap.evo_phase - retard - variation.phase_offset;
+            self.excitations[index] = amplitude * self.cycle.exhaust_at(local);
+        }
     }
 
     /// Produces one stereo frame.
     #[inline(always)]
     fn tick(&mut self) -> (f32, f32) {
         let cycle_hz = self.cycle_hz.next_value();
-        self.advance_crank(cycle_hz);
+        let turning = self.advance_crank(cycle_hz);
+        self.fill_excitations(turning);
 
         let exhaust_level = self.exhaust_level.next_value();
-        for (excitation, pool) in self.excitations.iter_mut().zip(self.pulses.iter_mut()) {
-            *excitation = pool.process(&mut self.noise);
-        }
         for (excitation, pool) in self
             .bank_excitations
             .iter_mut()
@@ -3075,12 +3187,9 @@ mod tests {
 
     #[test]
     fn every_cylinder_fires_exactly_once_per_cycle_however_it_is_jittered() {
-        // The invariant firing jitter must not break. Applying the jitter to
-        // the trigger *angle* violates it: a cylinder that has just fired and
-        // then has its angle redrawn forwards is crossed a second time in the
-        // same cycle, which doubles its pulses and lifts the idle by several dB
-        // of pure artefact. Scheduling the pulse behind an unmoved trigger is
-        // what makes this hold.
+        // The invariant firing jitter must not break. The jitter shifts the
+        // phase each cylinder *reads* the cycle at; it must never make a
+        // cylinder's excitation come round twice in one cycle, or skip one.
         let mut config = SynthConfig::cross_plane_v8(FS);
         // Well past anything the speed schedule would ask for, so the draw is
         // hitting its clamps rather than sitting near nominal.
@@ -3098,28 +3207,34 @@ mod tests {
 
         let cycles = 5usize;
         let samples = (FS / (800.0 / 120.0)) as usize * cycles;
-        let mut last: Vec<usize> = synth.pulses.iter().map(|p| p.next).collect();
-        let mut fires = 0usize;
+        let n = synth.config().cylinder_count();
+        // Half the peak of a curve normalised to one: comfortably inside the
+        // blowdown and comfortably above the exhaust stroke that follows it.
+        let threshold = (idle_snapshot().blowdown_delta[0] / REFERENCE_BLOWDOWN) * 0.5;
+        let mut fires = vec![0usize; n];
         let mut buffer = [0.0f32; 2];
-        for _ in 0..samples {
+        // Seed from the state the window actually opens in. A cylinder whose
+        // blowdown is already under way at sample zero fired before the window,
+        // not inside it.
+        synth.render(&mut buffer, 2);
+        let mut above: Vec<bool> = (0..n).map(|i| synth.excitations[i] > threshold).collect();
+        for _ in 1..samples {
             synth.render(&mut buffer, 2);
-            for (i, pool) in synth.pulses.iter().enumerate() {
-                let slots = pool.slots.len();
-                let advanced = (pool.next + slots - last[i]) % slots;
-                assert!(
-                    advanced <= 1,
-                    "cylinder {i} triggered {advanced} pulses in one sample"
-                );
-                fires += advanced;
-                last[i] = pool.next;
+            for i in 0..n {
+                let now = synth.excitations[i] > threshold;
+                if now && !above[i] {
+                    fires[i] += 1;
+                }
+                above[i] = now;
             }
         }
 
-        let expected = synth.config().cylinder_count() * cycles;
-        assert_eq!(
-            fires, expected,
-            "{fires} firings over {cycles} cycles, expected {expected}"
-        );
+        for (i, count) in fires.iter().enumerate() {
+            assert_eq!(
+                *count, cycles,
+                "cylinder {i} excited {count} times over {cycles} cycles"
+            );
+        }
     }
 
     #[test]
@@ -3142,35 +3257,21 @@ mod tests {
         }
         synth.cycle_phase = 0.0;
 
-        // Render through 0.30 of a cycle (covering 0 deg and 180 deg, before 270 deg)
-        // to capture cylinder 0 (at 0 deg) and cylinder 2 (at 180 deg). Each
-        // cylinder fires into its own pool now, so the two amplitudes are read
-        // from the two pools rather than from consecutive slots of a shared one.
-        let quarter_cycle_samples = (FS / (800.0 / 120.0) * 0.30) as usize;
+        // A whole cycle, so both cylinders have had their turn. They play the
+        // same normalised curve, so the ratio of the two peaks is the ratio of
+        // the two pressure differences and nothing else.
+        let cycle_samples = (FS / (800.0 / 120.0)) as usize;
         let mut buffer = [0.0f32; 2];
-        let mut fired: [Option<f32>; 3] = [None; 3];
-        let mut last_next = [
-            synth.pulses[0].next,
-            synth.pulses[1].next,
-            synth.pulses[2].next,
-        ];
-
-        for _ in 0..quarter_cycle_samples {
+        let mut peaks = [0.0f32; 3];
+        for _ in 0..cycle_samples {
             synth.render(&mut buffer, 2);
             for cylinder in [0usize, 2] {
-                let pool = &synth.pulses[cylinder];
-                if pool.next != last_next[cylinder] {
-                    let slots = pool.slots.len();
-                    let slot = (pool.next + slots - 1) % slots;
-                    fired[cylinder].get_or_insert(pool.slots[slot].amplitude);
-                    last_next[cylinder] = pool.next;
-                }
+                peaks[cylinder] = peaks[cylinder].max(synth.excitations[cylinder]);
             }
         }
 
-        let first = fired[0].expect("cylinder 0 never fired");
-        let third = fired[2].expect("cylinder 2 never fired");
-        let ratio = third / first;
+        assert!(peaks[0] > 0.0, "cylinder 0 was never excited");
+        let ratio = peaks[2] / peaks[0];
         assert!(
             (ratio - 2.0).abs() < 1e-3,
             "amplitude ratio was {ratio}, expected 2.0 (proportional to blowdown delta)"
@@ -3273,29 +3374,37 @@ mod tests {
             synth.cycle_phase = 0.001;
 
             let expected_fires = 8 * cycles;
-            let mut last: Vec<usize> = synth.pulses.iter().map(|p| p.next).collect();
+            // Half of each cylinder's own peak: the instant its excitation
+            // crosses that on the way up is that cylinder's firing, and the
+            // curve crosses it once a cycle.
+            let thresholds: Vec<f32> = (0..8)
+                .map(|i| 0.5 * snapshot.blowdown_delta[i] / REFERENCE_BLOWDOWN)
+                .collect();
+            let mut above = [false; 8];
             let mut firing_times = Vec::new();
             let mut buffer = [0.0f32; 2];
             let mut sample_idx = 0;
 
-            while firing_times.len() < expected_fires && sample_idx < 100_000 {
+            // One extra, because the render starts a hair past cylinder 0's own
+            // event and catches its edge part-way up. That first detection is
+            // not a firing interval, it is where the measurement began.
+            while firing_times.len() <= expected_fires && sample_idx < 100_000 {
                 synth.render(&mut buffer, 2);
-                for (i, pool) in synth.pulses.iter().enumerate() {
-                    let slots = pool.slots.len();
-                    let advanced = (pool.next + slots - last[i]) % slots;
-                    if advanced > 0 {
+                for i in 0..8 {
+                    let now = synth.excitations[i] > thresholds[i];
+                    if now && !above[i] {
                         firing_times.push(sample_idx);
                     }
-                    last[i] = pool.next;
+                    above[i] = now;
                 }
                 sample_idx += 1;
             }
 
-            let intervals = firing_times
+            let intervals = firing_times[1..]
                 .windows(2)
                 .map(|w| (w[1] - w[0]) as f32)
                 .collect();
-            (intervals, firing_times.len())
+            (intervals, firing_times.len() - 1)
         };
 
         let cycles = 5;
