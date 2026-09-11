@@ -151,6 +151,36 @@ pub fn ground_notch_hz(delta_r: f32, c: f32) -> f32 {
     c / (2.0 * delta_r.max(1e-4))
 }
 
+/// Doppler pitch shift factor $c / (c - v_r)$ [-]:
+///
+/// ```text
+/// f' = f * c / (c - v_r)
+/// ```
+///
+/// where $v_r$ is the radial velocity of the source towards the observer [m/s].
+#[inline]
+pub fn doppler_factor(v_r: f32, c: f32) -> f32 {
+    let clamped = v_r.clamp(-0.8 * c, 0.8 * c);
+    c / (c - clamped)
+}
+
+/// Relative radial velocity of a source at `source_pos` moving with `velocity`
+/// towards `target_pos` [m/s].
+///
+/// Positive when approaching the observer, negative when receding.
+#[inline]
+pub fn aperture_radial_velocity(
+    source_pos: [f32; 3],
+    velocity: [f32; 3],
+    target_pos: [f32; 3],
+) -> f32 {
+    let dx = target_pos[0] - source_pos[0];
+    let dy = target_pos[1] - source_pos[1];
+    let dz = target_pos[2] - source_pos[2];
+    let dir = normalize([dx, dy, dz]);
+    dot(velocity, dir)
+}
+
 /// An acoustic radiating aperture on the engine / vehicle.
 ///
 /// Every source that couples to the outside air does so through an aperture with
@@ -272,6 +302,8 @@ pub struct AperturePath {
     left_ground: DelayLine,
     right_ground: DelayLine,
     pub ground_reflection: bool,
+    /// Velocity vector of the aperture [m/s] (X right, Y forward, Z up).
+    pub velocity: [f32; 3],
 }
 
 impl AperturePath {
@@ -292,14 +324,35 @@ impl AperturePath {
             left_ground: DelayLine::with_max_delay(max_ground_samples),
             right_ground: DelayLine::with_max_delay(max_ground_samples),
             ground_reflection: true,
+            velocity: [0.0, 0.0, 0.0],
         }
     }
 
-    /// Clears internal delay lines and filters.
     /// Sets whether ground reflection interference is modelled.
     pub fn with_ground_reflection(mut self, enabled: bool) -> Self {
         self.ground_reflection = enabled;
         self
+    }
+
+    /// Sets the velocity vector of the aperture [m/s].
+    pub fn with_velocity(mut self, velocity: [f32; 3]) -> Self {
+        self.velocity = velocity;
+        self
+    }
+
+    /// Advances aperture position by `dt` seconds according to its velocity vector.
+    #[inline]
+    pub fn update_motion(&mut self, dt: f32) {
+        self.aperture.position[0] += self.velocity[0] * dt;
+        self.aperture.position[1] += self.velocity[1] * dt;
+        self.aperture.position[2] += self.velocity[2] * dt;
+    }
+
+    /// Returns the Doppler factor of this aperture towards a receiver position [-].
+    #[inline]
+    pub fn doppler_factor_to(&self, receiver_pos: [f32; 3]) -> f32 {
+        let vr = aperture_radial_velocity(self.aperture.position, self.velocity, receiver_pos);
+        doppler_factor(vr, SPEED_OF_SOUND_AIR)
     }
 
     pub fn reset(&mut self) {
@@ -690,5 +743,75 @@ mod tests {
         let f_notch = ground_notch_hz(delta, SPEED_OF_SOUND_AIR);
         let expected_f_notch = SPEED_OF_SOUND_AIR / (2.0 * expected_delta);
         assert!((f_notch - expected_f_notch).abs() < 1e-3);
+    }
+
+    #[test]
+    fn doppler_shift_matches_radial_velocity_formula() {
+        let c = SPEED_OF_SOUND_AIR;
+        let f = 1000.0f32;
+
+        // Stationary: vr = 0 -> f' = f
+        let factor_zero = doppler_factor(0.0, c);
+        assert!((factor_zero - 1.0).abs() < 1e-6);
+
+        // Approaching at 34.32 m/s (Mach 0.1): vr = +34.32
+        // f' = f * c / (c - vr) = 1000 * 343.2 / (343.2 - 34.32) = 1000 * 10/9 = 1111.11 Hz
+        let vr_approach = 0.1 * c;
+        let factor_approach = doppler_factor(vr_approach, c);
+        let expected_approach = c / (c - vr_approach);
+        assert!((factor_approach - expected_approach).abs() < 1e-5);
+        let f_prime_approach = f * factor_approach;
+        assert!((f_prime_approach - 1111.1111).abs() < 1e-2);
+
+        // Receding at 34.32 m/s (Mach 0.1): vr = -34.32
+        // f' = f * c / (c - vr) = 1000 * 343.2 / (343.2 + 34.32) = 1000 * 10/11 = 909.09 Hz
+        let vr_recede = -0.1 * c;
+        let factor_recede = doppler_factor(vr_recede, c);
+        let expected_recede = c / (c - vr_recede);
+        assert!((factor_recede - expected_recede).abs() < 1e-5);
+        let f_prime_recede = f * factor_recede;
+        assert!((f_prime_recede - 909.0909).abs() < 1e-2);
+    }
+
+    #[test]
+    fn pass_by_shifts_tailpipe_and_intake_separately() {
+        // Vehicle travelling in +Y direction at 25 m/s (90 km/h)
+        let velocity = [0.0, 25.0, 0.0];
+        // Observer at roadside: [5.0, 0.0, 1.2]
+        let observer = [5.0, 0.0, 1.2];
+
+        // Vehicle center is at y = 0.0 at this instant.
+        // Intake mouth is at vehicle front: y = +1.8 m
+        // Tailpipe is at vehicle rear: y = -2.2 m
+        let intake = Aperture::new([0.0, 1.8, 0.6], 0.01, [0.0, 1.0, 0.0]);
+        let tailpipe = Aperture::new([0.0, -2.2, 0.3], 0.01, [0.0, -1.0, 0.0]);
+
+        let intake_path = AperturePath::new(intake, 48_000.0).with_velocity(velocity);
+        let tailpipe_path = AperturePath::new(tailpipe, 48_000.0).with_velocity(velocity);
+
+        let intake_doppler = intake_path.doppler_factor_to(observer);
+        let tailpipe_doppler = tailpipe_path.doppler_factor_to(observer);
+
+        // The intake mouth has already passed y = 0 (is at y = +1.8), so it is moving away from the observer!
+        // Radial velocity is negative, Doppler factor < 1.0 (shifted down).
+        assert!(
+            intake_doppler < 1.0,
+            "Intake mouth having passed the observer must be pitch shifted down: got {}",
+            intake_doppler
+        );
+
+        // The tailpipe has NOT yet reached y = 0 (is at y = -2.2), so it is still approaching the observer!
+        // Radial velocity is positive, Doppler factor > 1.0 (shifted up).
+        assert!(
+            tailpipe_doppler > 1.0,
+            "Tailpipe still approaching the observer must be pitch shifted up: got {}",
+            tailpipe_doppler
+        );
+
+        // They must differ measurably:
+        assert!(
+            tailpipe_doppler > intake_doppler + 0.05,
+            "Intake and tailpipe must have distinctly separate Doppler shifts during pass-by"
+        );
     }
 }
