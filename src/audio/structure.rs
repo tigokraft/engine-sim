@@ -584,6 +584,41 @@ mod tests {
     }
 
     #[test]
+    fn mass_moves_every_mode_the_block_owns() {
+        // Five of the six modes are the block's own metal and all of them carry
+        // the mass law, by two different routes: the bending family through the
+        // `sqrt(K/m)` anchor, and the bore walls through the envelope density
+        // under `sqrt(E/rho)`. Quarter the mass and both halve.
+        let heavy = StructuralSpec::new(320.0, 0.094, 4);
+        let light = StructuralSpec::new(80.0, 0.094, 4);
+        let (heavy_modes, light_modes) = (heavy.modes(), light.modes());
+
+        for i in [0, 1, 2, 4, 5] {
+            let ratio = light_modes[i].frequency / heavy_modes[i].frequency;
+            assert!(
+                (ratio - 2.0).abs() < 0.02,
+                "mode {i} moved by {ratio} instead of 2 for a quarter of the mass"
+            );
+        }
+
+        // The sixth is the pan, which is a steel pressing bolted underneath and
+        // does not know what the block is made of.
+        assert!(
+            (light_modes[3].frequency - heavy_modes[3].frequency).abs() < 1e-3,
+            "the pan followed the block's mass: {} vs {}",
+            light_modes[3].frequency,
+            heavy_modes[3].frequency
+        );
+
+        // And the whole bank really is lower on the heavy block, which is the
+        // audible form of the same statement.
+        let mean = |modes: [StructuralMode; STRUCTURAL_MODES]| {
+            modes.iter().map(|m| m.frequency.ln()).sum::<f32>() / STRUCTURAL_MODES as f32
+        };
+        assert!(mean(light_modes) > mean(heavy_modes));
+    }
+
+    #[test]
     fn an_alloy_block_rings_higher_than_an_iron_one_of_the_same_size() {
         // The asymmetry the whole module rests on: same castings, same bores,
         // two thirds of the mass. Stiffness barely moves, so every family goes
