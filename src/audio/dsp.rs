@@ -692,15 +692,6 @@ struct Blowdown {
     decay_coeff: f32,
     attack_state: f32,
     decay_state: f32,
-    /// Whole samples still to wait before the envelope starts running.
-    ///
-    /// Lets a pulse be scheduled *after* the crank angle that triggered it,
-    /// which is how cycle-to-cycle firing jitter is applied. Moving the trigger
-    /// angle itself would be the obvious alternative and is wrong: the angle is
-    /// what the once-per-cycle crossing test is built on, and an angle that
-    /// jumps forward after a cylinder has fired can be crossed a second time in
-    /// the same cycle.
-    pending: u32,
     active: bool,
 }
 
@@ -714,7 +705,6 @@ impl Blowdown {
     /// firing instant, which is audible on a steady note as a faint rasp.
     /// Advancing the envelope analytically to its true starting point removes
     /// it.
-    #[allow(clippy::too_many_arguments)]
     fn trigger(
         &mut self,
         sample_rate: f32,
@@ -723,7 +713,6 @@ impl Blowdown {
         decay_seconds: f32,
         noise_depth: f32,
         age: f32,
-        start_delay: f32,
     ) {
         let ta = attack_seconds.max(1.0 / sample_rate);
         let td = decay_seconds.max(2.0 / sample_rate);
@@ -740,16 +729,9 @@ impl Blowdown {
         self.amplitude = amplitude / peak.max(1e-3);
         self.noise_depth = noise_depth.clamp(0.0, 1.0);
 
-        // `age` counts forward from the pulse's own start; `start_delay` pushes
-        // that start into the future. Their difference is where the envelope
-        // stands right now, and when it is negative the pulse has not begun —
-        // so the whole-sample part becomes a countdown and the remainder stays
-        // as the sub-sample phase the envelope resumes from.
-        let now = age.clamp(0.0, 1.0) - start_delay.max(0.0);
-        let wait = (-now).max(0.0).ceil();
-        let age = (now + wait).clamp(0.0, 1.0);
-        self.pending = wait as u32;
-
+        // `age` counts forward from the pulse's own start, so it is how far into
+        // its own envelope the pulse already is on the sample it first appears.
+        let age = age.clamp(0.0, 1.0);
         self.attack_state = 1.0 - (1.0 - self.attack_coeff).powf(age);
         self.decay_state = self.decay_coeff.powf(age);
         self.active = true;
@@ -759,10 +741,6 @@ impl Blowdown {
     #[inline(always)]
     fn process(&mut self, noise: f32) -> f32 {
         if !self.active {
-            return 0.0;
-        }
-        if self.pending > 0 {
-            self.pending -= 1;
             return 0.0;
         }
         self.attack_state += (1.0 - self.attack_state) * self.attack_coeff;
@@ -792,7 +770,6 @@ struct PulsePool {
 }
 
 impl PulsePool {
-    #[allow(clippy::too_many_arguments)]
     fn trigger(
         &mut self,
         sample_rate: f32,
@@ -801,7 +778,6 @@ impl PulsePool {
         decay: f32,
         noise_depth: f32,
         age: f32,
-        start_delay: f32,
     ) {
         // Prefer an idle slot; fall back to round-robin stealing.
         let slot = self
@@ -810,15 +786,7 @@ impl PulsePool {
             .position(|s| !s.active)
             .unwrap_or(self.next);
         self.next = (self.next + 1) % self.slots.len();
-        self.slots[slot].trigger(
-            sample_rate,
-            amplitude,
-            attack,
-            decay,
-            noise_depth,
-            age,
-            start_delay,
-        );
+        self.slots[slot].trigger(sample_rate, amplitude, attack, decay, noise_depth, age);
     }
 
     #[inline(always)]
@@ -2418,7 +2386,6 @@ impl EngineSynth {
                 decay,
                 0.92,
                 self.noise.next_unit(),
-                0.0,
             );
         }
     }
