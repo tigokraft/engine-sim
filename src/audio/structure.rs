@@ -389,6 +389,39 @@ impl StructuralSpec {
 }
 
 // ---------------------------------------------------------------------------
+// Combustion drive
+// ---------------------------------------------------------------------------
+
+/// Cylinder pressure rise rate that maps to unit structural drive [Pa/s].
+///
+/// A petrol engine at normal load runs 2 to 4 bar per crank degree through the
+/// pressure rise, which at 3000 rpm is 4 to 8 GPa/s; a direct-injection diesel
+/// reaches several times that, and *that* is what its extra clatter is. 5 GPa/s
+/// therefore sits inside the petrol range with the steeper cases left free to
+/// run above unity, which is the right way round for a reference.
+pub const REFERENCE_PRESSURE_RATE: f32 = 5.0e9;
+
+/// Bore whose piston area normalises the combustion force rate [m].
+///
+/// What the block feels is `A dP/dt`, not `dP/dt`, so a big engine radiates more
+/// structure-borne noise from the same rise rate. Normalised on the bore of the
+/// block [`crate::audio::filters::BLOCK_REFERENCE_MASS`] describes, so the
+/// shipped V8 sits at unity.
+pub const REFERENCE_STRUCTURAL_BORE: f32 = 0.094;
+
+/// Structural drive from a cylinder pressure rise rate [-].
+///
+/// `pressure_rate` in Pascals per second and `bore` in metres, against the two
+/// references above. Linear in both, which is the claim the whole path rests on:
+/// at the same peak pressure, the steeper rise drives the structure harder,
+/// because what reaches the block is the rate and not the height.
+#[inline]
+pub fn combustion_drive(pressure_rate: f32, bore: f32) -> f32 {
+    let area_ratio = (bore / REFERENCE_STRUCTURAL_BORE).powi(2);
+    pressure_rate / REFERENCE_PRESSURE_RATE * area_ratio
+}
+
+// ---------------------------------------------------------------------------
 // The filterbank
 // ---------------------------------------------------------------------------
 

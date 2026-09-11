@@ -41,6 +41,7 @@
 //!   intake noise ── bandpass(m_dot, throttle) ───────────────> centre ──┐
 //!   turbo whistle + surge flutter ──[if fitted]──────────────> centre ──┤
 //!   valvetrain clicks + FMEP rumble ─────────────────────────> centre ──┤
+//!   dP/dtheta ──> modal block (bending, pan, bore walls) ────> centre ──┤
 //!                                                                       ▼
 //!                            DC block ─> block resonance ─> soft clip ─> out
 //!                                        (60-120 Hz, gain falls with rpm)
@@ -87,6 +88,7 @@ use crate::audio::filters::{
     DcBlocker, ModalBank, Noise, OnePole, Smoothed,
 };
 use crate::audio::intake_voice::IntakeNetwork;
+use crate::audio::structure::{combustion_drive, StructuralPath, StructuralSpec};
 use crate::audio::waveguide::ExhaustNetwork;
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
 
@@ -546,6 +548,12 @@ pub struct SynthConfig {
     pub block_resonance_q: f64,
     /// Block rumble boost at idle, tapering to nothing with speed [dB].
     pub block_resonance_db: f64,
+    /// Mass and geometry the block's modes are derived from.
+    ///
+    /// The structural path is a second radiator, not a filter on the exhaust:
+    /// combustion, the mechanical rig and knock all reach the listener through
+    /// it. See [`crate::audio::structure`].
+    pub structure: StructuralSpec,
     /// Standard deviation of cycle-to-cycle variation at the threshold speed [-].
     ///
     /// See [`CCV_THRESHOLD_RPM`]. Applied to both the blowdown amplitude and the
@@ -577,6 +585,13 @@ pub struct SynthConfig {
     pub backfire_level: f64,
     /// Level of the valvetrain and bearing noise floor [-].
     pub mechanical_level: f64,
+    /// Level of the structural path in the final mix [-].
+    ///
+    /// Scales what the block radiates against what the pipes do. The balance
+    /// *within* the path is not set here — each source arrives at the bank
+    /// already normalised against its own physical reference — so this is one
+    /// number for how loud the engine's own casing is, and nothing else.
+    pub structure_level: f64,
     /// Mechanical rig configuration: which impulsive sources exist, their orders and levels.
     pub mechanical: MechanicalSpec,
     /// Gain applied to the summed bus before the soft clipper [-].
@@ -648,6 +663,7 @@ impl SynthConfig {
             // 7 dB the idle stops being weighty and starts being louder than
             // the redline, which is the wrong way round.
             block_resonance_db: 5.5,
+            structure: StructuralSpec::default(),
             // A healthy warm engine: COV of IMEP around 3 % where the lope
             // starts and 8 % at idle. A tired one would run higher, and this is
             // the knob that models it.
@@ -664,6 +680,10 @@ impl SynthConfig {
             // against a unity-RMS source, so this is directly comparable to
             // `intake_level` and [`TurboVoicing::level`].
             mechanical_level: 0.030,
+            // Set by measurement against the catalogue: the largest value at
+            // which the block is clearly present in the bottom octave at idle
+            // without becoming the thing the engine sounds like.
+            structure_level: 0.07,
             mechanical: MechanicalSpec::default(),
             master_gain: 0.20,
         }
@@ -915,6 +935,14 @@ struct CycleTables {
     /// at their own phases is the induction gulp train, which is what makes an
     /// intake pitched rather than merely noisy.
     intake: [f32; CYCLE_TABLE],
+    /// Rate of change of cylinder pressure per unit of cycle [Pa].
+    ///
+    /// `dP/dtheta` in the cycle's own units, so multiplying by the cycle rate
+    /// gives `dP/dt` in Pa/s. This is the quantity the block hears: the piston
+    /// and the head are pushed apart by `A P`, and a force that arrives quickly
+    /// puts its energy where a stiff lump of iron will answer, while the same
+    /// force arriving slowly does not. Combustion noise is this table.
+    pressure_slope: [f32; CYCLE_TABLE],
 }
 
 impl Default for CycleTables {
@@ -923,6 +951,7 @@ impl Default for CycleTables {
         Self {
             exhaust: [0.0; CYCLE_TABLE],
             intake: [0.0; CYCLE_TABLE],
+            pressure_slope: [0.0; CYCLE_TABLE],
         }
     }
 }
@@ -956,9 +985,20 @@ impl CycleTables {
                 }
             }
         }
+        // Central difference on the master pressure trace. The table wraps, so
+        // the derivative does too — the compression stroke's rise is continuous
+        // with the previous cycle's expansion, and there is no seam at EVO.
+        let mut pressure_slope = [0.0f32; CYCLE_TABLE];
+        for (k, slope) in pressure_slope.iter_mut().enumerate() {
+            let next = snapshot.cylinder_pressure[(k + 1) % CYCLE_TABLE];
+            let previous = snapshot.cylinder_pressure[(k + CYCLE_TABLE - 1) % CYCLE_TABLE];
+            *slope = 0.5 * (next - previous) * CYCLE_TABLE as f32;
+        }
+
         Self {
             exhaust,
             intake: snapshot.intake_port_flow,
+            pressure_slope,
         }
     }
 
@@ -989,6 +1029,12 @@ impl CycleTables {
     #[inline(always)]
     fn intake_at(&self, phase: f32) -> f32 {
         Self::read(&self.intake, phase)
+    }
+
+    /// Cylinder pressure slope at a cycle phase measured from EVO [Pa/cycle].
+    #[inline(always)]
+    fn pressure_slope_at(&self, phase: f32) -> f32 {
+        Self::read(&self.pressure_slope, phase)
     }
 }
 
@@ -1039,6 +1085,7 @@ impl CyclePlayer {
             let c = &self.current;
             p.exhaust[k] += (c.exhaust[k] - p.exhaust[k]) * blend;
             p.intake[k] += (c.intake[k] - p.intake[k]) * blend;
+            p.pressure_slope[k] += (c.pressure_slope[k] - p.pressure_slope[k]) * blend;
         }
         self.current = CycleTables::from_snapshot(snapshot);
         self.blend.snap(0.0);
@@ -1064,6 +1111,14 @@ impl CyclePlayer {
     fn intake_at(&self, phase: f32, blend: f32) -> f32 {
         let a = self.previous.intake_at(phase);
         let b = self.current.intake_at(phase);
+        a + (b - a) * blend
+    }
+
+    /// Cylinder pressure slope at a cycle phase measured from EVO [Pa/cycle].
+    #[inline(always)]
+    fn pressure_slope_at(&self, phase: f32, blend: f32) -> f32 {
+        let a = self.previous.pressure_slope_at(phase);
+        let b = self.current.pressure_slope_at(phase);
         a + (b - a) * blend
     }
 
@@ -2073,6 +2128,13 @@ pub struct EngineSynth {
     dc: [DcBlocker; 2],
     /// Structural rumble of the block and pan, on the output bus.
     block: BlockResonator,
+    /// The block as a radiating body: modes of the casting, pan and bore walls.
+    structure: StructuralPath,
+    /// `drive = scale * dP/dt`, with the bore area folded in [s/Pa].
+    ///
+    /// Fixed geometry, so the area ratio and both references are collapsed into
+    /// one multiply at construction rather than run per sample.
+    combustion_scale: f32,
     /// Ramps 0 to 1 on the first samples so opening the stream is silent.
     fade_in: Smoothed,
 }
@@ -2155,6 +2217,8 @@ impl EngineSynth {
                 config.block_resonance_q as f32,
                 config.block_resonance_db as f32,
             ),
+            structure: StructuralPath::new(fs, &config.structure.modes()),
+            combustion_scale: combustion_drive(1.0, config.structure.bore as f32),
             fade_in: Smoothed::new(0.0, fs, 0.015),
             config,
         };
@@ -2266,6 +2330,7 @@ impl EngineSynth {
         self.knock.reset();
         self.dc = [DcBlocker::default(); 2];
         self.block.reset();
+        self.structure.reset();
         self.phase_fixed = 0;
         self.crank_omega_delta = 0.0;
         self.control_countdown = 0;
@@ -2520,10 +2585,11 @@ impl EngineSynth {
     /// the master cycle — which is the audio-side statement of the same thing
     /// the phase ring does on the physics side.
     ///
-    /// Returns the induction flow the whole engine is drawing this sample: the
-    /// port flow curve summed over the cylinders at their own phases, which is
-    /// the same *sum of instants* [`REFERENCE_INTAKE_FLOW`] is measured against
-    /// — now at the sample rate instead of once a physics frame.
+    /// Returns the structural drive the whole engine is delivering this sample:
+    /// `dP/dtheta` summed over the cylinders at their own phases, in the cycle's
+    /// own units. Every cylinder hammers the same block, so unlike the exhaust —
+    /// which has one primary per cylinder — this is a single scalar, and the
+    /// firing order is in it by construction.
     #[inline(always)]
     fn fill_excitations(&mut self, turning: bool) -> f32 {
         // Advanced whether or not the crank is, so a fade cannot be left
@@ -2535,7 +2601,7 @@ impl EngineSynth {
             return 0.0;
         }
         let phase = self.cycle_phase();
-        let mut induction = 0.0;
+        let mut rise = 0.0;
         let c_intake = crate::audio::filters::speed_of_sound(
             crate::audio::intake_voice::INTAKE_AIR_GAMMA,
             crate::audio::intake_voice::INTAKE_GAS_CONSTANT,
@@ -2549,16 +2615,17 @@ impl EngineSynth {
             let amplitude = (self.blowdown_pa[index].value() / REFERENCE_BLOWDOWN).min(2.0)
                 * variation.amplitude_scale;
             let cylinder = phase - tap.evo_phase;
-            self.excitations[index] = amplitude
-                * self
-                    .cycle
-                    .exhaust_at(cylinder - variation.phase_offset, blend);
+            let combustion = cylinder - variation.phase_offset;
+            self.excitations[index] = amplitude * self.cycle.exhaust_at(combustion, blend);
+            // The same retard applies to the structural path, and for the same
+            // reason: a cycle whose flame took longer to develop reaches the
+            // block late as well as reaching the port late.
+            rise += self.cycle.pressure_slope_at(combustion, blend) * variation.amplitude_scale;
             // Induction is read at the bare cylinder phase. The retard and the
             // jitter are properties of *combustion* — how long the flame takes
             // to develop, and how much that varies — and a valve opening on the
             // intake side does not wait for a flame.
             let flow = self.cycle.intake_at(cylinder, blend);
-            induction += flow;
 
             let prev_flow = self.prev_cylinder_intake_flow[index];
             let d_flow_dt = (flow - prev_flow) * self.config.sample_rate;
@@ -2583,7 +2650,7 @@ impl EngineSynth {
                 * self.noise.next_bipolar();
             self.intake_excitations[index] = p_rarefaction + p_slam + p_orifice;
         }
-        induction
+        rise
     }
 
     /// Produces one stereo frame.
@@ -2591,7 +2658,10 @@ impl EngineSynth {
     fn tick(&mut self) -> (f32, f32) {
         let cycle_hz = self.cycle_hz.next_value();
         let turning = self.advance_crank(cycle_hz);
-        self.fill_excitations(turning);
+        // dP/dtheta in cycles, times cycles per second, is dP/dt — so the same
+        // pressure curve drives the block harder at speed, which is why
+        // combustion noise climbs with rpm on every engine ever measured.
+        let rise = self.fill_excitations(turning) * cycle_hz;
 
         let exhaust_level = self.exhaust_level.next_value();
         for (excitation, pool) in self
@@ -2626,10 +2696,13 @@ impl EngineSynth {
         };
         let intake_rad =
             self.intake_network.step(&self.intake_excitations) / REFERENCE_INTAKE_PRESSURE;
+        let structural = self.structure.process(rise * self.combustion_scale)
+            * self.config.structure_level as f32;
         let centre = intake_rad * self.config.intake_level as f32
             + turbo
             + self.mechanical.process(&mut self.noise) * self.config.mechanical_level as f32
-            + self.knock.process(&mut self.noise);
+            + self.knock.process(&mut self.noise)
+            + structural;
         left += centre;
         right += centre;
 
@@ -2702,10 +2775,15 @@ mod tests {
     /// A cycle in the shape the solver produces, for tests that are not about
     /// the solver.
     ///
-    /// Cut at EVO like the real thing: blowdown from `peak` decaying towards the
-    /// manifold, the exhaust valve open for `exhaust_duration` of the cycle with
-    /// a raised-cosine flow under it, induction on the following stroke, and the
+    /// Cut at EVO like the real thing: blowdown decaying towards the manifold,
+    /// the exhaust valve open for `exhaust_duration` of the cycle with a
+    /// raised-cosine flow under it, induction on the following stroke, and the
     /// combustion pressure rise just before the cycle comes back round to EVO.
+    ///
+    /// The trace joins up across the seam, because the seam is not an event: the
+    /// cylinder is at its combustion pressure when the valve cracks, and blows
+    /// down from *there*. A curve that stepped 55 bar in one cell would be a
+    /// cycle no engine runs, and the structural path differentiates this.
     fn synthetic_cycle(
         peak: f32,
         exhaust_duration: f32,
@@ -2719,7 +2797,7 @@ mod tests {
             let phi = (k as f32 + 0.5) / CYCLE_TABLE as f32;
             if phi < exhaust_duration {
                 let u = phi / exhaust_duration;
-                pressure[k] = TEST_MANIFOLD_PA + peak * (-phi / 0.04).exp();
+                pressure[k] = TEST_MANIFOLD_PA + 15.0 * peak * (-phi / 0.04).exp();
                 exhaust[k] = 0.5 * (1.0 - (TAU * u).cos());
             } else if phi < ivc {
                 let u = ((phi - ivo) / (ivc - ivo)).clamp(0.0, 1.0);
@@ -2874,8 +2952,12 @@ mod tests {
             config.mechanical_level = 0.0;
             // The intake plays the cycle's own port flow now, so zeroing the
             // snapshot's mass flow no longer silences it; the level is what
-            // takes it out of the mix.
+            // takes it out of the mix. The structure has to go for the same
+            // reason and one more: it is driven by the pressure *curve*, which
+            // this test does not vary, so it would sit under both measurements
+            // as a constant.
             config.intake_level = 0.0;
+            config.structure_level = 0.0;
             let mut synth = EngineSynth::new(config);
             let mut snapshot = loaded_snapshot();
             snapshot.blowdown_delta = [delta; MAX_CYLINDERS];
@@ -3255,6 +3337,7 @@ mod tests {
             synth.exhaust_level.snap(0.0);
             synth.config.intake_level = 0.0;
             synth.config.mechanical_level = 0.0;
+            synth.config.structure_level = 0.0;
             synth.set_snapshot(&snapshot);
             let out = render(&mut synth, 5 * 48_000);
             peak(&out)
@@ -3352,6 +3435,7 @@ mod tests {
             config.exhaust_level = 0.0;
             config.intake_level = 0.0;
             config.mechanical_level = 0.0;
+            config.structure_level = 0.0;
             let mut synth = EngineSynth::new(config);
             synth.exhaust_level.snap(0.0);
             let mut snapshot = loaded_snapshot();
