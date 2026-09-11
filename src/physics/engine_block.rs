@@ -30,6 +30,7 @@
 use std::f64::consts::PI;
 
 use crate::environment::Environment;
+use crate::physics::control::EngineControlUnit;
 use crate::physics::cylinder::{wrap_cycle, CylinderGeometry, GasProperties, CYCLE_ANGLE};
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
 use crate::physics::thermal::{EngineThermal, OilViscosity};
@@ -1107,6 +1108,8 @@ pub struct EngineBlock {
     pub block_mass: f64,
     /// Block temperature, and the chamber wall the solver runs against.
     pub thermal: EngineThermal,
+    /// Engine control unit: fuelling, timing, knock retard, limiters, and cylinder health.
+    pub ecu: EngineControlUnit,
 }
 
 impl EngineBlock {
@@ -1148,6 +1151,7 @@ impl EngineBlock {
         let master = ThermoState::at_ambient(&model.geometry, &model.gas, &environment);
 
         let thermal = EngineThermal::soaked(180.0, &exhaust, environment.temperature);
+        let ecu = EngineControlUnit::default();
 
         Self {
             model,
@@ -1166,6 +1170,7 @@ impl EngineBlock {
             intake_system,
             block_mass: 180.0,
             thermal,
+            ecu,
         }
     }
 

@@ -131,6 +131,7 @@ impl EnginePreset {
         block.intake_system = self.intake.clone();
         block.set_block_mass(self.block_mass);
         block.rebuild_exhaust_banks();
+        block.ecu.redline = self.redline;
         block
     }
 
