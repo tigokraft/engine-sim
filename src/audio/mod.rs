@@ -57,6 +57,7 @@
 pub mod dsp;
 pub mod filters;
 pub mod intake_voice;
+pub mod propagation;
 pub mod radiation;
 pub mod stream;
 pub mod structure;
