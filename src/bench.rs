@@ -33,7 +33,7 @@ use crate::physics::plumbing::{
     Collector, Crossover, ExhaustSystem, IntakeSystem, PipeSection, Silencer, ThrottleLayout,
 };
 use crate::physics::thermodynamics::{
-    CylinderModel, HeatRelease, ValveEvent, ValveTrain, WiebeProfile,
+    CylinderModel, DieselCombustion, HeatRelease, ValveEvent, ValveTrain, WiebeProfile, DIESEL_LHV,
 };
 
 /// Speed below which the engine has stalled [rev/min].
@@ -192,6 +192,7 @@ impl EnginePreset {
             Self::turbo_inline_four(),
             Self::twin_turbo_v8(),
             Self::turbo_inline_six(),
+            Self::turbo_diesel_four(),
         ]
     }
 
@@ -680,6 +681,106 @@ impl EnginePreset {
             inertia: 0.44,
             load: (5.0, 0.016, 9.0e-5),
             aperture_positions: AperturePositions::front_engine_dual(),
+            anti_lag: false,
+        }
+    }
+
+    /// 2.0 litre turbocharged inline-four diesel.
+    ///
+    /// The one engine in the catalogue that is not heard through its exhaust.
+    /// Everything about it points the same way: nineteen to one compresses the
+    /// air until it lights the spray on its own, which puts a premixed spike
+    /// into the first crank degree of the burn; the spike is a hammer blow on a
+    /// hundred and ninety kilos of cast iron, which answers at its own modes;
+    /// and a turbine sits in the exhaust between the port and the tailpipe,
+    /// swallowing most of what would otherwise have got out that way. What is
+    /// left is clatter — structure-borne, wideband, and loudest at idle where
+    /// the delay is longest. See [`crate::audio::structure`] for the path it
+    /// takes, and [`DieselCombustion`] for where the spike comes from.
+    ///
+    /// Nineteen to one rather than the sixteen a modern common-rail engine
+    /// runs, for the same reason the module docs give about the throttle: the
+    /// block is solved on atmospheric air. A production turbodiesel gets its
+    /// autoignition temperature partly from boost, and an engine modelled
+    /// without the boost has to get all of it from the squeeze — which is
+    /// exactly the compression ratio the pre-turbo diesels ran, for exactly
+    /// that reason.
+    pub fn turbo_diesel_four() -> Self {
+        Self {
+            name: "Turbodiesel I4",
+            note: "No spark at all: a premixed spike, an iron block, and clatter.",
+            model: CylinderModel {
+                // Undersquare, as every diesel is: a long stroke gives the
+                // torque and keeps the piston speed down where the fuel has
+                // time to find its oxygen.
+                geometry: CylinderGeometry::new(0.0830, 0.0920, 0.1470, 21.5),
+                combustion: HeatRelease::Compression(DieselCombustion::default()),
+                valves: ValveTrain {
+                    // Ten degrees of overlap against the petrol four's forty:
+                    // a diesel is pumping against a turbine, has no fuel in its
+                    // intake charge to lose out of the exhaust, and would pull
+                    // exhaust back in if the two events met. IVO 10 BTDC, IVC
+                    // 25 ABDC; EVO 45 BBDC, EVC at top dead centre. The ports
+                    // are swirl-biased rather than flow-biased, which is what
+                    // the lower discharge coefficients are.
+                    intake: ValveEvent::new(deg(710.0), deg(215.0), 0.0090, 0.035, 0.60),
+                    exhaust: ValveEvent::new(deg(495.0), deg(225.0), 0.0085, 0.031, 0.57),
+                },
+                fuel_lhv: DIESEL_LHV,
+                // Lean everywhere, because there is no throttle plate and the
+                // fuel is the only thing being metered. Twenty-two to one is a
+                // diesel at a decent load; it never goes rich.
+                air_fuel_ratio: 22.0,
+                ..CylinderModel::default()
+            },
+            firing: FiringOrder::inline_four(),
+            induction: Induction::variable_geometry(),
+            mechanical: MechanicalSpec::diesel(),
+            exhaust: ExhaustSystem {
+                // A short cast log into the turbine, not a set of tuned
+                // primaries: on a diesel the exhaust manifold's job is to keep
+                // the pulse energy hot and get it to the wheel.
+                primaries: vec![PipeSection::from_diameter(0.30, 0.036, 750.0); 4],
+                collector: Collector::from_diameter(4, 0.052, 0.08),
+                secondary: vec![],
+                crossover: Crossover::None,
+                silencers: vec![
+                    Silencer::Absorptive {
+                        length: 0.55,
+                        area: PI * 0.028 * 0.028,
+                        packing_thickness: 0.030,
+                        packing_absorption: 0.80,
+                    },
+                    Silencer::ExpansionChamber {
+                        length: 0.50,
+                        area_ratio: 5.5,
+                        stages: 2,
+                    },
+                ],
+                tailpipe: PipeSection::from_diameter(1.3, 0.055, 450.0),
+                tailpipe_flanged: false,
+                cutout: false,
+            },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.22, 0.040, 320.0); 4],
+                plenum_volume: 2.8e-3,
+                // The plate exists for shutdown and for EGR, and is wide open
+                // at every load the engine is actually driven at.
+                throttle: ThrottleLayout::Single { bore: 0.058 },
+                airbox: Some(PipeSection::from_diameter(0.25, 0.075, 300.0)),
+                snorkel: Some(PipeSection::from_diameter(0.45, 0.070, 300.0)),
+                trumpet_flanged: false,
+            },
+            // Cast iron, and a deck thick enough to hold nineteen to one down.
+            block_mass: 190.0,
+            // An 88 mm centre on an 83 mm bore: 2.5 mm of iron, siamesed hard,
+            // which is what a diesel four's short block costs.
+            bore_spacing: 0.0885,
+            redline: 5_000.0,
+            idle: 800.0,
+            inertia: 0.40,
+            load: (2.2, 0.008, 4.0e-5),
+            aperture_positions: AperturePositions::front_engine_single(),
             anti_lag: false,
         }
     }

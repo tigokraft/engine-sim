@@ -39,6 +39,12 @@ use crate::physics::cylinder::{
 pub const GASOLINE_LHV: f64 = 44.0e6;
 /// Stoichiometric air/fuel mass ratio for gasoline [-].
 pub const STOICH_AFR: f64 = 14.7;
+
+/// Lower heating value of automotive diesel [J/kg].
+///
+/// Slightly below gasoline's per kilogram and well above it per litre, which is
+/// most of why a diesel car goes further on a tank.
+pub const DIESEL_LHV: f64 = 42.6e6;
 /// Standard atmosphere, used to non-dimensionalise the knock correlation [Pa].
 pub const ATMOSPHERE: f64 = 101_325.0;
 
