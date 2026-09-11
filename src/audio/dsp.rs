@@ -277,6 +277,8 @@ pub struct EngineSnapshot {
     /// trace on its own would present the manifold's own standing pressure as a
     /// permanent offset for the delay lines to integrate.
     pub exhaust_manifold_pressure: f32,
+    /// Whether the active exhaust cutout flap is open.
+    pub exhaust_cutout: bool,
 }
 
 impl Default for EngineSnapshot {
@@ -309,6 +311,7 @@ impl Default for EngineSnapshot {
             exhaust_port_flow: [0.0; CYCLE_TABLE],
             intake_port_flow: [0.0; CYCLE_TABLE],
             exhaust_manifold_pressure: 101_325.0,
+            exhaust_cutout: false,
         }
     }
 }
@@ -2857,7 +2860,13 @@ impl EngineSynth {
         self.throttle.set_target(snapshot.throttle);
         self.intake_network.set_throttle(snapshot.throttle);
         self.knock.set_intensity(snapshot.knock_intensity);
+        self.network.set_cutout(snapshot.exhaust_cutout);
         self.cycle.accept(&snapshot);
+    }
+
+    /// Sets whether the exhaust cutout bypass junction is open.
+    pub fn set_exhaust_cutout(&mut self, open: bool) {
+        self.network.set_cutout(open);
     }
 
     /// Clears every filter and delay line without changing parameters.
@@ -3466,6 +3475,7 @@ mod tests {
             exhaust_port_flow,
             intake_port_flow,
             exhaust_manifold_pressure: TEST_MANIFOLD_PA,
+            exhaust_cutout: false,
         }
     }
 
@@ -4158,6 +4168,7 @@ mod tests {
             exhaust_port_flow: [f32::NEG_INFINITY; CYCLE_TABLE],
             intake_port_flow: [f32::NAN; CYCLE_TABLE],
             exhaust_manifold_pressure: f32::NAN,
+            exhaust_cutout: false,
         });
         let out = render(&mut synth, 48_000);
         assert!(out.iter().all(|s| s.is_finite()), "NaN reached the device");

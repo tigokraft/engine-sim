@@ -94,6 +94,8 @@ pub struct EngineControls {
     pub throttle: f64,
     /// Whether ignition is cut this frame (upshift cut, launch limiter, overrun).
     pub spark_cut: bool,
+    /// Whether the active exhaust cutout flap is open.
+    pub exhaust_cutout: bool,
 }
 
 impl Default for EngineControls {
@@ -102,6 +104,7 @@ impl Default for EngineControls {
         Self {
             throttle: 0.0,
             spark_cut: false,
+            exhaust_cutout: false,
         }
     }
 }
@@ -112,6 +115,7 @@ impl EngineControls {
         Self {
             throttle: 1.0,
             spark_cut: false,
+            exhaust_cutout: false,
         }
     }
 
@@ -120,7 +124,14 @@ impl EngineControls {
         Self {
             throttle: throttle.clamp(0.0, 1.0),
             spark_cut: true,
+            exhaust_cutout: false,
         }
+    }
+
+    /// Sets whether the active exhaust cutout flap is open.
+    pub fn with_exhaust_cutout(mut self, open: bool) -> Self {
+        self.exhaust_cutout = open;
+        self
     }
 }
 
@@ -728,6 +739,7 @@ impl SnapshotSource {
             exhaust_port_flow,
             intake_port_flow,
             exhaust_manifold_pressure: manifold_pressure as f32,
+            exhaust_cutout: controls.exhaust_cutout,
         }
         .sanitized()
     }
@@ -1353,6 +1365,7 @@ mod tests {
             let controls = EngineControls {
                 throttle: t,
                 spark_cut: false,
+                exhaust_cutout: false,
             };
             block.update(dt, rpm);
             synth.set_snapshot(&source.sample(&block, rpm, dt, controls));

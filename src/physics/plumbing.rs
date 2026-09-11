@@ -213,6 +213,8 @@ pub struct ExhaustSystem {
     pub tailpipe: PipeSection,
     /// Whether the tailpipe exit features an acoustic flange (baffle reflection boundary).
     pub tailpipe_flanged: bool,
+    /// Whether an active exhaust cutout / bypass junction is fitted.
+    pub cutout: bool,
 }
 
 /// Layout and sizing of the engine throttle mechanism.
@@ -386,6 +388,59 @@ impl ExhaustSystem {
             resonant_mix: 0.0,
         }
     }
+
+    /// Sets whether the exhaust system is fitted with an active cutout bypass.
+    pub fn with_cutout(mut self, cutout: bool) -> Self {
+        self.cutout = cutout;
+        self
+    }
+
+    /// Calculates steady-state exhaust back pressure [Pa] for a given mass flow [kg/s].
+    ///
+    /// Silencer elements introduce expansion and resistive losses that increase
+    /// manifold pressure. When the cutout is open, exhaust pulses bypass the
+    /// silencer chain, lowering the back pressure.
+    pub fn back_pressure(&self, mass_flow: f64, cutout_open: bool) -> f64 {
+        if mass_flow <= 0.0 {
+            return 0.0;
+        }
+        let rho = 0.45; // nominal hot exhaust gas density [kg/m^3]
+        let a_prim = self.primary_area().max(1e-4);
+        let a_coll = self.collector.outlet_area.max(1e-4);
+        let a_tail = self.tailpipe.area.max(1e-4);
+
+        let mut k_total = 0.5 / (a_prim * a_prim) + 0.3 / (a_coll * a_coll);
+
+        let d_tail = self.tailpipe.diameter().max(0.01);
+        let f_tail = 0.02 * (self.tailpipe.length / d_tail) + 1.0;
+        k_total += f_tail / (a_tail * a_tail);
+
+        if !cutout_open {
+            for silencer in &self.silencers {
+                match silencer {
+                    Silencer::ExpansionChamber {
+                        area_ratio, stages, ..
+                    } => {
+                        let m = area_ratio.max(1.1);
+                        let k_stage = (1.0 - 1.0 / m).powi(2) + 0.5 * (1.0 - 1.0 / m);
+                        k_total += (*stages as f64) * k_stage / (a_coll * a_coll);
+                    }
+                    Silencer::Absorptive { length, area, .. } => {
+                        let a = area.max(1e-4);
+                        let d = (4.0 * a / std::f64::consts::PI).sqrt();
+                        let k_abs = 0.25 + 0.4 * (length / d);
+                        k_total += k_abs / (a * a);
+                    }
+                    Silencer::Helmholtz(_) | Silencer::QuarterWaveStub { .. } => {
+                        k_total += 0.20 / (a_coll * a_coll);
+                    }
+                    Silencer::Straight => {}
+                }
+            }
+        }
+
+        0.5 * (mass_flow * mass_flow / rho) * k_total
+    }
 }
 
 impl IntakeSystem {
@@ -478,6 +533,7 @@ impl ExhaustSystem {
             silencers: vec![Silencer::Helmholtz(MufflerGeometry::default())],
             tailpipe: PipeSection::from_diameter(1.2, collector_outlet_d, 600.0),
             tailpipe_flanged: false,
+            cutout: false,
         }
     }
 }
@@ -498,6 +554,7 @@ mod tests {
             silencers: vec![Silencer::Straight],
             tailpipe: PipeSection::from_diameter(1.0, 0.054, 600.0),
             tailpipe_flanged: false,
+            cutout: false,
         };
 
         let a1 = primary.area;
@@ -520,6 +577,7 @@ mod tests {
             silencers: vec![],
             tailpipe: PipeSection::from_diameter(1.0, 0.065, 600.0),
             tailpipe_flanged: false,
+            cutout: false,
         };
 
         let c = 550.0; // speed of sound on hot exhaust gas
@@ -539,6 +597,7 @@ mod tests {
             silencers: vec![],
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
+            cutout: false,
         };
 
         let c = 580.0;

@@ -616,6 +616,7 @@ mod tests {
             EngineControls {
                 throttle: 0.5,
                 spark_cut: false,
+                exhaust_cutout: false,
             },
         );
         assert!(

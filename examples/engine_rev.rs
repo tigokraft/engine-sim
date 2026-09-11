@@ -147,6 +147,7 @@ impl Driveline {
         EngineControls {
             throttle: self.throttle.clamp(0.0, 1.0),
             spark_cut: self.cutting(),
+            exhaust_cutout: false,
         }
     }
 }

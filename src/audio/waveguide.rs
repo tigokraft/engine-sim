@@ -1555,6 +1555,8 @@ pub struct ExhaustNetwork {
     /// about 7 mm of pipe, an order below the shortest length any geometry here
     /// describes.
     chain_returns: Vec<Vec<f32>>,
+    /// Whether the exhaust cutout / bypass junction is open.
+    cutout_open: bool,
 }
 
 impl ExhaustNetwork {
@@ -1758,6 +1760,7 @@ impl ExhaustNetwork {
             pre_cross_down: vec![0.0; n_banks],
             collector_returns: vec![0.0; n_banks],
             chain_returns,
+            cutout_open: exhaust.cutout,
         }
     }
 
@@ -1823,6 +1826,16 @@ impl ExhaustNetwork {
     /// Number of banks the network radiates from.
     pub fn bank_count(&self) -> usize {
         self.bank_count
+    }
+
+    /// Sets whether the exhaust cutout bypass junction is open.
+    pub fn set_cutout(&mut self, open: bool) {
+        self.cutout_open = open;
+    }
+
+    /// Returns whether the exhaust cutout is currently open.
+    pub fn is_cutout_open(&self) -> bool {
+        self.cutout_open
     }
 
     /// One-way transit delay of a cylinder's primary [samples].
@@ -2010,20 +2023,29 @@ impl ExhaustNetwork {
         // 5. Silencer chain, tailpipe and mouth. Each element hands its upstream
         //    reflection to the interface above it, so what a silencer or the open
         //    mouth sends back reaches the collector and the primaries beyond it.
+        //    When the cutout is open, pulses bypass the silencer chain via the
+        //    bypass junction straight into the tailpipe.
         for b in 0..self.bank_count {
-            let mut sig = self.bank_down[b];
-            let n_sil = self.silencers[b].len();
-            for k in 0..n_sil {
-                let downstream = self.chain_returns[b][k + 1];
-                let (upstream, trans) = self.silencers[b][k].step(sig, downstream);
-                self.chain_returns[b][k] = upstream;
-                sig = trans;
-            }
-
             let (p_tail_up, p_tail_exit) = self.tailpipes[b].read_outputs();
             let (p_mouth_refl, p_mouth_rad) = self.mouths[b].step(p_tail_exit);
-            self.tailpipes[b].push_inputs(sig, p_mouth_refl);
-            self.chain_returns[b][n_sil] = p_tail_up;
+
+            if self.cutout_open {
+                let sig = self.bank_down[b];
+                self.tailpipes[b].push_inputs(sig, p_mouth_refl);
+                self.chain_returns[b][0] = p_tail_up;
+            } else {
+                let mut sig = self.bank_down[b];
+                let n_sil = self.silencers[b].len();
+                for k in 0..n_sil {
+                    let downstream = self.chain_returns[b][k + 1];
+                    let (upstream, trans) = self.silencers[b][k].step(sig, downstream);
+                    self.chain_returns[b][k] = upstream;
+                    sig = trans;
+                }
+                self.tailpipes[b].push_inputs(sig, p_mouth_refl);
+                self.chain_returns[b][n_sil] = p_tail_up;
+            }
+
             if let Some(slot) = radiated.get_mut(b) {
                 *slot = p_mouth_rad;
             }
@@ -2486,6 +2508,7 @@ mod tests {
             silencers: vec![Silencer::Straight],
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
+            cutout: false,
         };
 
         // A cross-plane V8's banks: cylinders 0, 2, 3, 7 on one, the rest on the other.
@@ -2777,6 +2800,87 @@ mod tests {
         assert!(
             ratio_loud > 50.0 * ratio_quiet,
             "high-order content must rise strongly with amplitude: loud={ratio_loud}, quiet={ratio_quiet}"
+        );
+    }
+
+    #[test]
+    fn opening_the_cutout_raises_high_order_content_and_lowers_back_pressure() {
+        use crate::physics::plumbing::{
+            Collector, Crossover, ExhaustSystem, PipeSection, Silencer,
+        };
+
+        const FS: f32 = 48_000.0;
+
+        let exhaust = ExhaustSystem {
+            primaries: vec![PipeSection::from_diameter(0.45, 0.040, 850.0); 4],
+            collector: Collector::from_diameter(4, 0.060, 0.15),
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![
+                Silencer::ExpansionChamber {
+                    length: 0.40,
+                    area_ratio: 4.0,
+                    stages: 2,
+                },
+                Silencer::Absorptive {
+                    length: 0.35,
+                    area: std::f64::consts::PI * 0.030 * 0.030,
+                    packing_thickness: 0.035,
+                    packing_absorption: 0.85,
+                },
+            ],
+            tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
+            tailpipe_flanged: false,
+            cutout: false,
+        };
+
+        // 1. Back pressure must be strictly lower with cutout open than closed
+        let mass_flow = 0.20; // 200 g/s exhaust flow
+        let bp_closed = exhaust.back_pressure(mass_flow, false);
+        let bp_open = exhaust.back_pressure(mass_flow, true);
+        assert!(
+            bp_open < bp_closed * 0.70,
+            "opening cutout must significantly lower back pressure: open={bp_open}, closed={bp_closed}"
+        );
+
+        // 2. High-order harmonic content in radiated sound must be higher with cutout open
+        let cylinders: Vec<crate::audio::dsp::CylinderTap> = (0..4)
+            .map(|i| crate::audio::dsp::CylinderTap {
+                evo_phase: i as f32 / 4.0,
+                bank: 0,
+            })
+            .collect();
+
+        let snapshot = crate::audio::dsp::EngineSnapshot::default();
+        let run_and_measure_high_order_energy = |cutout: bool| -> f64 {
+            let mut network = ExhaustNetwork::new(&exhaust, &cylinders, 1, FS, &snapshot);
+            network.set_cutout(cutout);
+
+            let mut high_energy = 0.0f64;
+            let mut radiated = [0.0f32; 1];
+            let bank_excitations = [0.0f32; 1];
+
+            for i in 0..9600 {
+                let pulse = if i % 240 < 6 { 1.0 } else { 0.0 };
+                let excitations = [pulse, 0.0, 0.0, 0.0];
+                network.step(&excitations, &bank_excitations, &mut radiated);
+
+                if i >= 2400 {
+                    for freq in [1500.0, 2000.0, 3000.0, 4000.0] {
+                        let phase = std::f32::consts::TAU * freq * (i as f32) / FS;
+                        high_energy += (radiated[0] as f64 * phase.sin() as f64).powi(2);
+                    }
+                }
+            }
+            high_energy
+        };
+
+        let high_closed = run_and_measure_high_order_energy(false);
+        let high_open = run_and_measure_high_order_energy(true);
+
+        assert!(
+            high_open > high_closed * 2.0,
+            "opening cutout bypass must raise high-order spectral content: open={high_open}, closed={high_closed}"
         );
     }
 }

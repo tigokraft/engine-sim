@@ -378,6 +378,7 @@ fn simulation_thread(
         let controls = EngineControls {
             throttle: rig.driveline.throttle.clamp(0.0, 1.0),
             spark_cut: rig.driveline.cutting(),
+            exhaust_cutout: false,
         };
         let snapshot = rig
             .source

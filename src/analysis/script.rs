@@ -108,6 +108,7 @@ impl Segment {
             EngineControls {
                 throttle,
                 spark_cut: self.spark_cut,
+                exhaust_cutout: false,
             },
         )
     }
