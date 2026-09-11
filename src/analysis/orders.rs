@@ -1363,6 +1363,59 @@ pub fn crank_balance(banks: &[Vec<f64>], orders: &[f64], reference_order: f64) -
     Balance::from_levels(reference_order, &levels)
 }
 
+/// Places a whole set of predictions, giving each peak to at most one of them.
+///
+/// Nearest-first: the prediction whose peak is the smallest *fractional*
+/// distance away claims it, then the next, and a peak already claimed is no
+/// longer on offer. Fractional rather than absolute because a 10 Hz error on a
+/// 100 Hz mode is a different thing from a 10 Hz error on a 2 kHz one.
+///
+/// Without the exclusion a sparse spectrum flatters itself: an engine whose
+/// audio has one peak near 400 Hz will report an intake runner, an exhaust
+/// primary and a silencer pass band all landing there, three modes for one
+/// peak, and the arithmetic mean of their errors will look like a measurement.
+/// One of them is that peak and the other two were not found.
+pub fn place_all(predicted: &[f64], peaks: &[Peak], window_pct: f64) -> Vec<Placement> {
+    // Every candidate pairing inside the window, by fractional distance.
+    let mut candidates: Vec<(f64, usize, usize)> = Vec::new();
+    for (i, &hz) in predicted.iter().enumerate() {
+        if !hz.is_finite() || hz <= 0.0 {
+            continue;
+        }
+        for (j, peak) in peaks.iter().enumerate() {
+            let error = (peak.hz - hz).abs() / hz;
+            if error * 100.0 <= window_pct {
+                candidates.push((error, i, j));
+            }
+        }
+    }
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let mut taken = vec![false; peaks.len()];
+    let mut placements: Vec<Placement> = predicted
+        .iter()
+        .map(|&hz| Placement {
+            predicted_hz: hz,
+            measured_hz: None,
+            db: None,
+            prominence_db: None,
+        })
+        .collect();
+    for (_, i, j) in candidates {
+        if taken[j] || placements[i].measured_hz.is_some() {
+            continue;
+        }
+        taken[j] = true;
+        placements[i] = Placement {
+            predicted_hz: predicted[i],
+            measured_hz: Some(peaks[j].hz),
+            db: Some(peaks[j].db),
+            prominence_db: Some(peaks[j].prominence_db),
+        };
+    }
+    placements
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
