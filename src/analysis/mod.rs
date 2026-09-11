@@ -18,7 +18,14 @@
 //! - [`orders`] — a Hann-windowed STFT; the level of each engine order read off
 //!   it against the speed curve the render was driven by, and peak picking on
 //!   the long-term average spectrum for the pipe resonances that stay put while
-//!   the orders sweep past them.
+//!   the orders sweep past them. It also holds the comparison side of Stage 16:
+//!   the gain-invariant order balance a recording and a render can be held
+//!   against each other in, the crank's own order comb, and the placement of a
+//!   measured peak against a predicted one.
+//! - [`timbre`] — the regression: a fixed sweep per preset reduced to a
+//!   fingerprint and checked against the numbers recorded for it, so a change
+//!   that leaves every analytic test green and still sounds different fails
+//!   something.
 //!
 //! The harness is worth something only if a rerun is comparable to the run
 //! before it, so every part of it is deterministic. The drive scripts are fixed
@@ -30,3 +37,4 @@
 pub mod orders;
 pub mod render;
 pub mod script;
+pub mod timbre;
