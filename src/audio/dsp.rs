@@ -2951,6 +2951,88 @@ mod tests {
         assert!(worst < 1e-6, "output depends on buffer size: {worst}");
     }
 
+    /// A synth running at a fixed speed with no crank ripple and no jitter, so
+    /// the only thing moving the playback phase is the integrator.
+    fn steady_synth(rpm: f32) -> EngineSynth {
+        let mut config = SynthConfig::cross_plane_v8(FS);
+        config.combustion_variation_max = 0.0;
+        config.combustion_variation_min = 0.0;
+        let mut synth = EngineSynth::new(config);
+        let mut snapshot = loaded_snapshot();
+        snapshot.rpm = rpm;
+        // No mean indicated torque means no intra-cycle speed ripple, so the
+        // crank turns at exactly the nominal rate.
+        snapshot.indicated_torque = 0.0;
+        synth.set_snapshot(&snapshot);
+        synth.cycle_hz.snap(rpm / 120.0);
+        for (i, smoother) in synth.blowdown_pa.iter_mut().enumerate() {
+            smoother.snap(snapshot.blowdown_delta[i]);
+        }
+        synth.cycle.blend.snap(1.0);
+        synth.phase_fixed = 0;
+        synth
+    }
+
+    #[test]
+    fn excitation_playback_does_not_drift_against_the_crank() {
+        // The excitation is read at a phase the synth integrates itself, one
+        // sample at a time, for as long as the stream is open. A part-per-
+        // million bias in that integrator is inaudible for a second and a
+        // quarter of a cycle out after twenty — which is how a synth that
+        // sounded right in a test ends up with the banks of a vee engine
+        // walking apart on a long drive.
+        let rpm = 3_000.0f32;
+        let mut synth = steady_synth(rpm);
+
+        const SAMPLES: usize = 1_000_000;
+        let mut buffer = vec![0.0f32; 2 * 1_000];
+        for _ in 0..SAMPLES / 1_000 {
+            synth.render(&mut buffer, 2);
+        }
+
+        // Cycles turned is time times the cycle rate, exactly.
+        let cycles = SAMPLES as f64 * (rpm as f64 / 120.0) / FS as f64;
+        let expected = cycles.rem_euclid(1.0) as f32;
+        let drift = (synth.cycle_phase() - expected).abs();
+        let drift = drift.min(1.0 - drift);
+        assert!(
+            drift < 1e-3,
+            "playback phase drifted {drift} of a cycle over {SAMPLES} samples"
+        );
+    }
+
+    #[test]
+    fn excitation_playback_tracks_crank_speed() {
+        // One blowdown per cylinder per cycle, at whatever rate the crank is
+        // turning. Nothing in the playback path sets a rate of its own.
+        for rpm in [800.0f32, 3_000.0, 7_000.0] {
+            let mut synth = steady_synth(rpm);
+            let threshold = 0.5 * loaded_snapshot().blowdown_delta[0] / REFERENCE_BLOWDOWN;
+            let seconds = 2.0;
+            let samples = (seconds * FS) as usize;
+
+            let mut buffer = [0.0f32; 2];
+            synth.render(&mut buffer, 2);
+            let mut above = synth.excitations[0] > threshold;
+            let mut events = 0usize;
+            for _ in 1..samples {
+                synth.render(&mut buffer, 2);
+                let now = synth.excitations[0] > threshold;
+                if now && !above {
+                    events += 1;
+                }
+                above = now;
+            }
+
+            // A four-stroke cylinder fires once per two revolutions.
+            let expected = seconds * rpm / 120.0;
+            assert!(
+                (events as f32 - expected).abs() <= 1.0,
+                "{events} blowdowns in {seconds} s at {rpm} rpm, expected {expected}"
+            );
+        }
+    }
+
     #[test]
     fn a_new_cycle_fades_in_rather_than_stepping() {
         // The excitation is a *table* now, and the physics hands over a new one
