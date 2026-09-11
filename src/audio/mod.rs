@@ -676,8 +676,15 @@ impl SnapshotSource {
         };
         let limiter_spark = block.ecu.active_cut == crate::physics::control::LimiterCut::Spark;
         let limiter_fuel = block.ecu.active_cut == crate::physics::control::LimiterCut::Fuel;
-        let spark_cut =
-            (controls.spark_cut || block.ecu.dfco_tip_in || limiter_spark) && !limiter_fuel;
+        // A compression-ignition engine has no coil, so nothing can cut its
+        // spark — not the limiter, not the driver holding the two-step. The
+        // only way to stop it firing is to stop fuelling it, and a cylinder
+        // that never got any fuel has none to send out unburnt. That is why a
+        // diesel does not pop on a lift and does not bang off its limiter.
+        let has_spark = block.model.combustion.spark().is_some();
+        let spark_cut = has_spark
+            && (controls.spark_cut || block.ecu.dfco_tip_in || limiter_spark)
+            && !limiter_fuel;
         let burned_at_evo = if spark_cut {
             0.0
         } else {
