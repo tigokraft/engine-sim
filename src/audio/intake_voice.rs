@@ -447,6 +447,7 @@ impl IntakeNetwork {
                 self.downstream_area,
                 a_th,
             );
+            self.plenum_to_downstream = p_to_downstream;
 
             // 5. Downstream chain: airbox -> snorkel -> mouth
             let mut wave_forward = p_to_downstream;
@@ -580,6 +581,73 @@ mod tests {
         assert!(
             at_firing > 4.0 * off,
             "intake note must be pitched at firing order (100 Hz): firing={at_firing:.3e} vs off={off:.3e}"
+        );
+    }
+
+    #[test]
+    fn plenum_ram_peak_lands_at_the_helmholtz_frequency() {
+        // In engine acoustics, plenum ram tuning occurs when the intake runner
+        // (acting as an acoustic inertance M = rho * L / A) resonates against
+        // the plenum chamber volume (acting as an acoustic compliance C = V / (rho * c^2)).
+        // During induction with the intake valve open and the throttle closing or restricting
+        // the cavity, this Helmholtz resonator mode peaks at:
+        //   f_H = (c / 2*pi) * sqrt(A_runner / (V_plenum * L_runner))
+        //
+        // Here we construct an IntakeNetwork with known geometry, open the valve
+        // termination (effective area > pipe area, r -> -1), shut the throttle
+        // (rigid cavity termination), inject an acoustic impulse, and measure the
+        // resonant frequency inside the runner.
+        let runner_len = 0.25f64;
+        let runner_diam = 0.042f64;
+        let runner_area = std::f64::consts::PI * 0.25 * runner_diam * runner_diam;
+        let plenum_vol = 0.0035f64; // 3.5 L
+        let runners = vec![crate::physics::PipeSection::new(
+            runner_len,
+            runner_area,
+            300.0,
+        )];
+        let system = IntakeSystem {
+            runners,
+            plenum_volume: plenum_vol,
+            throttle: ThrottleLayout::Single { bore: 0.065 },
+            airbox: None,
+            snorkel: None,
+            trumpet_flanged: false,
+        };
+        let fs = 48_000.0;
+        let mut net = IntakeNetwork::new(&system, 1, fs);
+        net.set_throttle(0.0);
+        net.set_valve_areas(&[runner_area * 10.0]);
+
+        let c = speed_of_sound(
+            INTAKE_AIR_GAMMA,
+            INTAKE_GAS_CONSTANT,
+            INTAKE_AMBIENT_TEMPERATURE_K,
+        );
+        let f_helmholtz = (c / std::f32::consts::TAU)
+            * ((runner_area as f32) / (plenum_vol as f32 * runner_len as f32)).sqrt();
+
+        let mut runner_waves = Vec::with_capacity(48_000);
+        for i in 0..48_000 {
+            let excit = if i == 0 { 1_000.0 } else { 0.0 };
+            net.step(&[excit]);
+            runner_waves.push(net.runner_to_plenum[0]);
+        }
+
+        let mut max_mag = 0.0f32;
+        let mut peak_f = 0.0f32;
+        for f in 40..110 {
+            let mag = magnitude_at(&runner_waves, f as f32, fs);
+            if mag > max_mag {
+                max_mag = mag;
+                peak_f = f as f32;
+            }
+        }
+
+        let error_pct = (peak_f - f_helmholtz).abs() / f_helmholtz * 100.0;
+        assert!(
+            error_pct < 4.0,
+            "Helmholtz ram peak at {peak_f:.1} Hz must match theoretical {f_helmholtz:.1} Hz within 4% (got {error_pct:.2}%)"
         );
     }
 
