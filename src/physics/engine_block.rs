@@ -1134,6 +1134,8 @@ impl EngineBlock {
 
         let master = ThermoState::at_ambient(&model.geometry, &model.gas, &environment);
 
+        let thermal = EngineThermal::soaked(180.0, &exhaust, environment.temperature);
+
         Self {
             model,
             firing,
@@ -1150,7 +1152,7 @@ impl EngineBlock {
             exhaust,
             intake_system,
             block_mass: 180.0,
-            thermal: EngineThermal::soaked(180.0, environment.temperature),
+            thermal,
         }
     }
 
@@ -1176,6 +1178,7 @@ impl EngineBlock {
                 )
             })
             .collect();
+        self.thermal.rebuild_exhaust(&self.exhaust);
     }
 
     /// A 4.0 litre cross-plane V8 on the default cylinder model.
@@ -1347,9 +1350,29 @@ impl EngineBlock {
             0.0
         };
 
-        let cylinders = self.firing.len().max(1) as f64;
-        self.thermal
-            .integrate(dt, chamber_heat * cylinders, friction_heat);
+        let cylinders = self.firing.len().max(1);
+        // What one cylinder is actually pushing into its own primary: the mean
+        // outward port flux over the logged cycle, and the temperature it leaves
+        // the port at. Both are the solver's, not a nominal.
+        let port_flow = if turning {
+            self.ring.cycle_mean(|s| (-s.exhaust_flow).max(0.0))
+        } else {
+            0.0
+        };
+        let port_temperature = self
+            .exhaust_banks
+            .first()
+            .map_or(self.environment.temperature, |bank| bank.plenum.temperature);
+
+        let banks = self.firing.bank_count().max(1);
+        self.thermal.integrate(
+            dt,
+            chamber_heat * cylinders as f64,
+            friction_heat,
+            port_temperature,
+            port_flow,
+            cylinders / banks,
+        );
 
         let area = self.model.heat.mean_surface_area(&self.model.geometry);
         self.model.heat.wall_temperature = self.thermal.wall_temperature(chamber_heat, area);
@@ -1361,14 +1384,13 @@ impl EngineBlock {
     /// the structural modes sit and how long the engine takes to warm up.
     pub fn set_block_mass(&mut self, mass: f64) {
         self.block_mass = mass.max(1.0);
-        let temperature = self.thermal.block_temperature();
-        self.thermal =
-            EngineThermal::new(self.block_mass, self.environment.temperature, temperature);
+        self.thermal.set_block_mass(self.block_mass);
     }
 
     /// Puts every thermal mass back to ambient: an engine that stood overnight.
     pub fn cold_start(&mut self) {
-        self.thermal = EngineThermal::cold(self.block_mass, self.environment.temperature);
+        self.thermal =
+            EngineThermal::cold(self.block_mass, &self.exhaust, self.environment.temperature);
     }
 
     /// Pushes the summed per-bank fluxes into the manifolds.

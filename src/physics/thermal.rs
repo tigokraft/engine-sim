@@ -22,6 +22,8 @@
 
 use std::f64::consts::PI;
 
+use crate::physics::plumbing::{ExhaustSystem, PipeSection};
+
 // ---------------------------------------------------------------------------
 // Material and gas constants
 // ---------------------------------------------------------------------------
@@ -349,6 +351,175 @@ pub fn chamber_wall_temperature(block_temperature: f64, heat_flow: f64, area: f6
 }
 
 // ---------------------------------------------------------------------------
+// The exhaust, section by section
+// ---------------------------------------------------------------------------
+
+/// One pipe section's thermal state: the tube, and the gas leaving it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SectionThermal {
+    /// The tube wall as a lumped mass.
+    pub wall: ThermalMass,
+    /// Gas temperature at the section's outlet [K].
+    pub gas_outlet: f64,
+    /// Bore of the section, kept for the film coefficient [m].
+    pub diameter: f64,
+    /// Gas-wetted internal surface area [m^2].
+    pub area: f64,
+}
+
+impl SectionThermal {
+    /// A section of thin-walled tube, everything at `temperature`.
+    pub fn new(length: f64, diameter: f64, temperature: f64, ambient: f64) -> Self {
+        let length = length.max(1e-3);
+        let diameter = diameter.max(1e-4);
+        let area = PI * diameter * length;
+        // The outside of the tube is one wall thickness further out, and that is
+        // the surface the still air under the car actually sees.
+        let external = PI * (diameter + 2.0 * PIPE_WALL_THICKNESS) * length;
+        Self {
+            wall: ThermalMass::new(
+                temperature,
+                pipe_wall_capacity(length, diameter),
+                PIPE_EXTERNAL_COEFFICIENT * external,
+                ambient,
+            ),
+            gas_outlet: temperature,
+            diameter,
+            area,
+        }
+    }
+
+    /// Advances the wall by one frame under a gas stream entering at `inlet`.
+    ///
+    /// Returns the gas temperature at the outlet, which is the next section's
+    /// inlet. This is the whole of the gradient: each section takes what its own
+    /// length, bore and flow let it take, and hands the rest downstream.
+    pub fn integrate(&mut self, dt: f64, inlet: f64, mass_flow: f64) -> f64 {
+        let film = gas_film_coefficient(mass_flow, self.diameter);
+        self.gas_outlet =
+            outlet_temperature(inlet, self.wall.temperature, mass_flow, film, self.area);
+        let heat = stream_heat(mass_flow, inlet, self.gas_outlet);
+        self.wall.integrate(dt, heat);
+        self.gas_outlet
+    }
+}
+
+/// Every pipe section of one exhaust system, in flow order.
+///
+/// The downstream chain is carried once rather than per bank: both banks of a
+/// vee run the same collector outlet area, the same silencers and the same
+/// tailpipe, and they pass the same mass flow through them, so their walls would
+/// hold the same number twice.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExhaustThermal {
+    /// One per primary runner, in cylinder order.
+    pub primaries: Vec<SectionThermal>,
+    /// Pipes between the collector and the silencers, in flow order.
+    pub secondaries: Vec<SectionThermal>,
+    /// The tailpipe.
+    pub tailpipe: SectionThermal,
+}
+
+impl ExhaustThermal {
+    /// Builds the sections of an exhaust system, each seeded at `seed(spec)`.
+    pub(crate) fn build(
+        exhaust: &ExhaustSystem,
+        ambient: f64,
+        seed: impl Fn(&PipeSection) -> f64,
+    ) -> Self {
+        let section = |spec: &PipeSection| {
+            SectionThermal::new(spec.length, spec.diameter(), seed(spec), ambient)
+        };
+        Self {
+            primaries: exhaust.primaries.iter().map(&section).collect(),
+            secondaries: exhaust.secondary.iter().map(&section).collect(),
+            tailpipe: section(&exhaust.tailpipe),
+        }
+    }
+
+    /// An exhaust that has been run long enough to sit where its geometry says.
+    ///
+    /// The wall temperature on a [`PipeSection`] is the one the system was
+    /// specified at, so a soaked system starts there and a run at that load
+    /// leaves it there.
+    pub fn soaked(exhaust: &ExhaustSystem, ambient: f64) -> Self {
+        Self::build(exhaust, ambient, |spec| spec.wall_temperature)
+    }
+
+    /// An exhaust that has stood overnight: every section at ambient.
+    pub fn cold(exhaust: &ExhaustSystem, ambient: f64) -> Self {
+        Self::build(exhaust, ambient, |_| ambient)
+    }
+
+    /// Advances every section by one frame.
+    ///
+    /// `port_temperature` is the gas leaving the exhaust port,
+    /// `cylinder_mass_flow` the mean exhaust flow of one cylinder, and
+    /// `cylinders_per_bank` how many of those merge before the collector.
+    pub fn integrate(
+        &mut self,
+        dt: f64,
+        port_temperature: f64,
+        cylinder_mass_flow: f64,
+        cylinders_per_bank: usize,
+    ) {
+        let mut merged = 0.0;
+        for primary in &mut self.primaries {
+            merged += primary.integrate(dt, port_temperature, cylinder_mass_flow);
+        }
+        // Every bank's primaries pour into an identical collector, so what goes
+        // downstream is the mean of what came out of them.
+        let mut gas = if self.primaries.is_empty() {
+            port_temperature
+        } else {
+            merged / self.primaries.len() as f64
+        };
+
+        let bank_flow = cylinder_mass_flow * cylinders_per_bank.max(1) as f64;
+        for secondary in &mut self.secondaries {
+            gas = secondary.integrate(dt, gas, bank_flow);
+        }
+        // Silencers sit between the last secondary and the tailpipe and take
+        // heat out of the stream too, but they are a spec rather than a tube
+        // here, so the tailpipe is handed the gas the pipework left.
+        self.tailpipe.integrate(dt, gas, bank_flow);
+    }
+
+    /// Gas temperature in primary runner `i` [K].
+    ///
+    /// The outlet, which is what the section as a whole resonates at: the inlet
+    /// is the port and the gradient between them is what this stage exists to
+    /// produce.
+    pub fn primary_gas(&self, cylinder: usize) -> f64 {
+        match self.primaries.get(cylinder % self.primaries.len().max(1)) {
+            Some(section) => section.gas_outlet,
+            None => self.tailpipe.gas_outlet,
+        }
+    }
+
+    /// Gas temperature entering the silencers and the tailpipe [K].
+    pub fn downstream_gas(&self) -> f64 {
+        match self.secondaries.last() {
+            Some(section) => section.gas_outlet,
+            None => self.collector_gas(),
+        }
+    }
+
+    /// Gas temperature arriving at the collector [K].
+    pub fn collector_gas(&self) -> f64 {
+        if self.primaries.is_empty() {
+            return self.tailpipe.gas_outlet;
+        }
+        self.primaries.iter().map(|s| s.gas_outlet).sum::<f64>() / self.primaries.len() as f64
+    }
+
+    /// Gas temperature leaving the tailpipe [K].
+    pub fn tailpipe_gas(&self) -> f64 {
+        self.tailpipe.gas_outlet
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The engine's thermal state
 // ---------------------------------------------------------------------------
 
@@ -365,13 +536,20 @@ pub struct EngineThermal {
     pub block: ThermalMass,
     /// The thermostat that decides where the block plateaus.
     pub thermostat: Thermostat,
+    /// Every exhaust pipe section, each with a temperature of its own.
+    pub exhaust: ExhaustThermal,
     /// Ambient air the whole engine eventually loses to [K].
     pub ambient: f64,
 }
 
 impl EngineThermal {
-    /// A thermal state for a dressed block of `block_mass`, at `temperature`.
-    pub fn new(block_mass: f64, ambient: f64, temperature: f64) -> Self {
+    /// A thermal state with the block at `temperature` and a given exhaust.
+    fn with_block(
+        block_mass: f64,
+        ambient: f64,
+        temperature: f64,
+        exhaust: ExhaustThermal,
+    ) -> Self {
         let thermostat = Thermostat::default();
         let capacity = WARM_UP_MASS_FRACTION * block_mass.max(1.0) * METAL_SPECIFIC_HEAT;
         Self {
@@ -382,6 +560,7 @@ impl EngineThermal {
                 ambient,
             ),
             thermostat,
+            exhaust,
             ambient,
         }
     }
@@ -391,27 +570,68 @@ impl EngineThermal {
     /// The default, because a block built to be solved at a given speed is a
     /// block somebody wants steady-state numbers from. Starting cold is the
     /// deliberate act; see [`Self::cold`].
-    pub fn soaked(block_mass: f64, ambient: f64) -> Self {
+    pub fn soaked(block_mass: f64, exhaust: &ExhaustSystem, ambient: f64) -> Self {
         let open = Thermostat::default().open_temperature;
-        Self::new(block_mass, ambient, open)
+        Self::with_block(
+            block_mass,
+            ambient,
+            open,
+            ExhaustThermal::soaked(exhaust, ambient),
+        )
     }
 
     /// An engine that has stood overnight: everything at ambient.
-    pub fn cold(block_mass: f64, ambient: f64) -> Self {
-        Self::new(block_mass, ambient, ambient)
+    pub fn cold(block_mass: f64, exhaust: &ExhaustSystem, ambient: f64) -> Self {
+        Self::with_block(
+            block_mass,
+            ambient,
+            ambient,
+            ExhaustThermal::cold(exhaust, ambient),
+        )
     }
 
-    /// Advances the block by one frame.
+    /// Re-sizes the block's capacity for a new dressed mass [kg].
+    pub fn set_block_mass(&mut self, block_mass: f64) {
+        self.block.capacity =
+            (WARM_UP_MASS_FRACTION * block_mass.max(1.0) * METAL_SPECIFIC_HEAT).max(1e-3);
+    }
+
+    /// Rebuilds the exhaust sections for a new exhaust geometry.
     ///
-    /// `chamber_heat` is the wall loss summed over every cylinder [W] and
-    /// `friction_heat` the power the crankshaft is spending on friction [W],
+    /// Each new section is seeded at where the engine's own warm-up says it
+    /// should be — ambient on a cold engine, the temperature the geometry was
+    /// specified at on a soaked one — so changing the exhaust part-way through a
+    /// warm-up is not a step change in every resonance at once.
+    pub fn rebuild_exhaust(&mut self, exhaust: &ExhaustSystem) {
+        let warm = 1.0 - self.cold_fraction();
+        let ambient = self.ambient;
+        self.exhaust = ExhaustThermal::build(exhaust, ambient, |spec| {
+            ambient + warm * (spec.wall_temperature - ambient)
+        });
+    }
+
+    /// Advances the block and every pipe section by one frame.
+    ///
+    /// `chamber_heat` is the wall loss summed over every cylinder [W],
+    /// `friction_heat` the power the crankshaft is spending on friction [W] —
     /// all of which ends up in the oil and the bearings and from there in the
-    /// block.
-    pub fn integrate(&mut self, dt: f64, chamber_heat: f64, friction_heat: f64) {
+    /// block — and `port_temperature` and `cylinder_mass_flow` are the stream
+    /// one cylinder is pushing into its primary.
+    pub fn integrate(
+        &mut self,
+        dt: f64,
+        chamber_heat: f64,
+        friction_heat: f64,
+        port_temperature: f64,
+        cylinder_mass_flow: f64,
+        cylinders_per_bank: usize,
+    ) {
         self.block.sink_temperature = self.ambient;
         self.block.conductance = self.thermostat.conductance(self.block.temperature);
         self.block
             .integrate(dt, chamber_heat.max(0.0) + friction_heat.max(0.0));
+        self.exhaust
+            .integrate(dt, port_temperature, cylinder_mass_flow, cylinders_per_bank);
     }
 
     /// Block metal temperature [K].
