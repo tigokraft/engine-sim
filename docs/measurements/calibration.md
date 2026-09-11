@@ -83,19 +83,19 @@ Driven orders: rms **18.7 dB**, mean -13.2 dB, worst -26.4 dB on order 4 (tolera
 
 ### Resonance placement
 
-| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Implies |
-|---|---|---:|---:|---:|---|
-| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00330 s over 2.12 m` | 75.7 | not found | — |  |
-| block, first bending mode | `mass law on 110 kg` | 102.3 | not found | — |  |
-| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 622 x 0.951/(4 x (1.200 + 0.017))` | 121.6 | not found | — |  |
-| intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 2.2 L` | 162.1 | not found | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00330 s over 2.12 m` | 227.2 | 216.3 | -4.8 % | downstream run 2.12 m → 2.223 m |
-| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.280 + 0.017))` | 292.0 | 267.7 | -8.3 % | runner length 0.280 m → 0.324 m |
-| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00330 s over 2.12 m` | 378.7 | not found | — |  |
-| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 724 x 0.983/(4 x 0.416)` | 428.2 | 403.0 | -5.9 % | primary length 0.400 m → 0.425 m |
-| expansion chamber, first pass band | `nc/2L = 1 x 688/(2 x 0.450)` | 764.0 | 700.5 | -8.3 % | chamber length 0.450 m, volume 9.3 L → 0.491 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 724 x 0.983/(4 x 0.416)` | 1284.7 | 1046.0 | -18.6 % | primary length 0.400 m → 0.491 m |
-| expansion chamber, second pass band | `nc/2L = 2 x 688/(2 x 0.450)` | 1528.0 | 1481.7 | -3.0 % | chamber length 0.450 m, volume 9.3 L → 0.464 m |
+| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Level [dBFS] | Prominence [dB] | Implies |
+|---|---|---:|---:|---:|---:|---:|---|
+| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00330 s over 2.12 m` | 75.7 | not found | — | — | — |  |
+| block, first bending mode | `mass law on 110 kg` | 102.3 | not found | — | — | — |  |
+| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 622 x 0.951/(4 x (1.200 + 0.017))` | 121.6 | not found | — | — | — |  |
+| intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 2.2 L` | 162.1 | not found | — | — | — |  |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00330 s over 2.12 m` | 227.2 | 216.3 | -4.8 % | -22.7 | 38.1 | downstream run 2.12 m → 2.223 m |
+| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.280 + 0.017))` | 292.0 | 267.7 | -8.3 % | -36.6 | 13.3 | runner length 0.280 m → 0.324 m |
+| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00330 s over 2.12 m` | 378.7 | not found | — | — | — |  |
+| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 724 x 0.983/(4 x 0.416)` | 428.2 | 403.0 | -5.9 % | -49.0 | 15.8 | primary length 0.400 m → 0.425 m |
+| expansion chamber, first pass band | `nc/2L = 1 x 688/(2 x 0.450)` | 764.0 | 700.5 | -8.3 % | -53.7 | 12.4 | chamber length 0.450 m, volume 9.3 L → 0.491 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 724 x 0.983/(4 x 0.416)` | 1284.7 | 1046.0 | -18.6 % | -46.1 | 27.4 | primary length 0.400 m → 0.491 m |
+| expansion chamber, second pass band | `nc/2L = 2 x 688/(2 x 0.450)` | 1528.0 | 1481.7 | -3.0 % | -48.5 | 39.7 | chamber length 0.450 m, volume 9.3 L → 0.464 m |
 
 ### Peaks in the sweep average
 
@@ -162,19 +162,19 @@ Driven orders: rms **7.9 dB**, mean +1.1 dB, worst +15.3 dB on order 3.5 (tolera
 
 ### Resonance placement
 
-| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Implies |
-|---|---|---:|---:|---:|---|
-| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00445 s over 2.82 m` | 56.1 | not found | — |  |
-| block, first bending mode | `mass law on 210 kg` | 74.1 | not found | — |  |
-| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 611 x 0.986/(4 x (1.500 + 0.018))` | 99.1 | 94.0 | -5.1 % | tailpipe length 1.500 m, mouth radius 0.030 m → 1.600 m |
-| intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 4.8 L` | 140.3 | not found | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00445 s over 2.82 m` | 168.4 | 183.0 | +8.7 % | downstream run 2.82 m → 2.593 m |
-| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.380 + 0.018))` | 218.0 | 245.5 | +12.6 % | runner length 0.380 m → 0.354 m |
-| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00445 s over 2.82 m` | 280.6 | 268.3 | -4.4 % | downstream run 2.82 m → 2.948 m |
-| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 722 x 0.996/(4 x 0.568)` | 316.4 | 346.0 | +9.4 % | primary length 0.550 m → 0.503 m |
-| expansion chamber, first pass band | `nc/2L = 1 x 680/(2 x 0.650)` | 523.1 | 608.8 | +16.4 % | chamber length 0.650 m, volume 22.1 L → 0.559 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 722 x 0.996/(4 x 0.568)` | 949.1 | 963.7 | +1.5 % | primary length 0.550 m → 0.542 m |
-| expansion chamber, second pass band | `nc/2L = 2 x 680/(2 x 0.650)` | 1046.3 | 1231.6 | +17.7 % | chamber length 0.650 m, volume 22.1 L → 0.552 m |
+| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Level [dBFS] | Prominence [dB] | Implies |
+|---|---|---:|---:|---:|---:|---:|---|
+| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00445 s over 2.82 m` | 56.1 | not found | — | — | — |  |
+| block, first bending mode | `mass law on 210 kg` | 74.1 | not found | — | — | — |  |
+| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 611 x 0.986/(4 x (1.500 + 0.018))` | 99.1 | 94.0 | -5.1 % | -31.0 | 29.5 | tailpipe length 1.500 m, mouth radius 0.030 m → 1.600 m |
+| intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 4.8 L` | 140.3 | not found | — | — | — |  |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00445 s over 2.82 m` | 168.4 | 183.0 | +8.7 % | -32.9 | 25.8 | downstream run 2.82 m → 2.593 m |
+| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.380 + 0.018))` | 218.0 | 245.5 | +12.6 % | -35.5 | 15.9 | runner length 0.380 m → 0.354 m |
+| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00445 s over 2.82 m` | 280.6 | 268.3 | -4.4 % | -34.5 | 26.0 | downstream run 2.82 m → 2.948 m |
+| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 722 x 0.996/(4 x 0.568)` | 316.4 | 346.0 | +9.4 % | -38.2 | 30.1 | primary length 0.550 m → 0.503 m |
+| expansion chamber, first pass band | `nc/2L = 1 x 680/(2 x 0.650)` | 523.1 | 608.8 | +16.4 % | -38.5 | 29.6 | chamber length 0.650 m, volume 22.1 L → 0.559 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 722 x 0.996/(4 x 0.568)` | 949.1 | 963.7 | +1.5 % | -41.8 | 34.7 | primary length 0.550 m → 0.542 m |
+| expansion chamber, second pass band | `nc/2L = 2 x 680/(2 x 0.650)` | 1046.3 | 1231.6 | +17.7 % | -40.4 | 39.2 | chamber length 0.650 m, volume 22.1 L → 0.552 m |
 
 ### Peaks in the sweep average
 
@@ -241,16 +241,16 @@ Driven orders: rms **15.3 dB**, mean -12.5 dB, worst -24.3 dB on order 2 (tolera
 
 ### Resonance placement
 
-| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Implies |
-|---|---|---:|---:|---:|---|
-| block, first bending mode | `mass law on 180 kg` | 80.0 | not found | — |  |
-| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 649 x 0.985/(4 x (0.900 + 0.020))` | 173.7 | not found | — |  |
-| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00142 s over 0.92 m` | 176.4 | 207.7 | +17.7 % | downstream run 0.92 m → 0.781 m |
-| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 710 x 0.993/(4 x 0.437)` | 403.2 | not found | — |  |
-| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.180 + 0.015))` | 445.8 | not found | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00142 s over 0.92 m` | 529.3 | 521.3 | -1.5 % | downstream run 0.92 m → 0.934 m |
-| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00142 s over 0.92 m` | 882.1 | 940.1 | +6.6 % | downstream run 0.92 m → 0.863 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 710 x 0.993/(4 x 0.437)` | 1209.5 | 1401.0 | +15.8 % | primary length 0.420 m → 0.363 m |
+| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Level [dBFS] | Prominence [dB] | Implies |
+|---|---|---:|---:|---:|---:|---:|---|
+| block, first bending mode | `mass law on 180 kg` | 80.0 | not found | — | — | — |  |
+| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 649 x 0.985/(4 x (0.900 + 0.020))` | 173.7 | not found | — | — | — |  |
+| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00142 s over 0.92 m` | 176.4 | 207.7 | +17.7 % | -33.2 | 22.4 | downstream run 0.92 m → 0.781 m |
+| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 710 x 0.993/(4 x 0.437)` | 403.2 | not found | — | — | — |  |
+| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.180 + 0.015))` | 445.8 | not found | — | — | — |  |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00142 s over 0.92 m` | 529.3 | 521.3 | -1.5 % | -39.6 | 25.4 | downstream run 0.92 m → 0.934 m |
+| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00142 s over 0.92 m` | 882.1 | 940.1 | +6.6 % | -47.8 | 18.7 | downstream run 0.92 m → 0.863 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 710 x 0.993/(4 x 0.437)` | 1209.5 | 1401.0 | +15.8 % | -57.1 | 26.2 | primary length 0.420 m → 0.363 m |
 
 ### Peaks in the sweep average
 
@@ -321,18 +321,18 @@ Driven orders: rms **8.9 dB**, mean -4.7 dB, worst -16.3 dB on order 6 (toleranc
 
 ### Resonance placement
 
-| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Implies |
-|---|---|---:|---:|---:|---|
-| block, first bending mode | `mass law on 220 kg` | 72.4 | not found | — |  |
-| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00303 s over 1.92 m` | 82.6 | not found | — |  |
-| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 623 x 0.982/(4 x (1.100 + 0.019))` | 136.6 | not found | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00303 s over 1.92 m` | 247.9 | 263.8 | +6.4 % | downstream run 1.92 m → 1.803 m |
-| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.220 + 0.019))` | 363.3 | not found | — |  |
-| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00303 s over 1.92 m` | 413.1 | not found | — |  |
-| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 687 x 0.995/(4 x 0.376)` | 454.1 | 465.2 | +2.5 % | primary length 0.360 m → 0.351 m |
-| expansion chamber, first pass band | `nc/2L = 1 x 662/(2 x 0.400)` | 828.1 | 866.8 | +4.7 % | chamber length 0.400 m, volume 8.5 L → 0.382 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 687 x 0.995/(4 x 0.376)` | 1362.2 | 1309.1 | -3.9 % | primary length 0.360 m → 0.375 m |
-| expansion chamber, second pass band | `nc/2L = 2 x 662/(2 x 0.400)` | 1656.2 | 1564.2 | -5.6 % | chamber length 0.400 m, volume 8.5 L → 0.424 m |
+| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Level [dBFS] | Prominence [dB] | Implies |
+|---|---|---:|---:|---:|---:|---:|---|
+| block, first bending mode | `mass law on 220 kg` | 72.4 | not found | — | — | — |  |
+| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00303 s over 1.92 m` | 82.6 | not found | — | — | — |  |
+| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 623 x 0.982/(4 x (1.100 + 0.019))` | 136.6 | not found | — | — | — |  |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00303 s over 1.92 m` | 247.9 | 263.8 | +6.4 % | -41.4 | 24.2 | downstream run 1.92 m → 1.803 m |
+| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.220 + 0.019))` | 363.3 | not found | — | — | — |  |
+| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00303 s over 1.92 m` | 413.1 | not found | — | — | — |  |
+| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 687 x 0.995/(4 x 0.376)` | 454.1 | 465.2 | +2.5 % | -40.7 | 24.9 | primary length 0.360 m → 0.351 m |
+| expansion chamber, first pass band | `nc/2L = 1 x 662/(2 x 0.400)` | 828.1 | 866.8 | +4.7 % | -56.2 | 14.2 | chamber length 0.400 m, volume 8.5 L → 0.382 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 687 x 0.995/(4 x 0.376)` | 1362.2 | 1309.1 | -3.9 % | -55.7 | 13.9 | primary length 0.360 m → 0.375 m |
+| expansion chamber, second pass band | `nc/2L = 2 x 662/(2 x 0.400)` | 1656.2 | 1564.2 | -5.6 % | -63.5 | 13.6 | chamber length 0.400 m, volume 8.5 L → 0.424 m |
 
 ### Peaks in the sweep average
 
@@ -407,18 +407,18 @@ Driven orders: rms **14.3 dB**, mean +4.5 dB, worst +25.8 dB on order 3 (toleran
 
 ### Resonance placement
 
-| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Implies |
-|---|---|---:|---:|---:|---|
-| block, first bending mode | `mass law on 260 kg` | 66.6 | not found | — |  |
-| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00209 s over 1.37 m` | 119.9 | not found | — |  |
-| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 648 x 0.946/(4 x (1.000 + 0.017))` | 150.7 | not found | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00209 s over 1.37 m` | 359.6 | 374.9 | +4.3 % | downstream run 1.37 m → 1.311 m |
-| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.140 + 0.017))` | 552.0 | not found | — |  |
-| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 714 x 0.989/(4 x 0.314)` | 561.6 | not found | — |  |
-| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00209 s over 1.37 m` | 599.3 | not found | — |  |
-| expansion chamber, first pass band | `nc/2L = 1 x 678/(2 x 0.350)` | 969.1 | 980.7 | +1.2 % | chamber length 0.350 m, volume 2.5 L → 0.346 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 714 x 0.989/(4 x 0.314)` | 1684.7 | 1769.1 | +5.0 % | primary length 0.300 m → 0.286 m |
-| expansion chamber, second pass band | `nc/2L = 2 x 678/(2 x 0.350)` | 1938.2 | 1939.6 | +0.1 % | chamber length 0.350 m, volume 2.5 L → 0.350 m |
+| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Level [dBFS] | Prominence [dB] | Implies |
+|---|---|---:|---:|---:|---:|---:|---|
+| block, first bending mode | `mass law on 260 kg` | 66.6 | not found | — | — | — |  |
+| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00209 s over 1.37 m` | 119.9 | not found | — | — | — |  |
+| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 648 x 0.946/(4 x (1.000 + 0.017))` | 150.7 | not found | — | — | — |  |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00209 s over 1.37 m` | 359.6 | 374.9 | +4.3 % | -22.1 | 29.3 | downstream run 1.37 m → 1.311 m |
+| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.140 + 0.017))` | 552.0 | not found | — | — | — |  |
+| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 714 x 0.989/(4 x 0.314)` | 561.6 | not found | — | — | — |  |
+| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00209 s over 1.37 m` | 599.3 | not found | — | — | — |  |
+| expansion chamber, first pass band | `nc/2L = 1 x 678/(2 x 0.350)` | 969.1 | 980.7 | +1.2 % | -57.7 | 15.3 | chamber length 0.350 m, volume 2.5 L → 0.346 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 714 x 0.989/(4 x 0.314)` | 1684.7 | 1769.1 | +5.0 % | -70.2 | 24.2 | primary length 0.300 m → 0.286 m |
+| expansion chamber, second pass band | `nc/2L = 2 x 678/(2 x 0.350)` | 1938.2 | 1939.6 | +0.1 % | -74.1 | 12.6 | chamber length 0.350 m, volume 2.5 L → 0.350 m |
 
 ### Peaks in the sweep average
 
@@ -477,17 +477,17 @@ Driven orders: rms **11.2 dB**, mean -7.9 dB, worst -15.8 dB on order 4 (toleran
 
 ### Resonance placement
 
-| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Implies |
-|---|---|---:|---:|---:|---|
-| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00232 s over 1.52 m` | 107.8 | not found | — |  |
-| block, first bending mode | `mass law on 95 kg` | 110.1 | not found | — |  |
-| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 646 x 0.949/(4 x (1.000 + 0.018))` | 150.5 | not found | — |  |
-| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 706 x 0.991/(4 x 0.620)` | 282.3 | not found | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00232 s over 1.52 m` | 323.5 | not found | — |  |
-| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.200 + 0.016))` | 401.9 | 375.9 | -6.5 % | runner length 0.200 m → 0.231 m |
-| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00232 s over 1.52 m` | 539.2 | 523.1 | -3.0 % | downstream run 1.52 m → 1.565 m |
-| absorptive silencer, first pass band | `c/2L = 674/(2 x 0.500)` | 674.0 | 639.1 | -5.2 % | silencer length 0.500 m → 0.527 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 706 x 0.991/(4 x 0.620)` | 847.0 | 783.6 | -7.5 % | primary length 0.600 m → 0.649 m |
+| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Level [dBFS] | Prominence [dB] | Implies |
+|---|---|---:|---:|---:|---:|---:|---|
+| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00232 s over 1.52 m` | 107.8 | not found | — | — | — |  |
+| block, first bending mode | `mass law on 95 kg` | 110.1 | not found | — | — | — |  |
+| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 646 x 0.949/(4 x (1.000 + 0.018))` | 150.5 | not found | — | — | — |  |
+| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 706 x 0.991/(4 x 0.620)` | 282.3 | not found | — | — | — |  |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00232 s over 1.52 m` | 323.5 | not found | — | — | — |  |
+| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.200 + 0.016))` | 401.9 | 375.9 | -6.5 % | -35.2 | 27.1 | runner length 0.200 m → 0.231 m |
+| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00232 s over 1.52 m` | 539.2 | 523.1 | -3.0 % | -35.2 | 18.6 | downstream run 1.52 m → 1.565 m |
+| absorptive silencer, first pass band | `c/2L = 674/(2 x 0.500)` | 674.0 | 639.1 | -5.2 % | -40.2 | 12.2 | silencer length 0.500 m → 0.527 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 706 x 0.991/(4 x 0.620)` | 847.0 | 783.6 | -7.5 % | -43.0 | 18.8 | primary length 0.600 m → 0.649 m |
 
 ### Peaks in the sweep average
 
@@ -546,19 +546,19 @@ Driven orders: rms **2.5 dB**, mean +1.8 dB, worst +3.6 dB on order 4 (tolerance
 
 ### Resonance placement
 
-| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Implies |
-|---|---|---:|---:|---:|---|
-| block, first bending mode | `mass law on 125 kg` | 96.0 | not found | — |  |
-| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00247 s over 1.62 m` | 101.1 | not found | — |  |
-| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 643 x 0.996/(4 x (1.200 + 0.018))` | 131.4 | not found | — |  |
-| intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 2.5 L` | 163.7 | not found | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00247 s over 1.62 m` | 303.4 | 246.9 | -18.6 % | downstream run 1.62 m → 1.989 m |
-| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.240 + 0.017))` | 337.4 | 348.8 | +3.4 % | runner length 0.240 m → 0.249 m |
-| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00247 s over 1.62 m` | 505.7 | 382.2 | -24.4 % | downstream run 1.62 m → 2.141 m |
-| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 748 x 0.998/(4 x 0.366)` | 510.5 | not found | — |  |
-| expansion chamber, first pass band | `nc/2L = 1 x 692/(2 x 0.400)` | 865.6 | 874.3 | +1.0 % | chamber length 0.400 m, volume 3.1 L → 0.396 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 748 x 0.998/(4 x 0.366)` | 1531.6 | 1150.4 | -24.9 % | primary length 0.350 m → 0.466 m |
-| expansion chamber, second pass band | `nc/2L = 2 x 692/(2 x 0.400)` | 1731.2 | 1631.9 | -5.7 % | chamber length 0.400 m, volume 3.1 L → 0.424 m |
+| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Level [dBFS] | Prominence [dB] | Implies |
+|---|---|---:|---:|---:|---:|---:|---|
+| block, first bending mode | `mass law on 125 kg` | 96.0 | not found | — | — | — |  |
+| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00247 s over 1.62 m` | 101.1 | not found | — | — | — |  |
+| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 643 x 0.996/(4 x (1.200 + 0.018))` | 131.4 | not found | — | — | — |  |
+| intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 2.5 L` | 163.7 | not found | — | — | — |  |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00247 s over 1.62 m` | 303.4 | 246.9 | -18.6 % | -35.6 | 23.7 | downstream run 1.62 m → 1.989 m |
+| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.240 + 0.017))` | 337.4 | 348.8 | +3.4 % | -40.0 | 18.7 | runner length 0.240 m → 0.249 m |
+| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00247 s over 1.62 m` | 505.7 | 382.2 | -24.4 % | -44.5 | 11.5 | downstream run 1.62 m → 2.141 m |
+| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 748 x 0.998/(4 x 0.366)` | 510.5 | not found | — | — | — |  |
+| expansion chamber, first pass band | `nc/2L = 1 x 692/(2 x 0.400)` | 865.6 | 874.3 | +1.0 % | -54.0 | 17.7 | chamber length 0.400 m, volume 3.1 L → 0.396 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 748 x 0.998/(4 x 0.366)` | 1531.6 | 1150.4 | -24.9 % | -43.8 | 28.5 | primary length 0.350 m → 0.466 m |
+| expansion chamber, second pass band | `nc/2L = 2 x 692/(2 x 0.400)` | 1731.2 | 1631.9 | -5.7 % | -50.7 | 38.4 | chamber length 0.400 m, volume 3.1 L → 0.424 m |
 
 ### Peaks in the sweep average
 
@@ -625,19 +625,19 @@ Driven orders: rms **8.3 dB**, mean -1.7 dB, worst -12.9 dB on order 7.5 (tolera
 
 ### Resonance placement
 
-| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Implies |
-|---|---|---:|---:|---:|---|
-| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00408 s over 2.52 m` | 61.2 | not found | — |  |
-| block, first bending mode | `mass law on 235 kg` | 70.0 | not found | — |  |
-| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 600 x 0.990/(4 x (1.400 + 0.020))` | 104.5 | 114.3 | +9.3 % | tailpipe length 1.400 m, mouth radius 0.033 m → 1.299 m |
-| intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 4.5 L` | 173.8 | not found | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00408 s over 2.52 m` | 183.7 | 205.8 | +12.0 % | downstream run 2.52 m → 2.249 m |
-| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00408 s over 2.52 m` | 306.1 | 292.2 | -4.5 % | downstream run 2.52 m → 2.640 m |
-| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.260 + 0.018))` | 312.1 | 316.5 | +1.4 % | runner length 0.260 m → 0.274 m |
-| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 692 x 0.996/(4 x 0.468)` | 367.9 | 416.5 | +13.2 % | primary length 0.450 m → 0.398 m |
-| expansion chamber, first pass band | `nc/2L = 1 x 658/(2 x 0.550)` | 597.7 | 718.6 | +20.2 % | chamber length 0.550 m, volume 13.1 L → 0.458 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 692 x 0.996/(4 x 0.468)` | 1103.8 | 1277.4 | +15.7 % | primary length 0.450 m → 0.389 m |
-| expansion chamber, second pass band | `nc/2L = 2 x 658/(2 x 0.550)` | 1195.5 | 1156.1 | -3.3 % | chamber length 0.550 m, volume 13.1 L → 0.569 m |
+| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Level [dBFS] | Prominence [dB] | Implies |
+|---|---|---:|---:|---:|---:|---:|---|
+| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00408 s over 2.52 m` | 61.2 | not found | — | — | — |  |
+| block, first bending mode | `mass law on 235 kg` | 70.0 | not found | — | — | — |  |
+| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 600 x 0.990/(4 x (1.400 + 0.020))` | 104.5 | 114.3 | +9.3 % | -28.1 | 30.9 | tailpipe length 1.400 m, mouth radius 0.033 m → 1.299 m |
+| intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 4.5 L` | 173.8 | not found | — | — | — |  |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00408 s over 2.52 m` | 183.7 | 205.8 | +12.0 % | -27.5 | 26.3 | downstream run 2.52 m → 2.249 m |
+| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00408 s over 2.52 m` | 306.1 | 292.2 | -4.5 % | -35.1 | 25.2 | downstream run 2.52 m → 2.640 m |
+| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.260 + 0.018))` | 312.1 | 316.5 | +1.4 % | -38.2 | 16.2 | runner length 0.260 m → 0.274 m |
+| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 692 x 0.996/(4 x 0.468)` | 367.9 | 416.5 | +13.2 % | -39.2 | 27.5 | primary length 0.450 m → 0.398 m |
+| expansion chamber, first pass band | `nc/2L = 1 x 658/(2 x 0.550)` | 597.7 | 718.6 | +20.2 % | -42.6 | 26.5 | chamber length 0.550 m, volume 13.1 L → 0.458 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 692 x 0.996/(4 x 0.468)` | 1103.8 | 1277.4 | +15.7 % | -57.5 | 18.9 | primary length 0.450 m → 0.389 m |
+| expansion chamber, second pass band | `nc/2L = 2 x 658/(2 x 0.550)` | 1195.5 | 1156.1 | -3.3 % | -51.0 | 24.2 | chamber length 0.550 m, volume 13.1 L → 0.569 m |
 
 ### Peaks in the sweep average
 
@@ -700,18 +700,18 @@ Driven orders: rms **15.3 dB**, mean -10.8 dB, worst -21.7 dB on order 6 (tolera
 
 ### Resonance placement
 
-| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Implies |
-|---|---|---:|---:|---:|---|
-| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00361 s over 2.22 m` | 69.2 | not found | — |  |
-| block, first bending mode | `mass law on 195 kg` | 76.9 | not found | — |  |
-| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 604 x 0.991/(4 x (1.600 + 0.021))` | 92.2 | not found | — |  |
-| intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 3.5 L` | 159.4 | 148.5 | -6.9 % |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00361 s over 2.22 m` | 207.5 | not found | — |  |
-| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.300 + 0.018))` | 272.9 | 266.4 | -2.4 % | runner length 0.300 m → 0.326 m |
-| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00361 s over 2.22 m` | 345.9 | not found | — |  |
-| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 693 x 0.997/(4 x 0.497)` | 347.3 | not found | — |  |
-| absorptive silencer, first pass band | `c/2L = 645/(2 x 0.600)` | 537.8 | not found | — |  |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 693 x 0.997/(4 x 0.497)` | 1041.9 | 1007.3 | -3.3 % | primary length 0.480 m → 0.496 m |
+| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Level [dBFS] | Prominence [dB] | Implies |
+|---|---|---:|---:|---:|---:|---:|---|
+| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00361 s over 2.22 m` | 69.2 | not found | — | — | — |  |
+| block, first bending mode | `mass law on 195 kg` | 76.9 | not found | — | — | — |  |
+| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 604 x 0.991/(4 x (1.600 + 0.021))` | 92.2 | not found | — | — | — |  |
+| intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 3.5 L` | 159.4 | 148.5 | -6.9 % | -18.6 | 40.9 |  |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00361 s over 2.22 m` | 207.5 | not found | — | — | — |  |
+| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.300 + 0.018))` | 272.9 | 266.4 | -2.4 % | -27.1 | 26.2 | runner length 0.300 m → 0.326 m |
+| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00361 s over 2.22 m` | 345.9 | not found | — | — | — |  |
+| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 693 x 0.997/(4 x 0.497)` | 347.3 | not found | — | — | — |  |
+| absorptive silencer, first pass band | `c/2L = 645/(2 x 0.600)` | 537.8 | not found | — | — | — |  |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 693 x 0.997/(4 x 0.497)` | 1041.9 | 1007.3 | -3.3 % | -53.6 | 17.1 | primary length 0.480 m → 0.496 m |
 
 ### Peaks in the sweep average
 
@@ -770,20 +770,20 @@ Driven orders: rms **7.8 dB**, mean -5.5 dB, worst -11.1 dB on order 4 (toleranc
 
 ### Resonance placement
 
-| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Implies |
-|---|---|---:|---:|---:|---|
-| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00539 s over 2.87 m` | 46.4 | not found | — |  |
-| block, first bending mode | `mass law on 190 kg` | 77.9 | not found | — |  |
-| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 511 x 0.995/(4 x (1.300 + 0.017))` | 96.5 | not found | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00539 s over 2.87 m` | 139.1 | not found | — |  |
-| intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 2.8 L` | 153.7 | 183.5 | +19.4 % |  |
-| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00539 s over 2.87 m` | 231.8 | 269.2 | +16.1 % | downstream run 2.87 m → 2.469 m |
-| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.220 + 0.016))` | 367.1 | 409.0 | +11.4 % | runner length 0.220 m → 0.212 m |
-| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 595 x 0.998/(4 x 0.315)` | 471.7 | not found | — |  |
-| absorptive silencer, first pass band | `c/2L = 570/(2 x 0.550)` | 518.2 | not found | — |  |
-| expansion chamber, first pass band | `nc/2L = 1 x 551/(2 x 0.500)` | 550.6 | not found | — |  |
-| expansion chamber, second pass band | `nc/2L = 2 x 551/(2 x 0.500)` | 1101.1 | 1199.9 | +9.0 % | chamber length 0.500 m, volume 22.4 L → 0.459 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 595 x 0.998/(4 x 0.315)` | 1415.1 | 1678.9 | +18.6 % | primary length 0.300 m → 0.253 m |
+| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Level [dBFS] | Prominence [dB] | Implies |
+|---|---|---:|---:|---:|---:|---:|---|
+| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00539 s over 2.87 m` | 46.4 | not found | — | — | — |  |
+| block, first bending mode | `mass law on 190 kg` | 77.9 | not found | — | — | — |  |
+| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 511 x 0.995/(4 x (1.300 + 0.017))` | 96.5 | not found | — | — | — |  |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00539 s over 2.87 m` | 139.1 | not found | — | — | — |  |
+| intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 2.8 L` | 153.7 | 183.5 | +19.4 % | -45.2 | 15.8 |  |
+| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00539 s over 2.87 m` | 231.8 | 269.2 | +16.1 % | -57.0 | 13.6 | downstream run 2.87 m → 2.469 m |
+| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.220 + 0.016))` | 367.1 | 409.0 | +11.4 % | -44.8 | 29.6 | runner length 0.220 m → 0.212 m |
+| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 595 x 0.998/(4 x 0.315)` | 471.7 | not found | — | — | — |  |
+| absorptive silencer, first pass band | `c/2L = 570/(2 x 0.550)` | 518.2 | not found | — | — | — |  |
+| expansion chamber, first pass band | `nc/2L = 1 x 551/(2 x 0.500)` | 550.6 | not found | — | — | — |  |
+| expansion chamber, second pass band | `nc/2L = 2 x 551/(2 x 0.500)` | 1101.1 | 1199.9 | +9.0 % | -54.5 | 19.0 | chamber length 0.500 m, volume 22.4 L → 0.459 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 595 x 0.998/(4 x 0.315)` | 1415.1 | 1678.9 | +18.6 % | -60.6 | 24.6 | primary length 0.300 m → 0.253 m |
 
 ### Peaks in the sweep average
 
@@ -836,17 +836,17 @@ Driven orders: rms **12.6 dB**, mean +8.9 dB, worst +17.8 dB on order 1 (toleran
 
 ### Resonance placement
 
-| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Implies |
-|---|---|---:|---:|---:|---|
-| block, first bending mode | `mass law on 45 kg` | 120.0 | 111.1 | -7.4 % |  |
-| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00096 s over 0.72 m` | 259.1 | not found | — |  |
-| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 808 x 1.000/(4 x 0.637)` | 317.1 | 360.0 | +13.5 % | primary length 0.620 m → 0.546 m |
-| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.180 + 0.020))` | 434.6 | 419.8 | -3.4 % | runner length 0.180 m → 0.207 m |
-| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 735 x 1.000/(4 x (0.350 + 0.015))` | 503.6 | not found | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00096 s over 0.72 m` | 777.4 | not found | — |  |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 808 x 1.000/(4 x 0.637)` | 951.2 | not found | — |  |
-| absorptive silencer, first pass band | `c/2L = 769/(2 x 0.360)` | 1067.6 | not found | — |  |
-| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00096 s over 0.72 m` | 1295.6 | 1197.9 | -7.5 % | downstream run 0.72 m → 0.784 m |
+| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Level [dBFS] | Prominence [dB] | Implies |
+|---|---|---:|---:|---:|---:|---:|---|
+| block, first bending mode | `mass law on 45 kg` | 120.0 | 111.1 | -7.4 % | -31.4 | 20.3 |  |
+| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00096 s over 0.72 m` | 259.1 | not found | — | — | — |  |
+| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 808 x 1.000/(4 x 0.637)` | 317.1 | 360.0 | +13.5 % | -36.6 | 15.0 | primary length 0.620 m → 0.546 m |
+| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.180 + 0.020))` | 434.6 | 419.8 | -3.4 % | -35.9 | 17.7 | runner length 0.180 m → 0.207 m |
+| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 735 x 1.000/(4 x (0.350 + 0.015))` | 503.6 | not found | — | — | — |  |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00096 s over 0.72 m` | 777.4 | not found | — | — | — |  |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 808 x 1.000/(4 x 0.637)` | 951.2 | not found | — | — | — |  |
+| absorptive silencer, first pass band | `c/2L = 769/(2 x 0.360)` | 1067.6 | not found | — | — | — |  |
+| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00096 s over 0.72 m` | 1295.6 | 1197.9 | -7.5 % | -42.7 | 19.2 | downstream run 0.72 m → 0.784 m |
 
 ### Peaks in the sweep average
 
