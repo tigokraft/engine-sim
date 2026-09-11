@@ -98,6 +98,19 @@ pub use crate::physics::engine_block::CYCLE_TABLE;
 /// sample.
 pub const CONTROL_BLOCK: usize = 32;
 
+/// One whole master cycle, in the fixed-point units crank phase is kept in [-].
+///
+/// Crank phase is integrated one sample at a time for as long as the stream is
+/// open — tens of millions of additions an hour — and a `f32` accumulator wrapped
+/// into `0..1` cannot do that without walking. The increment at 3000 rpm is five
+/// parts in ten thousand of a cycle, so adding it to a phase near one rounds away
+/// a tenth of a per mille of it every time, in the same direction, and a quarter
+/// of a cycle has gone missing inside a minute. A 32-bit fraction that simply
+/// wraps has no such bias: the addition is exact, the wrap is free, and the only
+/// error left is in quantising the increment once, which is a frequency offset of
+/// well under a part per billion and does not accumulate at all.
+const PHASE_ONE: f32 = 4_294_967_296.0;
+
 /// Blowdown pressure difference that maps to full-scale pulse amplitude [Pa].
 ///
 /// Measured against the block this crate ships: a cross-plane V8 opens its
@@ -2052,8 +2065,11 @@ pub struct EngineSynth {
     mechanical: MechanicalVoice,
     knock: KnockVoice,
 
-    /// Master-cycle phase, `0..1` over 720 crank degrees.
-    cycle_phase: f32,
+    /// Master-cycle phase over 720 crank degrees, as a fraction of [`PHASE_ONE`].
+    ///
+    /// Held fixed-point and wrapping rather than as a `0..1` float; see the
+    /// constant for why.
+    phase_fixed: u32,
     /// Crank angular velocity perturbation from nominal speed [rad/s].
     crank_omega_delta: f32,
     /// Samples remaining before the next control-rate update.
@@ -2149,7 +2165,7 @@ impl EngineSynth {
             knock: KnockVoice::new(fs),
             variation: vec![CycleVariation::default(); config.cylinders.len()],
             variation_depth: 0.0,
-            cycle_phase: 0.0,
+            phase_fixed: 0,
             crank_omega_delta: 0.0,
             control_countdown: 0,
             exhaust_temperature: Smoothed::new(snapshot.exhaust_temperature, fs, 0.080),
@@ -2204,6 +2220,12 @@ impl EngineSynth {
     /// Mean acoustic round-trip time of a bank's primaries [s].
     pub fn runner_round_trip_seconds(&self, bank_idx: usize) -> f32 {
         self.network.bank_mean_round_trip_seconds(bank_idx)
+    }
+
+    /// Master-cycle phase, `0..1` over 720 crank degrees.
+    #[inline(always)]
+    fn cycle_phase(&self) -> f32 {
+        self.phase_fixed as f32 / PHASE_ONE
     }
 
     /// Crank angular velocity perturbation from nominal speed [rad/s].
@@ -2261,7 +2283,7 @@ impl EngineSynth {
         self.knock.reset();
         self.dc = [DcBlocker::default(); 2];
         self.block.reset();
-        self.cycle_phase = 0.0;
+        self.phase_fixed = 0;
         self.crank_omega_delta = 0.0;
         self.control_countdown = 0;
         self.variation
@@ -2453,7 +2475,7 @@ impl EngineSynth {
                 let t_mean_cyl = (t_mean / n_cylinders as f32) * weight;
 
                 // Cycle angle relative to cylinder combustion TDC (180 deg before EVO).
-                let phi = (self.cycle_phase - (tap.evo_phase - 0.25)).rem_euclid(1.0);
+                let phi = (self.cycle_phase() - (tap.evo_phase - 0.25)).rem_euclid(1.0);
                 delta_e += t_mean_cyl * Self::cylinder_excess_work(phi);
             }
 
@@ -2475,7 +2497,7 @@ impl EngineSynth {
             return false;
         }
 
-        let previous = self.cycle_phase;
+        let previous = self.cycle_phase();
         let depth = self.variation_depth;
 
         for index in 0..self.config.cylinders.len() {
@@ -2503,7 +2525,9 @@ impl EngineSynth {
             }
         }
 
-        self.cycle_phase = (previous + increment).rem_euclid(1.0);
+        self.phase_fixed = self
+            .phase_fixed
+            .wrapping_add((increment * PHASE_ONE) as u32);
         true
     }
 
@@ -2526,7 +2550,7 @@ impl EngineSynth {
             self.excitations.fill(0.0);
             return 0.0;
         }
-        let phase = self.cycle_phase;
+        let phase = self.cycle_phase();
         let mut induction = 0.0;
         for index in 0..self.config.cylinders.len() {
             let tap = self.config.cylinders[index];
@@ -2812,14 +2836,14 @@ mod tests {
         assert!((synth.firing_frequency() - expected).abs() < 1.0);
 
         // And the phase really advances at RPM / 120 cycles per second.
-        let before = synth.cycle_phase;
+        let before = synth.cycle_phase();
         render(&mut synth, FS as usize); // exactly one second
         let cycles = 6_000.0 / 120.0;
         let expected_phase = (before + cycles).rem_euclid(1.0);
         assert!(
-            (synth.cycle_phase - expected_phase).abs() < 1e-2,
+            (synth.cycle_phase() - expected_phase).abs() < 1e-2,
             "phase drifted: {} vs {expected_phase}",
-            synth.cycle_phase
+            synth.cycle_phase()
         );
     }
 
@@ -3419,7 +3443,7 @@ mod tests {
         // either way, and an event straddling the boundary would be counted at
         // both ends — an artefact of where the measurement starts, not of the
         // firing path.
-        synth.cycle_phase = 0.09;
+        synth.phase_fixed = (0.09 * PHASE_ONE) as u32;
 
         let cycles = 5usize;
         let samples = (FS / (800.0 / 120.0)) as usize * cycles;
@@ -3474,7 +3498,7 @@ mod tests {
         // Start on the cycle the snapshot carries rather than fading into it,
         // so the measurement is not taken part-way through the fade.
         synth.cycle.blend.snap(1.0);
-        synth.cycle_phase = 0.0;
+        synth.phase_fixed = 0;
 
         // A whole cycle, so both cylinders have had their turn. They play the
         // same normalised curve, so the ratio of the two peaks is the ratio of
@@ -3593,7 +3617,7 @@ mod tests {
             // Start on the cycle the snapshot carries rather than fading into
             // it, so the measurement is not taken part-way through the fade.
             synth.cycle.blend.snap(1.0);
-            synth.cycle_phase = 0.001;
+            synth.phase_fixed = (0.001 * PHASE_ONE) as u32;
 
             let expected_fires = 8 * cycles;
             // Half of each cylinder's own peak: the instant its excitation
