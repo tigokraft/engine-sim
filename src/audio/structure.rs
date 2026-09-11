@@ -50,7 +50,89 @@
 //! envelope in the bore-wall speed of sound. Nothing in this module is typed in
 //! per engine.
 
-use crate::audio::filters::{Biquad, BiquadCoeffs};
+use crate::audio::filters::{block_resonance_hz, Biquad, BiquadCoeffs};
+
+// ---------------------------------------------------------------------------
+// Material and shape constants
+// ---------------------------------------------------------------------------
+
+/// Effective bending modulus of a dressed engine block [Pa].
+///
+/// Held fixed across the catalogue on purpose. Cast iron is 110 GPa and
+/// aluminium 70, but an alloy block is cast with thicker sections precisely so
+/// that it is not floppier than the iron one it replaced — the two end up within
+/// a few per cent of each other in *stiffness*, and a factor of two and a half
+/// apart in density. Treating stiffness as a constant and letting mass carry the
+/// difference is therefore the physical statement, not a simplification of one.
+pub const BLOCK_MODULUS: f32 = 100.0e9;
+
+/// Bore centre spacing as a multiple of bore diameter [-].
+///
+/// Production practice sits between 1.15 and 1.30: below that there is no room
+/// for a head bolt or a water jacket between the bores, and above it the engine
+/// is longer and heavier than it needs to be. Used when a preset does not state
+/// its own spacing.
+pub const BORE_SPACING_RATIO: f64 = 1.22;
+
+/// Crankcase width at the pan rail, as a multiple of bore spacing [-].
+///
+/// The pan rail follows the bores outboard of the cylinder walls, and it does
+/// so whether the engine is an inline or a vee — the vee's extra width is in the
+/// heads, which are above the joint and not part of this footprint.
+pub const PAN_WIDTH_RATIO: f32 = 1.7;
+
+/// Block height from pan floor to cam cover, as a multiple of bore spacing [-].
+pub const BLOCK_HEIGHT_RATIO: f32 = 4.0;
+
+/// Thinnest cylinder wall the model will assume [m].
+///
+/// The wall between two bores is `(spacing - bore) / 2` and gets thin fast on a
+/// short-deck engine; siamesed-bore blocks put it near 3 mm and no production
+/// block goes below it, so neither does this.
+pub const MIN_BORE_WALL: f32 = 0.0035;
+
+/// Young's modulus of a stamped steel oil pan [Pa].
+pub const PAN_MODULUS: f32 = 200.0e9;
+
+/// Density of a stamped steel oil pan [kg/m^3].
+pub const PAN_DENSITY: f32 = 7_850.0;
+
+/// Poisson's ratio of steel [-].
+pub const PAN_POISSON: f32 = 0.30;
+
+/// Sheet thickness of a stamped oil pan [m].
+pub const PAN_THICKNESS: f32 = 0.0020;
+
+/// Free-free Euler-Bernoulli bending eigenvalues `beta_n * L` [-].
+///
+/// The roots of `cos(beta L) cosh(beta L) = 1`. Bending frequency goes as the
+/// square of these, so the first three modes of any free-free beam stand in the
+/// ratio 1 : 2.76 : 5.40 whatever it is made of or how long it is — which is why
+/// they can be applied to a mode frequency that came from somewhere else.
+pub const BEAM_EIGENVALUES: [f32; 3] = [4.730_041, 7.853_205, 10.995_608];
+
+/// Structural loss factor of the dressed block in bending [-].
+///
+/// Cast iron's own material damping is nearer 0.001. What sets this is
+/// everything bolted to it: the head and pan joints, the mounts, and the oil.
+/// A loss factor of 0.08 is a Q of 12.5, which puts the 80 Hz mode's ring-down
+/// at 50 ms — long enough to sustain between firings at idle, short enough that
+/// the block reads as a lump of metal rather than a drum.
+pub const BLOCK_LOSS_FACTOR: f32 = 0.08;
+
+/// Structural loss factor of the oil pan [-].
+///
+/// A pan is a thin panel with several litres of oil hanging off the inside of
+/// it, and the fluid loading is the damping. Broad and short-lived: it adds
+/// weight to the note without adding a pitch.
+pub const PAN_LOSS_FACTOR: f32 = 0.25;
+
+/// Structural loss factor of a cylinder wall [-].
+///
+/// The stiffest, driest and best-supported member of the three, and the only one
+/// that genuinely rings: a Q of 29 at 2.6 kHz decays in 3.5 ms, which is the
+/// length of one tick of clatter.
+pub const BORE_WALL_LOSS_FACTOR: f32 = 0.035;
 
 // ---------------------------------------------------------------------------
 // Bank constants
@@ -68,6 +150,15 @@ pub const MODAL_PEAK_RATIO: f32 = 2.5;
 /// Number of resolved modes in the bank.
 pub const STRUCTURAL_MODES: usize = 6;
 
+/// Band a derived mode is clamped into [Hz].
+///
+/// Outside it the formula is no longer describing the member it was written
+/// for — a 10 mm bore's ring mode really is ultrasonic, and a block heavy
+/// enough to bend below 20 Hz is not a block. Same convention as
+/// [`crate::audio::filters::block_resonance_hz`]'s own clamp: refuse to
+/// extrapolate rather than emit a frequency nothing can hear.
+pub const STRUCTURAL_BAND_HZ: (f32, f32) = (20.0, 16_000.0);
+
 // ---------------------------------------------------------------------------
 // Modes
 // ---------------------------------------------------------------------------
@@ -81,6 +172,220 @@ pub struct StructuralMode {
     pub q: f32,
     /// Share of the radiated output this mode carries [-].
     pub weight: f32,
+}
+
+/// The geometry and mass a block's modes are derived from.
+///
+/// Everything here is something a preset already knows about itself. There is no
+/// frequency, no Q and no mix level in this struct, because those are results.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StructuralSpec {
+    /// Dressed mass of the block: casting, heads, pan and accessories [kg].
+    pub dressed_mass: f64,
+    /// Cylinder bore diameter [m].
+    pub bore: f64,
+    /// Distance between adjacent bore centres [m].
+    pub bore_spacing: f64,
+    /// Cylinders on one bank — the number the block's length is set by [-].
+    pub cylinders_per_bank: usize,
+}
+
+impl Default for StructuralSpec {
+    /// The block [`crate::audio::filters::BLOCK_REFERENCE_MASS`] describes: a
+    /// four-litre iron-decked V8, four cylinders to a bank.
+    fn default() -> Self {
+        Self::new(180.0, 0.094, 4)
+    }
+}
+
+impl StructuralSpec {
+    /// A spec with production bore spacing for the given bore.
+    pub fn new(dressed_mass: f64, bore: f64, cylinders_per_bank: usize) -> Self {
+        Self {
+            dressed_mass,
+            bore,
+            bore_spacing: bore * BORE_SPACING_RATIO,
+            cylinders_per_bank,
+        }
+    }
+
+    /// Overrides the bore centre spacing [m].
+    ///
+    /// For the engines whose chambers are not on a production four-stroke
+    /// pitch: a rotary's housings, or anything with a main bearing between
+    /// every pair of bores.
+    pub fn with_bore_spacing(mut self, spacing: f64) -> Self {
+        self.bore_spacing = spacing;
+        self
+    }
+
+    /// Bore centre spacing, clamped to something a block could be cast as [m].
+    fn spacing(&self) -> f32 {
+        let bore = self.bore.max(0.010) as f32;
+        (self.bore_spacing as f32).clamp(bore + 2.0 * MIN_BORE_WALL, 3.0 * bore)
+    }
+
+    /// Deck length: one bore spacing per cylinder plus a half web at each end [m].
+    fn deck_length(&self) -> f32 {
+        (self.cylinders_per_bank.max(1) as f32 + 1.0) * self.spacing()
+    }
+
+    /// Crankcase width at the pan rail [m].
+    fn pan_width(&self) -> f32 {
+        PAN_WIDTH_RATIO * self.spacing()
+    }
+
+    /// Block height from pan floor to cam cover [m].
+    fn height(&self) -> f32 {
+        BLOCK_HEIGHT_RATIO * self.spacing()
+    }
+
+    /// Smeared density of the block envelope [kg/m^3].
+    ///
+    /// Dressed mass over the box the engine occupies, so it is well below the
+    /// density of the metal — most of that box is air, water and oil. What
+    /// matters is that it moves the right way: the same envelope in aluminium
+    /// weighs a third of what it does in iron, and structure-borne sound crosses
+    /// it at `sqrt(E / rho)`.
+    fn envelope_density(&self) -> f32 {
+        let volume = self.deck_length() * self.pan_width() * self.height();
+        (self.dressed_mass as f32 / volume.max(1e-6)).clamp(500.0, 8_000.0)
+    }
+
+    /// Frequency of the `n`-th global bending mode, `n` from zero [Hz].
+    ///
+    /// The first is the anchor law itself — a lump of mass `m` on a structure of
+    /// fixed stiffness `K`, at `(1/2 pi) sqrt(K/m)` — and the rest follow it by
+    /// the square of the free-free eigenvalue ratio. So every mode in the family
+    /// carries the `1 / sqrt(mass)` law, and a heavy block rings lower all the
+    /// way up.
+    pub fn bending_hz(&self, n: usize) -> f32 {
+        let first = block_resonance_hz(self.dressed_mass as f32);
+        let ratio = BEAM_EIGENVALUES[n.min(BEAM_EIGENVALUES.len() - 1)] / BEAM_EIGENVALUES[0];
+        first * ratio * ratio
+    }
+
+    /// Fundamental of the oil pan, as a thin rectangular plate [Hz].
+    ///
+    /// ```text
+    /// f = (pi h / 2) sqrt(E / (12 rho (1 - nu^2))) (1/a^2 + 1/b^2)
+    /// ```
+    ///
+    /// `a` is the deck length and `b` the pan rail width, so a long engine's pan
+    /// drums lower than a short one's for the same reason any long panel does.
+    /// Steel and 2 mm whatever the block is made of: a pan is a pressing, and it
+    /// is the same pressing on an alloy engine as on an iron one.
+    pub fn pan_hz(&self) -> f32 {
+        let a = self.deck_length();
+        let b = self.pan_width();
+        let stiffness =
+            (PAN_MODULUS / (12.0 * PAN_DENSITY * (1.0 - PAN_POISSON * PAN_POISSON))).sqrt();
+        0.5 * std::f32::consts::PI * PAN_THICKNESS * stiffness * (1.0 / (a * a) + 1.0 / (b * b))
+    }
+
+    /// Frequency of the `n`-nodal-diameter flexural mode of a bore wall [Hz].
+    ///
+    /// A cylinder wall is a thin ring of radius `a = bore / 2` and thickness
+    /// `h = (spacing - bore) / 2` — the metal that is actually there between one
+    /// bore and the next, which is why bore spacing and not bore alone sets the
+    /// pitch. The free ring's flexural modes are
+    ///
+    /// ```text
+    /// f_n = n (n^2 - 1) / sqrt(n^2 + 1) * h sqrt(E / rho) / (2 pi sqrt(12) a^2)
+    /// ```
+    ///
+    /// a `1 / bore` law like the knock cavity modes, but in the metal rather
+    /// than in the gas — so it moves with the block's density and not with the
+    /// charge temperature.
+    pub fn bore_wall_hz(&self, n: f32) -> f32 {
+        let bore = self.bore.max(0.010) as f32;
+        let a = 0.5 * bore;
+        let h = (0.5 * (self.spacing() - bore)).max(MIN_BORE_WALL);
+        let c = (BLOCK_MODULUS / self.envelope_density()).sqrt();
+        let shape = n * (n * n - 1.0) / (n * n + 1.0).sqrt();
+        shape * h * c / (2.0 * std::f32::consts::PI * 12.0f32.sqrt() * a * a)
+    }
+
+    /// The six modes, in families rather than in frequency order.
+    ///
+    /// # Where the weights come from
+    ///
+    /// A mode radiates in proportion to the surface it moves, and to how much of
+    /// that surface survives its own cancellation. Both halves are geometry:
+    ///
+    /// - **Area.** The bending modes shake the four sides of the block, the pan
+    ///   mode its floor, and the bore walls reach the outside through the deck.
+    ///   Each family's weight starts as its share of the total radiating area.
+    /// - **Cancellation.** A mode with `n` antinodes has `n - 1` internal nodes,
+    ///   and adjacent antinodes move in antiphase — so in the far field all but
+    ///   about one antinode's worth cancels, and the surviving fraction goes as
+    ///   `1 / n`. That is why the higher member of each family is quieter
+    ///   without anything being turned down.
+    ///
+    /// Normalised so the strongest mode has weight one; the bank turns that into
+    /// a peak of [`MODAL_PEAK_RATIO`] over its own broadband plateau.
+    pub fn modes(&self) -> [StructuralMode; STRUCTURAL_MODES] {
+        let length = self.deck_length();
+        let width = self.pan_width();
+        let height = self.height();
+
+        // The four vertical faces of the block, its floor, and its deck.
+        let sides = 2.0 * length * height + 2.0 * width * height;
+        let floor = length * width;
+        let deck = floor;
+        let total = (sides + floor + deck).max(1e-9);
+        let (sides, floor, deck) = (sides / total, floor / total, deck / total);
+
+        let block_q = 1.0 / BLOCK_LOSS_FACTOR;
+        let wall_q = 1.0 / BORE_WALL_LOSS_FACTOR;
+        let mut modes = [
+            StructuralMode {
+                frequency: self.bending_hz(0),
+                q: block_q,
+                weight: sides,
+            },
+            StructuralMode {
+                frequency: self.bending_hz(1),
+                q: block_q,
+                weight: sides / 2.0,
+            },
+            StructuralMode {
+                frequency: self.bending_hz(2),
+                q: block_q,
+                weight: sides / 3.0,
+            },
+            StructuralMode {
+                frequency: self.pan_hz(),
+                q: 1.0 / PAN_LOSS_FACTOR,
+                weight: floor,
+            },
+            StructuralMode {
+                frequency: self.bore_wall_hz(2.0),
+                q: wall_q,
+                weight: deck / 2.0,
+            },
+            StructuralMode {
+                frequency: self.bore_wall_hz(3.0),
+                q: wall_q,
+                weight: deck / 3.0,
+            },
+        ];
+
+        for mode in modes.iter_mut() {
+            mode.frequency = mode
+                .frequency
+                .clamp(STRUCTURAL_BAND_HZ.0, STRUCTURAL_BAND_HZ.1);
+        }
+
+        let peak = modes
+            .iter()
+            .fold(0.0f32, |acc, mode| acc.max(mode.weight))
+            .max(1e-9);
+        for mode in modes.iter_mut() {
+            mode.weight /= peak;
+        }
+        modes
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +500,125 @@ mod tests {
         }
         let half = (n / 2) as f32;
         2.0 * (re * re + im * im).sqrt() / half
+    }
+
+    #[test]
+    fn the_first_mode_is_the_block_resonance_law() {
+        // The anchor: whatever else the bank grows, mode one is exactly the
+        // rumble the synth has always had, so the existing calibration survives.
+        for mass in [95.0, 110.0, 180.0, 240.0, 320.0] {
+            let spec = StructuralSpec::new(mass, 0.094, 4);
+            let law = block_resonance_hz(mass as f32);
+            assert!(
+                (spec.modes()[0].frequency - law).abs() < 1e-4,
+                "mode one is {} Hz, the law says {law} Hz",
+                spec.modes()[0].frequency
+            );
+        }
+    }
+
+    #[test]
+    fn every_bending_mode_scales_as_one_over_root_mass() {
+        // Four times the mass, half the frequency — in all three bending modes,
+        // because they share one stiffness and one mass.
+        let light = StructuralSpec::new(80.0, 0.094, 4);
+        let heavy = StructuralSpec::new(320.0, 0.094, 4);
+        for n in 0..BEAM_EIGENVALUES.len() {
+            let ratio = light.bending_hz(n) / heavy.bending_hz(n);
+            assert!(
+                (ratio - 2.0).abs() < 0.01,
+                "mode {n}: {ratio} instead of 2 for a quarter of the mass"
+            );
+        }
+    }
+
+    #[test]
+    fn bending_modes_stand_in_the_free_free_beam_ratios() {
+        // A free-free beam's modes go as (beta_n L)^2, whatever it is made of:
+        // 1 : 2.76 : 5.40.
+        let spec = StructuralSpec::default();
+        let first = spec.bending_hz(0);
+        for (n, beta) in BEAM_EIGENVALUES.iter().enumerate() {
+            let expected = first * (beta / BEAM_EIGENVALUES[0]).powi(2);
+            assert!(
+                (spec.bending_hz(n) - expected).abs() < 1e-3,
+                "mode {n} at {} Hz, beam theory says {expected} Hz",
+                spec.bending_hz(n)
+            );
+        }
+    }
+
+    #[test]
+    fn an_alloy_block_rings_higher_than_an_iron_one_of_the_same_size() {
+        // The asymmetry the whole module rests on: same castings, same bores,
+        // two thirds of the mass. Stiffness barely moves, so every family goes
+        // up — the bending modes through the mass law, the bore walls through
+        // the envelope density.
+        let iron = StructuralSpec::new(240.0, 0.094, 4);
+        let alloy = StructuralSpec::new(150.0, 0.094, 4);
+        assert!(
+            alloy.bending_hz(0) > iron.bending_hz(0) * 1.2,
+            "alloy bending {} vs iron {}",
+            alloy.bending_hz(0),
+            iron.bending_hz(0)
+        );
+        assert!(
+            alloy.bore_wall_hz(2.0) > iron.bore_wall_hz(2.0) * 1.2,
+            "alloy bore wall {} vs iron {}",
+            alloy.bore_wall_hz(2.0),
+            iron.bore_wall_hz(2.0)
+        );
+        // The pan is a steel pressing either way, and does not move.
+        assert!((alloy.pan_hz() - iron.pan_hz()).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_thicker_wall_between_the_bores_rings_higher() {
+        // Bore spacing, not bore, sets the metal that is doing the ringing.
+        let tight = StructuralSpec::new(180.0, 0.094, 4).with_bore_spacing(0.100);
+        let generous = StructuralSpec::new(180.0, 0.094, 4).with_bore_spacing(0.120);
+        assert!(
+            generous.bore_wall_hz(2.0) > tight.bore_wall_hz(2.0),
+            "{} Hz on 120 mm centres against {} Hz on 100",
+            generous.bore_wall_hz(2.0),
+            tight.bore_wall_hz(2.0)
+        );
+    }
+
+    #[test]
+    fn a_longer_block_drums_lower() {
+        // A pan is a panel: stretch it and its fundamental falls.
+        let four = StructuralSpec::new(180.0, 0.086, 4);
+        let six = StructuralSpec::new(180.0, 0.086, 6);
+        assert!(
+            six.pan_hz() < four.pan_hz(),
+            "six-cylinder pan at {} Hz, four at {}",
+            six.pan_hz(),
+            four.pan_hz()
+        );
+    }
+
+    #[test]
+    fn derived_modes_are_ordered_finite_and_audible() {
+        for spec in [
+            StructuralSpec::default(),
+            StructuralSpec::new(95.0, 0.105, 2),
+            StructuralSpec::new(260.0, 0.084, 6),
+            // Degenerate: no cylinders, a zero bore, a nonsense spacing.
+            StructuralSpec::new(0.0, 0.0, 0).with_bore_spacing(-1.0),
+        ] {
+            for mode in spec.modes() {
+                assert!(
+                    mode.frequency.is_finite() && (5.0..20_000.0).contains(&mode.frequency),
+                    "{mode:?} is not an audible structural mode"
+                );
+                assert!(mode.q.is_finite() && mode.q > 0.5, "{mode:?} has no Q");
+                assert!(
+                    mode.weight.is_finite() && (0.0..=1.0).contains(&mode.weight),
+                    "{mode:?} is not normalised"
+                );
+            }
+        }
     }
 
     #[test]
