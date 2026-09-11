@@ -472,14 +472,18 @@ impl SnapshotSource {
         // its timing are still the solver's; only the burn fraction is
         // overridden.
         //
-        // If the block later gains a real ignition-cut input, this override
-        // should come out and the ring value should be trusted directly.
-        let burned_at_evo = if controls.spark_cut {
+        let tip_in = if block.ecu.dfco_tip_in {
+            block.ecu.tip_in_fuel_mass
+        } else {
+            0.0
+        };
+        let spark_cut = controls.spark_cut || block.ecu.dfco_tip_in;
+        let burned_at_evo = if spark_cut {
             0.0
         } else {
             at_evo.burned_fraction
         };
-        let unburnt_fuel_mass = block.model.trapped_fuel_mass(at_evo.mass, burned_at_evo);
+        let unburnt_fuel_mass = block.model.trapped_fuel_mass(at_evo.mass, burned_at_evo) + tip_in;
 
         let (gamma, gas_constant) = block
             .exhaust_banks
@@ -560,7 +564,7 @@ impl SnapshotSource {
             turbo_surge: turbo_surge as f32,
             unburnt_fuel_mass: unburnt_fuel_mass as f32,
             friction_mep: friction_mep as f32,
-            spark_cut: controls.spark_cut,
+            spark_cut,
             knock_intensity,
             bore,
             peak_cylinder_pressure,

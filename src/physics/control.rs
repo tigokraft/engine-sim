@@ -121,8 +121,16 @@ pub struct EngineControlUnit {
     pub dfco_enabled: bool,
     /// Minimum engine speed for DFCO engagement [rev/min].
     pub dfco_rpm_threshold: f64,
+    /// Recovery engine speed below which DFCO disengages to maintain idle [rev/min].
+    pub dfco_recover_threshold: f64,
+    /// Closed-throttle threshold under which pedal is considered lifted [-].
+    pub dfco_throttle_threshold: f64,
     /// Current state of DFCO.
     pub dfco_active: bool,
+    /// Whether a throttle tip-in event occurred after DFCO.
+    pub dfco_tip_in: bool,
+    /// Unburnt fuel mass injected during a tip-in transient [kg].
+    pub tip_in_fuel_mass: f64,
     /// Current acceleration enrichment offset on AFR [-].
     pub accel_enrichment: f64,
     /// Previous throttle position for derivative calculation [-].
@@ -197,7 +205,11 @@ impl EngineControlUnit {
             accel_enrichment_decay: 0.15,
             dfco_enabled: true,
             dfco_rpm_threshold: 1_400.0,
+            dfco_recover_threshold: 1_200.0,
+            dfco_throttle_threshold: 0.03,
             dfco_active: false,
+            dfco_tip_in: false,
+            tip_in_fuel_mass: 30e-6,
             accel_enrichment: 0.0,
             prev_throttle: 0.0,
 
@@ -221,6 +233,38 @@ impl EngineControlUnit {
 
             cylinder_health: [CylinderHealth::healthy(); MAX_CYLINDERS],
         }
+    }
+
+    /// Evaluates deceleration fuel cut-off (DFCO) and tip-in states.
+    ///
+    /// When throttle is released (<= 0.03) at speeds above `dfco_rpm_threshold`,
+    /// injectors are shut off entirely. As the engine slows below `dfco_recover_threshold`,
+    /// or when throttle is reapplied, fuel is restored. Throttle reapplication triggers
+    /// a tip-in unburnt fuel spike into the exhaust.
+    pub fn update_dfco(&mut self, throttle: f64, rpm: f64) -> bool {
+        if !self.dfco_enabled {
+            self.dfco_active = false;
+            self.dfco_tip_in = false;
+            return false;
+        }
+
+        if self.dfco_active {
+            if throttle > self.dfco_throttle_threshold || rpm < self.dfco_recover_threshold {
+                self.dfco_active = false;
+                if throttle > self.dfco_throttle_threshold {
+                    self.dfco_tip_in = true;
+                }
+            }
+        } else {
+            if throttle <= self.dfco_throttle_threshold && rpm > self.dfco_rpm_threshold {
+                self.dfco_active = true;
+                self.dfco_tip_in = false;
+            } else if throttle > self.dfco_throttle_threshold {
+                self.dfco_tip_in = false;
+            }
+        }
+
+        self.dfco_active
     }
 
     /// Evaluates target AFR from load and speed, applying WOT enrichment,
@@ -371,6 +415,96 @@ mod tests {
         assert!(
             speed_lean < speed_stoich,
             "flame speed should drop when lean: lean={speed_lean} < stoich={speed_stoich}"
+        );
+    }
+
+    #[test]
+    fn dfco_engages_on_overrun_and_disengages_on_throttle_or_low_rpm() {
+        let mut ecu = EngineControlUnit::default();
+
+        // High rpm, throttle released: DFCO engages
+        assert!(ecu.update_dfco(0.0, 3_000.0));
+        assert!(ecu.dfco_active);
+        assert!(!ecu.dfco_tip_in);
+
+        // RPM drops below recovery threshold: DFCO disengages
+        assert!(!ecu.update_dfco(0.0, 1_100.0));
+        assert!(!ecu.dfco_active);
+
+        // Accelerating back up: closed throttle at 2500 rpm engages DFCO again
+        assert!(ecu.update_dfco(0.0, 2_500.0));
+        assert!(ecu.dfco_active);
+
+        // Driver tips into throttle: DFCO disengages and trips tip-in flag
+        assert!(!ecu.update_dfco(0.4, 2_400.0));
+        assert!(!ecu.dfco_active);
+        assert!(ecu.dfco_tip_in);
+
+        // Next frame with throttle open clears tip-in
+        assert!(!ecu.update_dfco(0.4, 2_400.0));
+        assert!(!ecu.dfco_tip_in);
+    }
+
+    #[test]
+    fn decel_fuel_cut_off_silences_combustion_while_mechanical_floor_continues() {
+        use crate::audio::{EngineControls, SnapshotSource};
+        use crate::environment::Environment;
+        use crate::physics::engine_block::EngineBlock;
+
+        let mut block = EngineBlock::cross_plane_v8(Environment::default());
+        // Settle the engine at 3000 RPM
+        for _ in 0..120 {
+            block.update(1.0 / 240.0, 3_000.0);
+        }
+        let fired_peak = block.ring.peak_pressure();
+
+        // Release throttle: DFCO activates
+        block.throttle = 0.0;
+        for _ in 0..120 {
+            block.update(1.0 / 240.0, 3_000.0);
+        }
+        assert!(block.model.fuel_cut, "fuel should be cut during DFCO");
+        let dfco_peak = block.ring.peak_pressure();
+
+        // Combustion pressure is silenced: peak pressure drops from combustion (~60 bar)
+        // to purely motored compression (~20 bar)
+        assert!(
+            dfco_peak < 0.6 * fired_peak,
+            "combustion was not silenced during DFCO: dfco={dfco_peak} vs fired={fired_peak}"
+        );
+
+        // Mechanical floor and pumping continue
+        let mut source = SnapshotSource::new(&block);
+        let snapshot = source.sample(&block, 3_000.0, 1.0 / 240.0, EngineControls::default());
+        assert!(
+            snapshot.friction_mep > 10_000.0,
+            "mechanical noise floor must continue during DFCO"
+        );
+        assert_eq!(
+            snapshot.unburnt_fuel_mass, 0.0,
+            "fuel-cut overrun must send zero unburnt fuel to the exhaust"
+        );
+
+        // Tip-in: driver presses pedal, fuel returns and unburnt fuel spike is produced
+        block.throttle = 0.5;
+        block.update(1.0 / 240.0, 3_000.0);
+        assert!(block.ecu.dfco_tip_in, "tip-in flag should be set");
+        let tip_in_snap = source.sample(
+            &block,
+            3_000.0,
+            1.0 / 240.0,
+            EngineControls {
+                throttle: 0.5,
+                spark_cut: false,
+            },
+        );
+        assert!(
+            tip_in_snap.unburnt_fuel_mass > 0.0,
+            "tip-in must produce unburnt fuel for an exhaust pop"
+        );
+        assert!(
+            tip_in_snap.spark_cut,
+            "tip-in must carry spark_cut flag to trigger backfire voice"
         );
     }
 }

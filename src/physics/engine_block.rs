@@ -1301,6 +1301,8 @@ impl EngineBlock {
         let afr = self.ecu.schedule_afr(load, rpm, self.throttle, frame_dt);
         self.model.air_fuel_ratio = afr;
         self.model.gas = GasProperties::for_afr(afr);
+        let dfco = self.ecu.update_dfco(self.throttle, rpm);
+        self.model.fuel_cut = dfco;
         let ports = self.port_conditions();
 
         // Destructured so the observer can borrow the ring while the solver

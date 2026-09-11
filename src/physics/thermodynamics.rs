@@ -703,6 +703,8 @@ pub struct CylinderModel {
     pub fuel_lhv: f64,
     /// Air/fuel mass ratio the charge is metered to [-].
     pub air_fuel_ratio: f64,
+    /// Whether fuel delivery is cut this cycle (DFCO or fuel-cut limiter).
+    pub fuel_cut: bool,
 }
 
 impl Default for CylinderModel {
@@ -716,6 +718,7 @@ impl Default for CylinderModel {
             knock: KnockModel::default(),
             fuel_lhv: GASOLINE_LHV,
             air_fuel_ratio: STOICH_AFR,
+            fuel_cut: false,
         }
     }
 }
@@ -904,6 +907,9 @@ impl CylinderModel {
     /// Only the *fresh* part of the trapped mass carries fuel, and it arrives as
     /// a metered mixture, so `m_fuel = m (1 - x_b) / (1 + AFR)`.
     pub fn trapped_fuel_mass(&self, mass: f64, burned_fraction: f64) -> f64 {
+        if self.fuel_cut {
+            return 0.0;
+        }
         let fresh = mass.max(0.0) * (1.0 - burned_fraction.clamp(0.0, 1.0));
         fresh / (1.0 + self.air_fuel_ratio.max(1e-3))
     }
