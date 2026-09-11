@@ -741,10 +741,28 @@ impl EnginePreset {
                 // primaries: on a diesel the exhaust manifold's job is to keep
                 // the pulse energy hot and get it to the wheel.
                 primaries: vec![PipeSection::from_diameter(0.30, 0.036, 750.0); 4],
-                collector: Collector::from_diameter(4, 0.052, 0.08),
+                // The turbine housing, which is where four primaries on a
+                // turbodiesel actually merge. The network has no turbine in it
+                // — the solver is atmospheric and says so — so what stands in
+                // for one here is the housing's *volume*, as the area the merge
+                // opens into: seventy-two millimetres over a hundred and ten is
+                // 0.45 litres, which is a real VGT housing for a two-litre
+                // engine. That is not the whole of what a turbine does to a
+                // blowdown pulse, since most of what it takes it takes as shaft
+                // work, but an area step that large takes the pulse out of the
+                // downstream pipe by reflecting it, which is the part of the
+                // answer this network can represent honestly.
+                collector: Collector::from_diameter(4, 0.072, 0.11),
                 secondary: vec![],
                 crossover: Crossover::None,
                 silencers: vec![
+                    // The aftertreatment can: an oxidation catalyst, a
+                    // wall-flow particulate filter and an SCR brick, nearly a
+                    // metre of ceramic monolith in one shell. Nothing on a
+                    // petrol car is remotely like it, and it is most of why a
+                    // modern diesel's tailpipe is the quietest part of it — a
+                    // wall-flow filter makes the gas pass *through* a porous
+                    // wall, which is a deep resistive layer by construction.
                     Silencer::Absorptive {
                         length: 0.55,
                         area: PI * 0.028 * 0.028,
@@ -1514,6 +1532,112 @@ mod tests {
                     diff_synth_samples
                 );
             }
+        }
+    }
+
+    /// Which of the engine's two radiating paths is left alive.
+    #[derive(Clone, Copy)]
+    enum Path {
+        /// Only the exhaust network: pipes, collector, silencers, tailpipe.
+        Pipe,
+        /// Only the block: the modal structure and the three sources into it.
+        Structure,
+    }
+
+    /// Radiated RMS of one preset with everything but one path muted [-].
+    ///
+    /// Both measurements are of the same engine, in the same environment, at
+    /// the same speed and throttle, through the same propagation model; the
+    /// only difference between them is which of the two buses is turned off.
+    /// The compressors are off in both, because a whistle is neither a pipe nor
+    /// a block and the diesel has one where the atmospheric four does not.
+    fn radiated_through(preset: &EnginePreset, rpm: f64, path: Path) -> f64 {
+        use crate::audio::dsp::EngineSynth;
+
+        let fs = 48_000.0;
+        let block = primed(preset, rpm);
+        let mut source = preset.snapshot_source(&block);
+        let snapshot = source.sample(&block, rpm, 1.0 / 240.0, EngineControls::wide_open());
+
+        let mut config = preset.synth_config(&block, fs);
+        config.intake_level = 0.0;
+        config.turbo = None;
+        config.roots = None;
+        config.centrifugal = None;
+        config.blow_off = None;
+        config.wastegate = None;
+        match path {
+            Path::Pipe => config.structure_level = 0.0,
+            Path::Structure => config.exhaust_level = 0.0,
+        }
+
+        let mut synth = EngineSynth::new(config);
+        synth.set_snapshot(&snapshot);
+        let mut buffer = vec![0.0f32; 2 * 48_000];
+        synth.render(&mut buffer, 2); // settle the pipes and the smoothers
+        synth.render(&mut buffer, 2);
+        let power: f64 = buffer
+            .chunks(2)
+            .map(|frame| {
+                let mono = 0.5 * (frame[0] + frame[1]) as f64;
+                mono * mono
+            })
+            .sum();
+        (power / (buffer.len() / 2) as f64).sqrt()
+    }
+
+    #[test]
+    fn the_diesel_radiates_through_its_block_and_the_petrol_four_through_its_pipe() {
+        // The test that validates Stage 8 as much as Stage 14. Combustion has
+        // two ways out of an engine — down the exhaust as gas, and through the
+        // castings as vibration — and which one carries the sound is not a
+        // mixing decision. It is decided by how fast the pressure rises and by
+        // what is standing in the way of the pulse, and those are both physics
+        // this crate solves rather than parameters anyone typed.
+        //
+        // A diesel puts a premixed spike into the first crank degrees of its
+        // burn and hangs a turbine in front of its tailpipe; an atmospheric
+        // petrol four does neither. Nothing below tells either engine which
+        // answer to give.
+        let diesel = EnginePreset::turbo_diesel_four();
+        let petrol = EnginePreset::inline_four();
+
+        let split = |preset: &EnginePreset, rpm: f64| {
+            let structure = radiated_through(preset, rpm, Path::Structure);
+            let pipe = radiated_through(preset, rpm, Path::Pipe);
+            assert!(
+                structure > 0.0 && pipe > 0.0,
+                "{} at {rpm:.0}: a path went silent — structure {structure:.6}, pipe {pipe:.6}",
+                preset.name
+            );
+            (structure / pipe, structure, pipe)
+        };
+
+        // The band a diesel is actually driven in: it idles at eight hundred
+        // and is on the limiter at five thousand, and everything it does for a
+        // living happens between the two.
+        for rpm in [1_500.0, 2_250.0, 3_000.0] {
+            let (diesel_ratio, diesel_structure, diesel_pipe) = split(&diesel, rpm);
+            let (petrol_ratio, petrol_structure, petrol_pipe) = split(&petrol, rpm);
+
+            assert!(
+                diesel_ratio > 1.0,
+                "at {rpm:.0} rpm the diesel is not structure-dominated: block \
+                 {diesel_structure:.5} against pipe {diesel_pipe:.5}"
+            );
+            assert!(
+                petrol_ratio < 1.0,
+                "at {rpm:.0} rpm the petrol four is not pipe-dominated: block \
+                 {petrol_structure:.5} against pipe {petrol_pipe:.5}"
+            );
+            // And the gap is not a rounding accident. Three times is the
+            // margin; it measures four and a half, consistently, across the
+            // range.
+            assert!(
+                diesel_ratio > 3.0 * petrol_ratio,
+                "at {rpm:.0} rpm the two engines radiate too much alike: diesel \
+                 {diesel_ratio:.3} against petrol {petrol_ratio:.3}"
+            );
         }
     }
 
