@@ -227,11 +227,14 @@ pub struct EngineSnapshot {
     /// index zero is the instant a cylinder's exhaust valve opens, whichever
     /// cylinder it is and wherever its firing offset puts it.
     pub cylinder_pressure: [f32; CYCLE_TABLE],
-    /// Mass flow leaving the cylinder through the exhaust port [kg/s].
+    /// Mass flow through the exhaust port [kg/s], positive *out* of the cylinder.
     ///
-    /// Positive *out* — the direction the pipe sees — and clamped there, so
-    /// reverse flow during overlap reads as a shut port rather than as a
-    /// negative excitation. Same phase convention as [`Self::cylinder_pressure`].
+    /// Signed, because reverse flow through an open valve is a real event with a
+    /// real sound: late in overlap the pipe can be above the cylinder and push
+    /// gas back through the port. What matters acoustically is that the valve is
+    /// *off its seat* — which is when the magnitude of this is non-zero — while
+    /// the direction the wave goes is set by the pressure difference driving it.
+    /// Same phase convention as [`Self::cylinder_pressure`].
     pub exhaust_port_flow: [f32; CYCLE_TABLE],
     /// Mass flow entering the cylinder through the intake port [kg/s].
     ///
@@ -323,11 +326,13 @@ impl EngineSnapshot {
             }
             *p = p.clamp(0.0, 50.0e6);
         }
-        for f in self
-            .exhaust_port_flow
-            .iter_mut()
-            .chain(self.intake_port_flow.iter_mut())
-        {
+        for f in self.exhaust_port_flow.iter_mut() {
+            if !f.is_finite() {
+                *f = 0.0;
+            }
+            *f = f.clamp(-50.0, 50.0);
+        }
+        for f in self.intake_port_flow.iter_mut() {
             if !f.is_finite() {
                 *f = 0.0;
             }
@@ -839,16 +844,21 @@ impl PopPool {
 /// # What the pipe is driven with
 ///
 /// ```text
-/// shape(phi) = [ P_cyl(phi) - P_manifold ]+  *  mdot_exh(phi) / max(mdot_exh)
+/// shape(phi) = ( P_cyl(phi) - P_manifold )  *  |mdot_exh(phi)| / max |mdot_exh|
 /// ```
 ///
-/// normalised so its own peak is one. The pressure excess is the driver — a pipe
-/// end is pushed by the gas behind it being at a higher pressure than the gas in
-/// it — and the port flow is the *window* that driver acts through: it is zero
-/// while the valve is on its seat, and its rise and fall are the valve's own
-/// opening and closing ramps. So the crack at EVO is exactly as fast as the cam
-/// makes it and no faster, and the long tail over the exhaust stroke sits where
-/// the cylinder has come down to manifold pressure and stops driving anything.
+/// normalised so the magnitude of its own peak is one. The pressure difference
+/// is the driver — a pipe end is pushed by the gas behind it being at a higher
+/// pressure than the gas in it, and pulled when it is lower — and the port flow
+/// is the *window* that driver acts through: gas moves through the port exactly
+/// when the valve is off its seat, so the magnitude of the flow is where the
+/// window is open and its rise and fall are the valve's own ramps. The crack at
+/// EVO is therefore as fast as the cam makes it and no faster.
+///
+/// Both signs matter. Late in overlap the pipe can stand above the cylinder and
+/// push gas back through the port; that is a rarefaction leaving the valve, not
+/// an absence of one, and clamping it away would leave a corner in the
+/// excitation where a real engine has a smooth reversal.
 ///
 /// Only the flow's *shape* is used, which is why it is normalised to its own
 /// peak: its magnitude is already in the pressure difference, and counting it
@@ -893,7 +903,7 @@ impl CycleTables {
     fn from_snapshot(snapshot: &EngineSnapshot) -> Self {
         let mut peak_flow = 0.0f32;
         for &flow in snapshot.exhaust_port_flow.iter() {
-            peak_flow = peak_flow.max(flow);
+            peak_flow = peak_flow.max(flow.abs());
         }
 
         let mut exhaust = [0.0f32; CYCLE_TABLE];
@@ -901,10 +911,10 @@ impl CycleTables {
             let manifold = snapshot.exhaust_manifold_pressure;
             let mut peak = 0.0f32;
             for (k, out) in exhaust.iter_mut().enumerate() {
-                let open = snapshot.exhaust_port_flow[k] / peak_flow;
-                let excess = (snapshot.cylinder_pressure[k] - manifold).max(0.0);
+                let open = snapshot.exhaust_port_flow[k].abs() / peak_flow;
+                let excess = snapshot.cylinder_pressure[k] - manifold;
                 *out = open * excess;
-                peak = peak.max(*out);
+                peak = peak.max(out.abs());
             }
             if peak > 0.0 {
                 for out in exhaust.iter_mut() {

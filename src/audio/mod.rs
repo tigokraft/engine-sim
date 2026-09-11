@@ -507,11 +507,11 @@ impl SnapshotSource {
         let cylinder_pressure = block.ring.downsample_from(self.evo_angle, |s| s.pressure);
         // The ring carries port flux positive *into* the cylinder. The exhaust
         // side is flipped so that positive means "leaving through the port",
-        // which is what the runner sees, and clamped so that reverse flow during
-        // overlap reads as a shut port rather than as a negative excitation.
+        // which is the direction the runner sees, and left signed: gas pushed
+        // back through an open valve is a real event, not a shut port.
         let exhaust_port_flow = block
             .ring
-            .downsample_from(self.evo_angle, |s| (-s.exhaust_flow).max(0.0));
+            .downsample_from(self.evo_angle, |s| -s.exhaust_flow);
         let intake_port_flow = block
             .ring
             .downsample_from(self.evo_angle, |s| s.intake_flow.max(0.0));
