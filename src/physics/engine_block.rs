@@ -35,7 +35,7 @@ use crate::physics::cylinder::{wrap_cycle, CylinderGeometry, GasProperties, CYCL
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
 use crate::physics::thermal::{EngineThermal, OilViscosity};
 use crate::physics::thermodynamics::{
-    CylinderModel, PortConditions, Rk4Solver, StepReport, ThermoState,
+    CylinderModel, HeatRelease, PortConditions, Rk4Solver, StepReport, ThermoState,
 };
 
 /// One cell per crank degree over the full four-stroke cycle.
@@ -1321,8 +1321,20 @@ impl EngineBlock {
     pub fn update(&mut self, frame_dt: f64, rpm: f64) -> BlockOutput {
         self.omega = rpm * 2.0 * PI / 60.0;
         let load = (self.intake.pressure() / self.environment.pressure.max(1.0)).clamp(0.0, 1.5);
-        let afr = self.ecu.schedule_afr(load, rpm, self.throttle, frame_dt);
-        self.model.air_fuel_ratio = afr;
+        // A compression-ignition engine has no throttle plate and no lambda
+        // target. It draws a full cylinder of air on every stroke whatever the
+        // load and meters fuel into that, so it is lean everywhere and never
+        // anything else — and the AFR schedule, which is a spark engine's map
+        // of how rich to run and when, has nothing to say about it. Its mixture
+        // is its own.
+        let afr = match self.model.combustion {
+            HeatRelease::Spark(_) => {
+                let scheduled = self.ecu.schedule_afr(load, rpm, self.throttle, frame_dt);
+                self.model.air_fuel_ratio = scheduled;
+                scheduled
+            }
+            HeatRelease::Compression(_) => self.model.air_fuel_ratio,
+        };
         self.model.gas = GasProperties::for_afr(afr);
         let limiter = self.ecu.evaluate_limiter(rpm);
         let dfco = self.ecu.update_dfco(self.throttle, rpm);
