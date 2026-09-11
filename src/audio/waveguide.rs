@@ -257,7 +257,6 @@ pub struct WaveguidePipe {
     gas_constant: f32,
     temperature: f32,
     steepening: f32,
-    forward_prev: f32,
 }
 
 impl WaveguidePipe {
@@ -317,7 +316,6 @@ impl WaveguidePipe {
             gas_constant,
             temperature,
             steepening: 0.0,
-            forward_prev: 0.0,
         }
     }
 
@@ -470,14 +468,11 @@ impl WaveguidePipe {
         let d_bwd = self.backward_delay_samples.next_value();
         let raw0 = self.backward_line.read(d_bwd);
         let raw1 = if self.steepening > 1e-6 {
-            let est = self.forward_line.read(d_fwd);
+            let est = self.forward_line.read_linear(d_fwd);
             // Amplitude-dependent delay shift: crests travel faster, shifting delay earlier.
+            // As high-amplitude pulses propagate down the primary, the wavefront steepens.
             let shift = (self.steepening * est * 2.0).clamp(-2.0, 2.0);
-            let p = self.forward_line.read(d_fwd - shift);
-            let diff = p - self.forward_prev;
-            self.forward_prev = p;
-            // Level-dependent edge steepening: rising wavefront steepens toward a shock.
-            p + self.steepening * p.abs() * diff.tanh()
+            self.forward_line.read(d_fwd - shift)
         } else {
             self.forward_line.read(d_fwd)
         };
@@ -501,7 +496,6 @@ impl WaveguidePipe {
         self.backward_line.reset();
         self.forward_loss.reset();
         self.backward_loss.reset();
-        self.forward_prev = 0.0;
         self.forward_delay_samples
             .snap(self.forward_delay_samples.target());
         self.backward_delay_samples

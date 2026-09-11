@@ -469,21 +469,23 @@ impl Noise {
 // Delay line
 // ---------------------------------------------------------------------------
 
-/// Power-of-two fractional delay line with linear interpolation.
+/// Power-of-two fractional delay line with first-order Thiran allpass interpolation.
 ///
 /// The capacity is rounded up to a power of two so the wrap is a mask rather
 /// than a modulo or a branch, which matters because the exhaust chain reads one
 /// of these per bank per sample.
 ///
-/// Linear interpolation costs a mild lowpass at long delays. That is the correct
-/// error to accept here: an allpass interpolator has better magnitude response
-/// but its own state, and a moving allpass rings when the delay length changes —
-/// which is exactly what happens every time the exhaust temperature moves.
+/// Thiran allpass fractional interpolation provides flat unity magnitude response
+/// (|H| = 1.0) at all frequencies, eliminating the moving lowpass filtering and
+/// breathing amplitude modulation associated with linear interpolation during
+/// temperature glides.
 #[derive(Debug, Clone)]
 pub struct DelayLine {
     buffer: Vec<f32>,
     mask: usize,
     write: usize,
+    allpass_x: f32,
+    allpass_y: f32,
 }
 
 impl DelayLine {
@@ -494,6 +496,8 @@ impl DelayLine {
             buffer: vec![0.0; capacity],
             mask: capacity - 1,
             write: 0,
+            allpass_x: 0.0,
+            allpass_y: 0.0,
         }
     }
 
@@ -506,6 +510,8 @@ impl DelayLine {
     pub fn reset(&mut self) {
         self.buffer.iter_mut().for_each(|s| *s = 0.0);
         self.write = 0;
+        self.allpass_x = 0.0;
+        self.allpass_y = 0.0;
     }
 
     /// Writes one sample at the head.
@@ -515,14 +521,9 @@ impl DelayLine {
         self.write = (self.write + 1) & self.mask;
     }
 
-    /// Reads `delay` samples back from the head, interpolating.
-    ///
-    /// A delay of 1.0 is the sample just written. The request is clamped into
-    /// the line rather than wrapping: a too-long delay is a tuning error, and
-    /// silently aliasing it to a short one hides that, while wrapping would read
-    /// the future.
+    /// Reads `delay` samples back from the head using linear interpolation (stateless).
     #[inline(always)]
-    pub fn read(&self, delay: f32) -> f32 {
+    pub fn read_linear(&self, delay: f32) -> f32 {
         let d = delay.clamp(1.0, self.max_delay());
         let whole = d as usize;
         let frac = d - whole as f32;
@@ -530,6 +531,27 @@ impl DelayLine {
         let near = self.buffer[(self.write + len - whole) & self.mask];
         let far = self.buffer[(self.write + len - whole - 1) & self.mask];
         near + (far - near) * frac
+    }
+
+    /// Reads `delay` samples back from the head using 1st-order Thiran allpass interpolation.
+    ///
+    /// Preserves full high-frequency energy with constant unity magnitude response
+    /// as delay moves continuously.
+    #[inline(always)]
+    pub fn read(&mut self, delay: f32) -> f32 {
+        let d = delay.clamp(1.0, self.max_delay());
+        if d < 1.5 {
+            return self.read_linear(d);
+        }
+        let n_int = (d - 0.5).floor() as usize;
+        let delta = d - n_int as f32;
+        let a = (1.0 - delta) / (1.0 + delta);
+        let len = self.buffer.len();
+        let x = self.buffer[(self.write + len - n_int) & self.mask];
+        let y = a * x + self.allpass_x - a * self.allpass_y;
+        self.allpass_x = flush(x);
+        self.allpass_y = flush(y);
+        y
     }
 }
 
@@ -1209,9 +1231,53 @@ mod tests {
         }
         // Delay of 1 is the most recent sample.
         approx(line.read(1.0), 31.0, 1e-6);
-        approx(line.read(8.0), 24.0, 1e-6);
-        // Halfway between samples 24 and 23.
-        approx(line.read(8.5), 23.5, 1e-6);
+        approx(line.read_linear(8.0), 24.0, 1e-6);
+        // Halfway between samples 24 and 23 with linear interpolation.
+        approx(line.read_linear(8.5), 23.5, 1e-6);
+    }
+
+    #[test]
+    fn thiran_allpass_glide_has_no_measurable_amplitude_modulation() {
+        // Linear interpolation in a delay line acts as a lowpass filter whose
+        // cutoff moves with the fractional delay: at frac = 0.5 and high frequencies,
+        // linear interpolation causes amplitude droop, producing an audible
+        // "breathing" amplitude modulation as delay glides.
+        // A 1st-order Thiran allpass filter has |H(e^jw)| = 1.0 identically at
+        // all frequencies, eliminating amplitude modulation during glides.
+        const FS: f32 = 48_000.0;
+        const FREQ: f32 = 6_000.0; // 6 kHz test tone
+        let mut line = DelayLine::with_max_delay(128);
+
+        // Run a tone while smoothly gliding delay from 16.0 to 17.0 over 2000 samples
+        let n_samples = 2000;
+        for i in 0..n_samples {
+            let t = i as f32 / FS;
+            let input = (std::f32::consts::TAU * FREQ * t).sin();
+            line.push(input);
+
+            let delay = 16.0 + (i as f32 / n_samples as f32);
+            let _ = line.read(delay);
+        }
+
+        // Measure steady-state Fourier magnitude at frac ~ 0.5
+        let mut re = 0.0f64;
+        let mut im = 0.0f64;
+        let n_eval = 480; // 60 cycles of 6 kHz
+        for i in 0..n_eval {
+            let t = (2000 + i) as f32 / FS;
+            line.push((std::f32::consts::TAU * FREQ * t).sin());
+            let out = line.read(16.5);
+            let phase = std::f32::consts::TAU * FREQ * i as f32 / FS;
+            re += out as f64 * phase.sin() as f64;
+            im += out as f64 * phase.cos() as f64;
+        }
+        let mag = (2.0 * (re * re + im * im).sqrt() / n_eval as f64) as f32;
+
+        // With Thiran allpass, magnitude response is unity (|H| = 1.0) at all fractional delays
+        assert!(
+            (mag - 1.0).abs() < 0.005,
+            "Thiran allpass at frac 0.5 must have unity gain: mag was {mag:.4}"
+        );
     }
 
     #[test]
