@@ -492,6 +492,13 @@ fn index_markdown(all: &[Measured]) -> String {
          docs/measurements\n```\n"
     );
 
+    let _ = writeln!(
+        out,
+        "[Calibration](calibration.md) is the other half of this directory: \
+         these tables say what the catalogue sounds like, and that one says how \
+         far it is from what its own crank and its own plumbing predict.\n"
+    );
+
     let _ = writeln!(out, "## What the numbers are\n");
     let _ = writeln!(
         out,

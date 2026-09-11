@@ -8,6 +8,8 @@ Regenerate the whole directory with:
 cargo run --release --example measure -- --markdown docs/measurements
 ```
 
+[Calibration](calibration.md) is the other half of this directory: these tables say what the catalogue sounds like, and that one says how far it is from what its own crank and its own plumbing predict.
+
 ## What the numbers are
 
 **Order levels.** An engine order is a frequency in cycles per crank revolution, so order `n` sits at `f = n * rpm / 60` and follows the engine up and down the rev range. A four-stroke fires `N_cyl / 2` times a revolution, so an inline-four's firing order is 2, a V8's is 4 and a V12's is 6. Levels are dBFS on an amplitude reference: a full-scale sine is 0 dB. Each figure is the level averaged in power over every analysis frame of that render.
