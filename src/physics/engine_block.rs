@@ -30,7 +30,7 @@
 use std::f64::consts::PI;
 
 use crate::environment::Environment;
-use crate::physics::control::EngineControlUnit;
+use crate::physics::control::{EngineControlUnit, LimiterCut};
 use crate::physics::cylinder::{wrap_cycle, CylinderGeometry, GasProperties, CYCLE_ANGLE};
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
 use crate::physics::thermal::{EngineThermal, OilViscosity};
@@ -1301,8 +1301,9 @@ impl EngineBlock {
         let afr = self.ecu.schedule_afr(load, rpm, self.throttle, frame_dt);
         self.model.air_fuel_ratio = afr;
         self.model.gas = GasProperties::for_afr(afr);
+        let limiter = self.ecu.evaluate_limiter(rpm);
         let dfco = self.ecu.update_dfco(self.throttle, rpm);
-        self.model.fuel_cut = dfco;
+        self.model.fuel_cut = dfco || limiter == LimiterCut::Fuel;
         self.model.wiebe.spark_angle = self.ecu.spark_angle(load, rpm);
         let ports = self.port_conditions();
 

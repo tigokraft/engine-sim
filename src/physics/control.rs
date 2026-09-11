@@ -171,6 +171,8 @@ pub struct EngineControlUnit {
     pub limiter_soft_margin: f64,
     /// Step counter for rotating cylinder stutter.
     pub stutter_counter: usize,
+    /// Currently active limiter cut state.
+    pub active_cut: LimiterCut,
 
     // --- Cylinder health ---
     /// Per-cylinder operational health.
@@ -179,7 +181,7 @@ pub struct EngineControlUnit {
 
 impl Default for EngineControlUnit {
     fn default() -> Self {
-        Self::new(6_500.0)
+        Self::new(8_000.0)
     }
 }
 
@@ -231,9 +233,55 @@ impl EngineControlUnit {
             limiter_cut_type: LimiterCut::Spark,
             limiter_soft_margin: 200.0,
             stutter_counter: 0,
+            active_cut: LimiterCut::None,
 
             cylinder_health: [CylinderHealth::healthy(); MAX_CYLINDERS],
         }
+    }
+
+    /// Evaluates the rev limiter intervention for the current speed.
+    ///
+    /// - `HardCut`: 100% intervention when RPM >= redline.
+    /// - `SoftCut`: progressive cut duty cycle in the margin below redline.
+    /// - `RotatingStutter`: alternating cylinder cuts producing a rapid stutter pattern.
+    pub fn evaluate_limiter(&mut self, rpm: f64) -> LimiterCut {
+        self.stutter_counter = self.stutter_counter.wrapping_add(1);
+        if self.limiter_cut_type == LimiterCut::None {
+            self.active_cut = LimiterCut::None;
+            return LimiterCut::None;
+        }
+
+        let is_cut = match self.limiter_mode {
+            LimiterMode::HardCut => rpm >= self.redline,
+            LimiterMode::SoftCut => {
+                let margin = self.limiter_soft_margin.max(50.0);
+                let threshold = self.redline - margin;
+                if rpm < threshold {
+                    false
+                } else if rpm >= self.redline {
+                    true
+                } else {
+                    let progress = (rpm - threshold) / margin;
+                    let slot = self.stutter_counter % 8;
+                    let cut_slots = (progress * 8.0).round() as usize;
+                    slot < cut_slots
+                }
+            }
+            LimiterMode::RotatingStutter => {
+                if rpm >= self.redline {
+                    self.stutter_counter.is_multiple_of(2)
+                } else {
+                    false
+                }
+            }
+        };
+
+        self.active_cut = if is_cut {
+            self.limiter_cut_type
+        } else {
+            LimiterCut::None
+        };
+        self.active_cut
     }
 
     /// Evaluates deceleration fuel cut-off (DFCO) and tip-in states.
@@ -669,5 +717,74 @@ mod tests {
             "knock retard must be positive to hold knock off: {}",
             ecu.knock_retard
         );
+    }
+
+    #[test]
+    fn hard_cut_limiter_engages_sharply_at_redline() {
+        let mut ecu = EngineControlUnit::new(6_500.0);
+        ecu.limiter_mode = LimiterMode::HardCut;
+        ecu.limiter_cut_type = LimiterCut::Spark;
+
+        // Below redline: no cut
+        assert_eq!(ecu.evaluate_limiter(6_490.0), LimiterCut::None);
+        assert_eq!(ecu.active_cut, LimiterCut::None);
+
+        // At and above redline: sharp cut
+        assert_eq!(ecu.evaluate_limiter(6_500.0), LimiterCut::Spark);
+        assert_eq!(ecu.active_cut, LimiterCut::Spark);
+        assert_eq!(ecu.evaluate_limiter(6_600.0), LimiterCut::Spark);
+    }
+
+    #[test]
+    fn soft_cut_limiter_engages_progressively_below_redline() {
+        let mut ecu = EngineControlUnit::new(6_500.0);
+        ecu.limiter_mode = LimiterMode::SoftCut;
+        ecu.limiter_cut_type = LimiterCut::Fuel;
+        ecu.limiter_soft_margin = 200.0; // threshold = 6300 RPM
+
+        // Below soft cut threshold: 0 cuts
+        let below = (0..16)
+            .filter(|_| ecu.evaluate_limiter(6_250.0) != LimiterCut::None)
+            .count();
+        assert_eq!(below, 0, "no cuts below soft threshold");
+
+        // Midway through margin (6400 RPM): partial intervention
+        let midway = (0..16)
+            .filter(|_| ecu.evaluate_limiter(6_400.0) != LimiterCut::None)
+            .count();
+        assert!(
+            midway > 0 && midway < 16,
+            "soft cut must progressively intervene: {midway}/16"
+        );
+
+        // At or above redline: full intervention
+        let above = (0..16)
+            .filter(|_| ecu.evaluate_limiter(6_550.0) != LimiterCut::None)
+            .count();
+        assert_eq!(above, 16, "full cut above redline");
+    }
+
+    #[test]
+    fn rotating_stutter_alternates_cylinder_cuts() {
+        let mut ecu = EngineControlUnit::new(6_500.0);
+        ecu.limiter_mode = LimiterMode::RotatingStutter;
+        ecu.limiter_cut_type = LimiterCut::Spark;
+
+        // Below redline: no cuts
+        for _ in 0..10 {
+            assert_eq!(ecu.evaluate_limiter(6_000.0), LimiterCut::None);
+        }
+
+        // Above redline: alternating cut pattern (stutter)
+        let cuts: Vec<bool> = (0..6)
+            .map(|_| ecu.evaluate_limiter(6_600.0) == LimiterCut::Spark)
+            .collect();
+        // Alternating true/false
+        for pair in cuts.windows(2) {
+            assert_ne!(
+                pair[0], pair[1],
+                "stutter limiter must alternate firing cuts"
+            );
+        }
     }
 }

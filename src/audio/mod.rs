@@ -477,7 +477,10 @@ impl SnapshotSource {
         } else {
             0.0
         };
-        let spark_cut = controls.spark_cut || block.ecu.dfco_tip_in;
+        let limiter_spark = block.ecu.active_cut == crate::physics::control::LimiterCut::Spark;
+        let limiter_fuel = block.ecu.active_cut == crate::physics::control::LimiterCut::Fuel;
+        let spark_cut =
+            (controls.spark_cut || block.ecu.dfco_tip_in || limiter_spark) && !limiter_fuel;
         let burned_at_evo = if spark_cut {
             0.0
         } else {
