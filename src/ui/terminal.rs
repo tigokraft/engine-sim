@@ -1721,6 +1721,24 @@ mod tests {
     }
 
     #[test]
+    fn the_cycle_panel_swaps_knock_for_ignition_delay_on_a_diesel() {
+        // A knock integral is a petrol engine's margin against a failure. On a
+        // compression engine the same integral reaching one is the engine
+        // working, so the panel has to report the other half of it — how long
+        // the charge took — or it is showing a number that cannot vary.
+        let mut dashboard = Dashboard::new();
+        let petrol = screen(&dashboard, 140, 45);
+        assert!(petrol.contains("knock integral"), "{petrol}");
+        assert!(!petrol.contains("ignition delay"));
+
+        dashboard.telemetry.ignition_delay = Some(0.850e-3);
+        let diesel = screen(&dashboard, 140, 45);
+        assert!(diesel.contains("ignition delay"), "{diesel}");
+        assert!(diesel.contains("0.85 ms"), "{diesel}");
+        assert!(!diesel.contains("knock integral"));
+    }
+
+    #[test]
     fn the_turbo_readout_says_so_when_there_is_no_turbo() {
         // Zero rpm on a gauge reads as a stopped turbo, not as an engine that
         // never had one — which is the whole distinction this dashboard exists
