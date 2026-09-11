@@ -646,6 +646,71 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The audible exhaust mode is set by the declared primary length: stretch
+    /// the primaries by half and the peak near their quarter wave drops by
+    /// about half as much again.
+    ///
+    /// End to end, through the physics, the whole network, the radiation model
+    /// and the analysis — which is what makes it worth having and also what
+    /// limits what it can claim. The relation is *not* asserted to be `c/4L`
+    /// exactly, because as measured it is not: a primary's peak moves with its
+    /// own length and with the collector taper and chain behind it, so
+    /// stretching the inline-four's primaries by half moves the peak from
+    /// 403 Hz to 244 Hz where strict proportionality says 269. Twenty per cent
+    /// either side of proportional is the stated tolerance, and it is wide
+    /// enough to hold the taper's share and narrow enough to fail a synth that
+    /// had stopped reading the length at all — which is the regression this is
+    /// here to catch. The exact placement against `c/4(L+d)` per preset is
+    /// recorded in `docs/measurements/calibration.md`.
+    #[test]
+    fn the_exhaust_peak_follows_the_declared_primary_length() {
+        use crate::analysis::orders::{place, resonances, PLACEMENT_WINDOW_PCT};
+        use crate::audio::filters::speed_of_sound;
+        use crate::physics::plumbing::PipeSection;
+
+        /// How much longer the stretched primaries are.
+        const STRETCH: f64 = 1.5;
+        /// How far from strict proportionality the peak may land.
+        const TOLERANCE: f64 = 0.20;
+
+        // A primary at the temperature the solver settles them to through a
+        // pull, which is all the prediction is for: it only has to be close
+        // enough to find the right peak.
+        let nominal_c = speed_of_sound(1.33, 287.0, 1_200.0) as f64;
+        let measure_peak = |factor: f64| -> f64 {
+            let mut preset = EnginePreset::inline_four();
+            let primary = preset.exhaust.primaries[0];
+            preset.exhaust.primaries = vec![
+                PipeSection::from_diameter(
+                    primary.length * factor,
+                    primary.diameter(),
+                    primary.wall_temperature,
+                );
+                preset.firing.len()
+            ];
+
+            let script = script::calibration_sweep(&preset);
+            let render = RenderPlan::new(&preset, &script).render();
+            let peaks = resonances(&render.mono(), render.sample_rate, 24);
+            let predicted = nominal_c / (4.0 * preset.exhaust.primary_length());
+            place(predicted, &peaks, PLACEMENT_WINDOW_PCT)
+                .measured_hz
+                .unwrap_or_else(|| {
+                    panic!("no peak within reach of {predicted:.0} Hz at {factor}x length")
+                })
+        };
+
+        let short = measure_peak(1.0);
+        let long = measure_peak(STRETCH);
+        let ratio = long / short;
+        assert!(
+            (ratio - 1.0 / STRETCH).abs() <= TOLERANCE / STRETCH,
+            "primaries {STRETCH}x longer moved the peak from {short:.1} Hz to \
+             {long:.1} Hz, a ratio of {ratio:.3} where proportional is {:.3}",
+            1.0 / STRETCH
+        );
+    }
+
     /// The comparator catches what it is there to catch, without rendering
     /// anything: a level that moved, a resonance that moved, a quiet order that
     /// climbed out of the floor, and a tilt that flattened.
