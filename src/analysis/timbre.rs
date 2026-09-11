@@ -553,6 +553,99 @@ mod tests {
         );
     }
 
+    /// The whole calibration loop, end to end: a render written to a file,
+    /// read back at a quarter of the level, order-tracked against a supplied
+    /// speed curve, and compared with the render it came from.
+    ///
+    /// The reference here is the synth's own output, so this is a test of the
+    /// *loop* and not of the model — it cannot say the engine sounds right, and
+    /// no reference recording is committed for it to ask. What it does say is
+    /// that the parts between a file on disk and a per-order comparison are
+    /// sound: the WAV survives the round trip, a supplied curve puts the orders
+    /// where they belong, and twelve decibels of gain between the two sides
+    /// cancels out of every figure in the table. If that last part ever breaks,
+    /// a calibration against a real recording becomes a measurement of the
+    /// recording's mastering.
+    #[test]
+    fn the_reference_loop_matches_a_render_to_itself_at_another_level() {
+        use crate::analysis::orders::{Reference, RpmCurve};
+        use crate::analysis::render::{read_wav, write_wav};
+
+        let preset = EnginePreset::inline_four();
+        let script = script::calibration_sweep(&preset);
+        let render = RenderPlan::new(&preset, &script).render();
+
+        let dir = std::env::temp_dir().join("engine-sim-reference-loop");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("inline-4-sweep.wav");
+        // A quarter of the amplitude: a recording arrives at whatever level the
+        // chain that made it left it at.
+        let quiet: Vec<f32> = render.samples.iter().map(|s| s * 0.25).collect();
+        write_wav(
+            &path,
+            &quiet,
+            render.channels as u16,
+            render.sample_rate as u32,
+        )
+        .expect("writing the reference");
+
+        let recording = read_wav(&path).expect("reading the reference");
+        assert_eq!(recording.channels, render.channels);
+        assert!((recording.seconds() - render.seconds()).abs() < 1e-6);
+
+        // The curve is supplied from outside, as a recording's has to be: two
+        // endpoints of a pull, exactly as `--rpm 850:7400` gives it.
+        let supplied = RpmCurve::sweep(preset.idle, preset.redline, recording.seconds());
+        let firing_order = preset.firing.len() as f64 / 2.0;
+        let reference = Reference::extract(
+            &recording.mono(),
+            recording.sample_rate,
+            &supplied,
+            &half_orders(),
+        );
+
+        let measured = measure(&preset);
+        let mine = orders::Balance::from_levels(
+            firing_order,
+            &measured
+                .balance
+                .iter()
+                .map(|&(order, db)| (order, (db > SILENCE_DB).then_some(db)))
+                .collect::<Vec<_>>(),
+        );
+        // The same render at full scale, for a level to compare against.
+        let loud = orders::track(
+            &render.mono(),
+            render.sample_rate,
+            &render.rpm,
+            &half_orders(),
+        )
+        .line_balance(firing_order);
+
+        let theirs = reference.orders.line_balance(firing_order);
+
+        // Twelve decibels apart in absolute level, and the same engine.
+        assert!(
+            (loud.reference_db - theirs.reference_db - 12.04).abs() < 0.1,
+            "a quarter of the amplitude read {:.2} dB down, not 12.04",
+            loud.reference_db - theirs.reference_db
+        );
+        let comparison = mine.against(&theirs);
+        assert!(
+            comparison.deltas.len() >= 4,
+            "only {} orders compared",
+            comparison.deltas.len()
+        );
+        assert!(
+            comparison.within(LEVEL_TOLERANCE_DB),
+            "the loop disagreed with itself by {:.2} dB on order {:?}",
+            comparison.max_abs_db(),
+            comparison.worst().map(|d| d.order),
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The comparator catches what it is there to catch, without rendering
     /// anything: a level that moved, a resonance that moved, a quiet order that
     /// climbed out of the floor, and a tilt that flattened.
