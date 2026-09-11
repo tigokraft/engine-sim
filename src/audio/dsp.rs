@@ -4066,6 +4066,87 @@ mod tests {
         );
     }
 
+    // -- combustion noise ----------------------------------------------------
+
+    /// A cycle whose combustion rise takes `rise` of the cycle, reaching the
+    /// same `peak` however long it takes, and blowing down identically after.
+    ///
+    /// The whole point is that everything except the *steepness* is held: same
+    /// peak pressure, same blowdown, same valve events. What is left to hear is
+    /// combustion noise.
+    fn cycle_with_rise(peak: f32, rise: f32) -> [f32; CYCLE_TABLE] {
+        /// Cycle phase the rise finishes at, leaving a short plateau.
+        const RISE_END: f32 = 0.97;
+        let mut pressure = [TEST_MANIFOLD_PA; CYCLE_TABLE];
+        for (k, p) in pressure.iter_mut().enumerate() {
+            let phi = (k as f32 + 0.5) / CYCLE_TABLE as f32;
+            if phi < 0.25 {
+                // Blowdown from the peak the cycle reached, through the open
+                // valve, exactly as the previous stroke left it.
+                *p = TEST_MANIFOLD_PA + peak * (-phi / 0.04).exp();
+            } else if phi > RISE_END {
+                // Held at the peak for the last few degrees before the valve
+                // opens, so both traces reach it on a sampled point rather than
+                // between two of them.
+                *p = TEST_MANIFOLD_PA + peak;
+            } else if phi > RISE_END - rise {
+                // A raised-cosine rise: smooth at both ends, so the only thing
+                // that changes between two of these is how long it takes.
+                let u = (phi - (RISE_END - rise)) / rise;
+                *p = TEST_MANIFOLD_PA + peak * 0.5 * (1.0 - (TAU * 0.5 * u).cos());
+            }
+        }
+        pressure
+    }
+
+    #[test]
+    fn a_steeper_pressure_rise_radiates_more() {
+        // The diesel-clatter mechanism, and the reason the structural path is
+        // driven by `dP/dtheta` rather than by peak pressure: a charge that
+        // arrives all at once puts its energy where a stiff lump of iron will
+        // answer, and one that arrives gently does not. Both cycles here reach
+        // exactly 60 bar.
+        let level_for = |rise: f32| {
+            let mut config = SynthConfig::cross_plane_v8(FS);
+            // Everything but the block silenced, including the two other
+            // sources that drive it.
+            config.exhaust_level = 0.0;
+            config.intake_level = 0.0;
+            config.mechanical_level = 0.0;
+            let mut synth = EngineSynth::new(config);
+            synth.exhaust_level.snap(0.0);
+            let mut snapshot = loaded_snapshot();
+            snapshot.knock_intensity = 0.0;
+            snapshot.cylinder_pressure = cycle_with_rise(60.0e5, rise);
+            synth.set_snapshot(&snapshot);
+            render(&mut synth, 48_000);
+            rms(&render(&mut synth, 96_000))
+        };
+
+        // 60 crank degrees of rise against 20 — a relaxed petrol burn against a
+        // direct-injection diesel's.
+        let petrol = level_for(60.0 / 720.0);
+        let diesel = level_for(20.0 / 720.0);
+
+        // The peaks really are equal, so nothing here is a level difference in
+        // disguise.
+        let tall = cycle_with_rise(60.0e5, 60.0 / 720.0);
+        let quick = cycle_with_rise(60.0e5, 20.0 / 720.0);
+        let top = |t: [f32; CYCLE_TABLE]| t.iter().cloned().fold(0.0f32, f32::max);
+        assert!(
+            (top(tall) - top(quick)).abs() < 1.0,
+            "the two cycles do not peak alike: {} vs {}",
+            top(tall),
+            top(quick)
+        );
+
+        assert!(
+            diesel > 1.5 * petrol,
+            "steepness did not reach the block: {diesel:.5} on a 20 degree rise \
+             against {petrol:.5} on a 60 degree one"
+        );
+    }
+
     // -- waveguide damping ---------------------------------------------------
 
     #[test]
