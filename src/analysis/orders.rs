@@ -1482,24 +1482,7 @@ mod tests {
     /// Noise alone has no resonances in it.
     #[test]
     fn a_flat_noise_floor_has_no_prominent_peaks() {
-        // A fixed linear congruential draw, so the test is the same every run.
-        let mut state = 0x2545_F491u32;
-        let samples: Vec<f32> = (0..(2.0 * RATE) as usize)
-            .map(|_| {
-                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                (state >> 8) as f32 / (1u32 << 23) as f32 - 1.0
-            })
-            .collect();
-
-        let all = AverageSpectrum::of(&samples, RATE).peaks(4096, 0.0);
-        let mut proms: Vec<f64> = all.iter().map(|p| p.prominence_db).collect();
-        proms.sort_by(|a, b| b.total_cmp(a));
-        println!(
-            "PROBE frames={} peaks={} top={:?}",
-            AverageSpectrum::of(&samples, RATE).frames(),
-            all.len(),
-            &proms[..10.min(proms.len())]
-        );
+        let samples = noise(2.0);
         let peaks = resonances(&samples, RATE, 32);
         assert!(
             peaks.len() < 8,
