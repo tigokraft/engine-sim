@@ -1104,8 +1104,9 @@ impl Placement {
     /// The length that *would* put a quarter-wave mode where this one landed
     /// [m], given the length it was predicted from.
     ///
-    /// The stage's one rule, as arithmetic: a mode 8 % low is a pipe 8 % long,
-    /// and this says what the pipe would have to be instead. It is the only
+    /// The stage's one rule, as arithmetic: a mode 8 % low is a pipe 9 % longer
+    /// than the one it was predicted from, and this says what that pipe is. It
+    /// is the only
     /// honest way to answer a placement error, because the alternative — an
     /// equaliser that moves the peak without moving the pipe — leaves the
     /// delay, the reflection and every harmonic above it where they were.
@@ -1568,6 +1569,39 @@ mod tests {
             "picked {} peaks out of white noise",
             peaks.len()
         );
+    }
+
+    /// Placement against a prediction: a tone where it was expected is found
+    /// and measured, one far from any prediction is reported missing, and the
+    /// error says which way it is out.
+    #[test]
+    fn placement_finds_a_predicted_mode_and_misses_an_absent_one() {
+        // A pipe predicted at 250 Hz whose audio actually resonates at 230:
+        // 8 % low, which is a pipe 8 % long.
+        let peaks = resonances(&tone(230.0, 0.5, 2.0), RATE, 8);
+
+        let found = place(250.0, &peaks, PLACEMENT_WINDOW_PCT);
+        let error = found.error_pct().expect("the mode was not found at all");
+        assert!(
+            (error - (-8.0)).abs() < 0.5,
+            "a mode at 230 Hz against a 250 Hz prediction read {error:.2} %"
+        );
+        assert!(!found.within(5.0) && found.within(10.0));
+
+        // And the length the audio is really behaving as: a quarter-wave mode
+        // 8 % low is a pipe 8.7 % longer than the 0.40 m it was predicted from.
+        let implied = found.implied_length(0.40).unwrap();
+        assert!(
+            (implied - 0.435).abs() < 0.002,
+            "a 250 Hz prediction from 0.40 m measured at 230 Hz implies {implied:.4} m"
+        );
+
+        // Nothing resonates at 1 kHz in this signal, and saying so is not the
+        // same as finding it in the wrong place.
+        let absent = place(1_000.0, &peaks, PLACEMENT_WINDOW_PCT);
+        assert!(absent.measured_hz.is_none());
+        assert!(absent.error_pct().is_none());
+        assert!(!absent.within(100.0));
     }
 
     /// A render shorter than one window has nothing to average.
