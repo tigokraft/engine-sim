@@ -14,7 +14,7 @@
 //! ├──────────────────────┤   spectrum of the audio the device is          │
 //! │ cycle vitals         │   actually playing, plus a pulse meter         │
 //! ├──────────────────────┤                                                │
-//! │ 1-9 engine presets   │                                                │
+//! │ 1-9 [ ] engine presets│                                                │
 //! ├──────────────────────┴────────────────────────────────────────────────┤
 //! │ key bindings                                                          │
 //! └───────────────────────────────────────────────────────────────────────┘
@@ -307,8 +307,25 @@ impl Dashboard {
                 let index = (c as u8 - b'1') as usize;
                 (index < self.presets.len()).then_some(Command::SelectPreset(index))
             }
+            KeyCode::Char('[') => self.step_preset(-1),
+            KeyCode::Char(']') => self.step_preset(1),
             _ => None,
         }
+    }
+
+    /// The engine `delta` places along the catalogue from the one running.
+    ///
+    /// The digit row runs out before the catalogue does — there are ten fingers
+    /// and nine digits, and more engines than either — so this is the only way
+    /// to reach the ones past the ninth. It wraps, because a list you can fall
+    /// off the end of is a list you have to count your way back up.
+    fn step_preset(&self, delta: isize) -> Option<Command> {
+        let count = self.presets.len();
+        if count == 0 {
+            return None;
+        }
+        let index = (self.telemetry.preset as isize + delta).rem_euclid(count as isize);
+        Some(Command::SelectPreset(index as usize))
     }
 
     /// Reads whatever input is already queued, without blocking.
@@ -706,7 +723,7 @@ impl Dashboard {
 
     /// The catalogue, with the selected engine marked.
     fn draw_presets(&self, frame: &mut Frame, area: Rect) {
-        let block = panel("ENGINES  [1-9]");
+        let block = panel("ENGINES  1-9 [ ]");
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -737,8 +754,11 @@ impl Dashboard {
                 } else {
                     Style::default().fg(INK)
                 };
+                // Only the first nine have a digit to be reached by; the rest
+                // are marked as being on the bracket keys and nothing else.
+                let shortcut = char::from_digit(i as u32 + 1, 10).unwrap_or('.');
                 TextLine::from(vec![
-                    Span::styled(format!("{marker} {} ", i + 1), style),
+                    Span::styled(format!("{marker} {shortcut} "), style),
                     Span::styled(format!("{name:<15}"), style),
                     Span::styled(format!("{spec:<21}"), Style::default().fg(FRAME_COLOR)),
                     // Which engines whistle is the one thing about this list a
@@ -1004,7 +1024,7 @@ impl Dashboard {
         let mut spans = Vec::new();
         spans.extend(key("↑/W ↓/S", "throttle"));
         spans.extend(key("SPACE", "ignition cut · 2-step"));
-        spans.extend(key("1-9", "engine"));
+        spans.extend(key("1-9 / [ ]", "engine"));
         spans.extend(key(
             "M",
             if self.telemetry.muted {
@@ -1417,13 +1437,6 @@ mod tests {
                 Some(Command::SelectPreset(index))
             );
         }
-        // The catalogue has to fit the digit row it is addressed by, or the
-        // engines past the ninth are unreachable from the keyboard.
-        assert!(
-            dashboard.presets.len() <= 9,
-            "{} engines will not fit keys 1-9",
-            dashboard.presets.len()
-        );
         // Zero is not an engine, and nor is any digit past the end of the
         // catalogue: both must select nothing rather than clamp onto the
         // nearest one.
@@ -1436,6 +1449,24 @@ mod tests {
                 dashboard.on_key(press(KeyCode::Char(key))),
                 None,
                 "'{key}' selected an engine that is not in the catalogue"
+            );
+        }
+        // The catalogue is longer than the digit row, so every engine past the
+        // ninth is reachable only by stepping — and stepping has to reach all
+        // of them, in order, and wrap.
+        let count = dashboard.presets.len();
+        assert!(count > 0, "an empty catalogue");
+        for index in 0..count {
+            dashboard.telemetry.preset = index;
+            assert_eq!(
+                dashboard.on_key(press(KeyCode::Char(']'))),
+                Some(Command::SelectPreset((index + 1) % count)),
+                "']' did not step forward from engine {index}"
+            );
+            assert_eq!(
+                dashboard.on_key(press(KeyCode::Char('['))),
+                Some(Command::SelectPreset((index + count - 1) % count)),
+                "'[' did not step back from engine {index}"
             );
         }
         assert!(!dashboard.quitting());
@@ -1670,10 +1701,13 @@ mod tests {
         let (name, ..) = dashboard.presets[last];
         dashboard.telemetry.preset = last;
 
+        // Past the ninth the row carries a dot rather than a digit, because
+        // there is no digit left to reach it by.
+        let shortcut = char::from_digit(last as u32 + 1, 10).unwrap_or('.');
         for (width, height) in [(200, 60), (MIN_WIDTH, MIN_HEIGHT)] {
             let screen = screen(&dashboard, width, height);
             assert!(
-                screen.contains(&format!("▶ {} {name}", last + 1)),
+                screen.contains(&format!("▶ {shortcut} {name}")),
                 "{name} is not on the list at {width}x{height}:\n{screen}"
             );
         }
