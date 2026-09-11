@@ -2712,4 +2712,71 @@ mod tests {
             "outgoing energy exceeds incoming"
         );
     }
+
+    #[test]
+    fn steepening_raises_high_orders_with_amplitude() {
+        // High-amplitude pulses in an exhaust primary travel faster at crests
+        // than at troughs, causing the waveform to steepen toward a shock.
+        // At a fixed fundamental frequency, steepening must cause high-order
+        // harmonic content to rise with pulse amplitude, while remaining
+        // completely absent (vanishingly small) at low amplitudes (quiet).
+        const FS: f32 = 48_000.0;
+        const FREQ: f32 = 200.0; // 240 samples per cycle at 48 kHz
+        const GAMMA: f32 = 1.35;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 800.0;
+        let area = std::f64::consts::PI * 0.020 * 0.020;
+
+        let measure_harmonic_ratio = |amp: f32| -> f32 {
+            let mut pipe = WaveguidePipe::new(0.5, area, FS, GAMMA, R, TEMPERATURE);
+            pipe.set_steepening(0.20);
+            pipe.snap_delays();
+
+            let n_total = 4800; // 20 complete cycles
+            let n_eval = 2400; // 10 cycles for steady-state evaluation
+            let mut re_fund = 0.0f64;
+            let mut im_fund = 0.0f64;
+            let mut re_h2 = 0.0f64;
+            let mut im_h2 = 0.0f64;
+
+            for i in 0..n_total {
+                let t = i as f32 / FS;
+                let input = amp * (std::f32::consts::TAU * FREQ * t).sin();
+                pipe.push_inputs(input, 0.0);
+                let (_out0, out1) = pipe.read_outputs();
+
+                if i >= n_total - n_eval {
+                    let phase1 = std::f32::consts::TAU * FREQ * t;
+                    let phase2 = std::f32::consts::TAU * 2.0 * FREQ * t;
+                    re_fund += out1 as f64 * phase1.sin() as f64;
+                    im_fund += out1 as f64 * phase1.cos() as f64;
+                    re_h2 += out1 as f64 * phase2.sin() as f64;
+                    im_h2 += out1 as f64 * phase2.cos() as f64;
+                }
+            }
+
+            let m_fund = (re_fund * re_fund + im_fund * im_fund).sqrt() / n_eval as f64;
+            let m_h2 = (re_h2 * re_h2 + im_h2 * im_h2).sqrt() / n_eval as f64;
+            (m_h2 / m_fund.max(1e-12)) as f32
+        };
+
+        let ratio_quiet = measure_harmonic_ratio(0.001);
+        let ratio_loud = measure_harmonic_ratio(1.0);
+
+        // At low amplitude (quiet), wave steepening is absent (harmonic distortion < -80 dB)
+        assert!(
+            ratio_quiet < 0.0001,
+            "high orders should be absent at low amplitude: got {ratio_quiet}"
+        );
+        // At high amplitude (loud), wave steepening significantly raises high-order content
+        assert!(
+            ratio_loud > 0.003,
+            "high orders should rise with amplitude: got {ratio_loud}"
+        );
+        // The harmonic content must scale up with amplitude
+        assert!(
+            ratio_loud > 50.0 * ratio_quiet,
+            "high-order content must rise strongly with amplitude: loud={ratio_loud}, quiet={ratio_quiet}"
+        );
+    }
 }
