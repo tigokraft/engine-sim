@@ -1191,6 +1191,27 @@ pub enum SilencerElement {
     SideBranch(QuarterWaveStub),
 }
 
+/// Temperature of silencer element `index` of `count`, down the gradient from
+/// the collector to the tailpipe [K].
+///
+/// A silencer chain is strung out along the coolest half of the exhaust, and
+/// where each element sits in it decides what it is tuned to: a chamber
+/// breathing 1260 K gas passes a band a tenth above the same chamber breathing
+/// 1050 K. The first element does not start at the collector's own temperature
+/// and the last does not reach the tailpipe's — there is pipe either side of
+/// the chain — so the run is taken over the middle 70 % of the gradient,
+/// starting a fifth of the way down it.
+///
+/// Named here rather than written out at each of its uses because the
+/// calibration in `examples/calibrate.rs` predicts a chamber's pass band from
+/// it: a prediction taken off a different gradient than the one the network is
+/// tuned to would be measuring the difference between two guesses at the
+/// temperature.
+pub fn chain_element_temperature(collector: f32, tailpipe: f32, index: usize, count: usize) -> f32 {
+    let frac = (index as f32 + 0.5) / count.max(1) as f32;
+    collector + (tailpipe - collector) * (0.2 + 0.7 * frac)
+}
+
 impl SilencerElement {
     /// Appends the elements a geometric silencer is made of to `chain`.
     ///
@@ -1686,11 +1707,9 @@ impl ExhaustNetwork {
                     temp,
                 );
             }
-            let n = chain.len().max(1) as f32;
+            let n = chain.len();
             for (k, element) in chain.iter_mut().enumerate() {
-                let frac = (k as f32 + 0.5) / n;
-                let t_elem = stations.collector
-                    + (stations.tailpipe - stations.collector) * (0.2 + 0.7 * frac);
+                let t_elem = chain_element_temperature(stations.collector, stations.tailpipe, k, n);
                 element.tune(gamma, r, t_elem);
             }
         }
@@ -1782,11 +1801,9 @@ impl ExhaustNetwork {
             p.tune(gamma, gas_constant, t_precross);
         }
         for chain in &mut self.silencers {
-            let n = chain.len().max(1) as f32;
+            let n = chain.len();
             for (k, element) in chain.iter_mut().enumerate() {
-                let frac = (k as f32 + 0.5) / n;
-                let t_elem = stations.collector
-                    + (stations.tailpipe - stations.collector) * (0.2 + 0.7 * frac);
+                let t_elem = chain_element_temperature(stations.collector, stations.tailpipe, k, n);
                 element.tune(gamma, gas_constant, t_elem);
             }
         }
