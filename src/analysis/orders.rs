@@ -1735,6 +1735,68 @@ mod tests {
         assert!(!absent.within(100.0));
     }
 
+    /// Extraction off a "recording": a different sample rate, a supplied sweep
+    /// curve, an order that follows it and a resonance that does not.
+    ///
+    /// Stands in for the real thing while no reference recording is licensed
+    /// into this repository — it is synthesised from a chirp and a tone, so
+    /// every number in it is known in advance — and it exercises exactly the
+    /// path a recording takes: a rate that is not the render's, a curve that
+    /// came from outside the audio, and one analysis for both.
+    #[test]
+    fn extraction_reads_a_recording_at_its_own_rate() {
+        // 44.1 kHz, because that is what a recording arrives at.
+        let rate = 44_100.0;
+        let seconds = 6.0;
+        let (from, to) = (1_200.0, 6_000.0);
+        let n = (seconds * rate) as usize;
+
+        let mut phase = 0.0f64;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f64 / rate;
+                let rpm = from + (to - from) * (t / seconds);
+                // Order 4 sweeping with the engine, a fixed 500 Hz pipe mode a
+                // quarter of its amplitude, and a little noise under both.
+                let swept = 0.5 * phase.sin();
+                phase += 2.0 * PI * 4.0 * rpm / 60.0 / rate;
+                let fixed = 0.125 * (2.0 * PI * 500.0 * t).sin();
+                (swept + fixed) as f32
+            })
+            .collect();
+
+        let rpm = RpmCurve::sweep(from, to, seconds);
+        let reference = Reference::extract(&samples, rate, &rpm, &half_orders());
+
+        assert!((reference.seconds - seconds).abs() < 0.01);
+        assert!((reference.speed.0 - from).abs() < 1.0);
+        assert!((reference.speed.1 - to).abs() < 1.0);
+
+        // The swept component is order 4 and the balance is gain-free: the
+        // fixed tone is 12 dB down on it and lands wherever the sweep drags
+        // order 4 past 500 Hz, which is 7500 rpm — above this pull, so it never
+        // reads as order 4 and never inflates it.
+        let balance = reference.balance(4.0);
+        assert_eq!(reference.orders.loudest().map(|l| l.order), Some(4.0));
+        assert!(
+            balance.at(2.0).unwrap() < -20.0,
+            "order 2 read {:.1} dB under order 4",
+            balance.at(2.0).unwrap()
+        );
+
+        // And the fixed tone is a resonance: it stands still while the orders
+        // sweep past it, so it survives the average and lands within a per cent.
+        let peaks = reference.peaks(8);
+        let placement = place(500.0, &peaks, PLACEMENT_WINDOW_PCT);
+        let error = placement
+            .error_pct()
+            .expect("the 500 Hz mode was not found at all");
+        assert!(
+            error.abs() < 1.0,
+            "a 500 Hz mode came back {error:.2} % out"
+        );
+    }
+
     /// The crank's comb for an even-firing four: every even order, nothing
     /// anywhere else, and no plumbing involved in saying so.
     #[test]
