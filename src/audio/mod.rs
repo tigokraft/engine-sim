@@ -499,6 +499,23 @@ impl SnapshotSource {
             peak_pressure as f32
         };
 
+        // The cycle itself, downsampled off the phase ring and cut at EVO. This
+        // is what the audio thread plays back at crank rate instead of
+        // synthesising a pulse shape: the blowdown edge, the exhaust stroke and
+        // the induction gulp are the solver's own curves, so an engine with a
+        // different cam sounds different without a constant anywhere saying so.
+        let cylinder_pressure = block.ring.downsample_from(self.evo_angle, |s| s.pressure);
+        // The ring carries port flux positive *into* the cylinder. The exhaust
+        // side is flipped so that positive means "leaving through the port",
+        // which is the direction the runner sees, and left signed: gas pushed
+        // back through an open valve is a real event, not a shut port.
+        let exhaust_port_flow = block
+            .ring
+            .downsample_from(self.evo_angle, |s| -s.exhaust_flow);
+        let intake_port_flow = block
+            .ring
+            .downsample_from(self.evo_angle, |s| s.intake_flow.max(0.0));
+
         let n_cylinders = block.firing.len().max(1) as f64;
         let cycle_work = block.ring.indicated_work(block.crankcase_pressure) * n_cylinders;
         let mean_indicated_torque = cycle_work / crate::physics::cylinder::CYCLE_ANGLE;
@@ -521,6 +538,10 @@ impl SnapshotSource {
             peak_cylinder_pressure,
             indicated_torque: mean_indicated_torque as f32,
             inertia: self.inertia as f32,
+            cylinder_pressure,
+            exhaust_port_flow,
+            intake_port_flow,
+            exhaust_manifold_pressure: manifold_pressure as f32,
         }
         .sanitized()
     }
@@ -587,6 +608,119 @@ mod tests {
         }
         assert!(block.ring.is_primed(), "ring never filled");
         block
+    }
+
+    /// A V8 that differs from the shipped one in its exhaust cam *duration* and
+    /// in nothing else.
+    ///
+    /// The opening angle is left alone deliberately: EVO is what the audio side
+    /// builds its firing table from, so holding it fixed means the two engines
+    /// hand the synth identical configurations and every difference in what
+    /// comes out has to have arrived through the snapshot.
+    fn v8_with_exhaust_duration(duration_deg: f64, rpm: f64) -> EngineBlock {
+        use crate::physics::cylinder::deg;
+        use crate::physics::thermodynamics::ValveEvent;
+
+        let mut block = v8();
+        let stock = block.model.valves.exhaust;
+        block.model.valves.exhaust = ValveEvent::new(
+            stock.open_angle,
+            deg(duration_deg),
+            stock.max_lift,
+            stock.diameter,
+            stock.discharge_coefficient,
+        );
+        for _ in 0..600 {
+            block.update(1.0 / 240.0, rpm);
+        }
+        assert!(block.ring.is_primed(), "ring never filled");
+        block
+    }
+
+    #[test]
+    fn valve_timing_changes_the_pulse_spectrum() {
+        use crate::analysis::orders::AverageSpectrum;
+
+        // A long-duration race cam and a short road one, on the same block,
+        // through the same pipes, at the same speed.
+        const RPM: f64 = 4_000.0;
+        let long = v8_with_exhaust_duration(300.0, RPM);
+        let short = v8_with_exhaust_duration(190.0, RPM);
+
+        let long_config = SynthConfig::from_block(&long, 48_000.0);
+        let short_config = SynthConfig::from_block(&short, 48_000.0);
+        // The claim of the whole stage, in one assertion: the audio side is
+        // *identical* for the two engines — same taps, same pipes, same levels,
+        // no constant anywhere that says which cam is fitted. Whatever the
+        // difference in timbre turns out to be, it arrived through the snapshot.
+        assert_eq!(
+            long_config, short_config,
+            "the two engines were voiced differently, so the comparison proves nothing"
+        );
+
+        /// Energy at the harmonics of the master cycle inside a band [dB].
+        ///
+        /// Summed over the harmonics rather than sampled at round frequencies,
+        /// because the spectrum of a running engine is a comb: the gaps between
+        /// its lines are 60 dB down and reading one says nothing about anything.
+        fn band_db(spectrum: &AverageSpectrum, cycle_hz: f64, lo: f64, hi: f64) -> f64 {
+            let mut power = 0.0;
+            let mut harmonic = 1;
+            loop {
+                let hz = harmonic as f64 * cycle_hz;
+                if hz > hi {
+                    break;
+                }
+                if hz >= lo {
+                    if let Some(db) = spectrum.db_at(hz) {
+                        power += 10f64.powf(db / 10.0);
+                    }
+                }
+                harmonic += 1;
+            }
+            10.0 * power.max(1e-30).log10()
+        }
+
+        // Mid-band energy against the fundamentals, which is level-independent:
+        // the two cams trap different masses and radiate at different levels,
+        // and that is not what is being asserted.
+        let tilt_of = |block: &EngineBlock| {
+            let snapshot = SnapshotSource::new(block).sample(
+                block,
+                RPM,
+                1.0 / 240.0,
+                EngineControls::wide_open(),
+            );
+            let mut config = long_config.clone();
+            // Leave only the exhaust: the pulse is what is being measured.
+            config.intake_level = 0.0;
+            config.mechanical_level = 0.0;
+            let mut synth = EngineSynth::new(config);
+            synth.set_snapshot(&snapshot);
+            let mut buffer = vec![0.0f32; 2 * 48_000];
+            synth.render(&mut buffer, 2); // settle the pipes
+            synth.render(&mut buffer, 2);
+            let mono: Vec<f32> = buffer.chunks(2).map(|f| 0.5 * (f[0] + f[1])).collect();
+            let spectrum = AverageSpectrum::of(&mono, 48_000.0);
+            let cycle_hz = RPM / 120.0;
+            band_db(&spectrum, cycle_hz, 600.0, 1_500.0)
+                - band_db(&spectrum, cycle_hz, 150.0, 600.0)
+        };
+
+        let long_tilt = tilt_of(&long);
+        let short_tilt = tilt_of(&short);
+
+        // The 300-degree cam is still off its seat when the intake opens and the
+        // pipe turns the flow around on it, so it radiates a second and much
+        // faster event every cycle — the reversal — on top of the blowdown. The
+        // 190-degree cam has shut by then and radiates one. Nothing in the synth
+        // was told either of those things; the difference is the port flow curve
+        // and the pressure trace, and it is more than ten dB.
+        assert!(
+            long_tilt - short_tilt > 6.0,
+            "cam duration barely moved the pulse spectrum: {long_tilt:.1} dB of mid-band \
+             tilt on the long cam against {short_tilt:.1} dB on the short one"
+        );
     }
 
     #[test]
@@ -690,28 +824,23 @@ mod tests {
         // was not worth modelling; a turbo louder than the engine sounds like a
         // kettle with a V8 somewhere behind it, which is what an un-normalised
         // voice and a level picked by eye produce.
+        // A real frame off a real block: the engine half of this comparison is
+        // driven by the solver's own cycle, so it has to come from one.
+        let block = primed(7_000.0);
+        let at_song = SnapshotSource::new(&block).sample(
+            &block,
+            7_000.0,
+            1.0 / 240.0,
+            EngineControls::wide_open(),
+        );
         for induction in every_turbo() {
             let shaft = induction.shaft().expect("turbocharged");
-            let mut snapshot = EngineSnapshot {
-                rpm: 7_000.0,
-                blowdown_delta: [5.0e5; MAX_CYLINDERS],
-                exhaust_temperature: 1_100.0,
-                exhaust_gamma: 1.33,
-                exhaust_gas_constant: 287.0,
-                intake_mass_flow: 0.40,
-                throttle: 1.0,
+            let snapshot = EngineSnapshot {
                 turbo_rpm: shaft.max_shaft_rpm as f32,
                 turbo_surge: 0.0,
-                unburnt_fuel_mass: 0.0,
-                friction_mep: 1.6e5,
-                spark_cut: false,
-                knock_intensity: 0.0,
-                bore: 0.084,
-                peak_cylinder_pressure: 80.0e5,
-                indicated_torque: 250.0,
-                inertia: 0.25,
-            };
-            snapshot = snapshot.sanitized();
+                ..at_song
+            }
+            .sanitized();
 
             let base = SynthConfig::uniform(48_000.0, 6, 1).with_induction(induction);
 

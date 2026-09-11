@@ -559,14 +559,13 @@ fn index_markdown(all: &[Measured]) -> String {
 
     let _ = writeln!(
         out,
-        "\nEvery engine's strongest resonance lands in the same narrow band, \
-         because every engine is currently breathing through the same muffler: \
-         `SynthConfig::uniform` gives all nine eight litres of chamber behind a \
-         50 mm neck, and `f = (c / 2 pi) sqrt(A_neck / (V L_neck))` puts that at \
-         `0.249 c`. The only thing separating one engine from another here is \
-         the temperature of its own exhaust, through `c = sqrt(gamma R T)`. \
-         Stage 3 is where they stop sharing plumbing, and this column is the \
-         first number it has to pull apart."
+        "\nEvery engine now breathes through its own plumbing, so this column no \
+         longer reads the one muffler they all used to share and no longer lands \
+         in a narrow band. It is the most prominent peak in the sweep average and \
+         nothing more: a network of primaries, a collector and a silencer chain \
+         has modes all the way up, and which of them stands tallest is a property \
+         of that engine's pipes. Read the per-engine tables for the peaks in \
+         order rather than this one number."
     );
 
     let _ = writeln!(out, "\n## CPU\n");
