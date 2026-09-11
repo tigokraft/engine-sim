@@ -32,6 +32,7 @@ use std::f64::consts::PI;
 use crate::environment::Environment;
 use crate::physics::cylinder::{wrap_cycle, CylinderGeometry, GasProperties, CYCLE_ANGLE};
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
+use crate::physics::thermal::EngineThermal;
 use crate::physics::thermodynamics::{
     CycleLatch, CylinderModel, PortConditions, Rk4Solver, StepReport, ThermoState,
 };
@@ -245,6 +246,16 @@ impl PhaseRing {
             *out = (sum / (to - from) as f64) as f32;
         }
         table
+    }
+
+    /// Cycle mean of one field of the logged cycle.
+    ///
+    /// The cells are uniform in crank angle and a cycle is uniform in time at a
+    /// fixed speed, so for a rate this is the mean rate over the cycle — which
+    /// is what a thermal mass a hundred seconds long wants to be driven by,
+    /// rather than by whatever the flux happens to be at this instant.
+    pub fn cycle_mean(&self, field: impl Fn(&PhaseSample) -> f64) -> f64 {
+        self.cells.iter().map(field).sum::<f64>() / PHASE_CELLS as f64
     }
 
     /// Highest pressure anywhere in the logged cycle [Pa].
@@ -1081,6 +1092,8 @@ pub struct EngineBlock {
     pub intake_system: IntakeSystem,
     /// Dressed mass of the engine block [kg].
     pub block_mass: f64,
+    /// Block temperature, and the chamber wall the solver runs against.
+    pub thermal: EngineThermal,
 }
 
 impl EngineBlock {
@@ -1137,6 +1150,7 @@ impl EngineBlock {
             exhaust,
             intake_system,
             block_mass: 180.0,
+            thermal: EngineThermal::soaked(180.0, environment.temperature),
         }
     }
 
@@ -1298,7 +1312,63 @@ impl EngineBlock {
         );
 
         self.update_manifolds(step.plan.dt, rpm);
+        self.update_thermal(step.plan.dt, rpm);
         self.assemble_output(rpm, step)
+    }
+
+    /// Advances the block's temperature and re-derives the chamber wall.
+    ///
+    /// The solver has just run a frame against last frame's wall temperature.
+    /// That is a lag of one frame against a time constant of minutes, which is
+    /// nothing; solving the wall implicitly with the charge would cost a second
+    /// Newton iteration inside every RK4 stage to move a temperature by
+    /// millikelvin.
+    fn update_thermal(&mut self, dt: f64, rpm: f64) {
+        // A stopped engine's phase ring is a frozen photograph of the last cycle
+        // it turned: the fluxes in it are real rates, but nothing is happening at
+        // them any more. Only a turning crank puts heat into the block.
+        let turning = self.omega != 0.0;
+        let chamber_heat = if turning {
+            self.ring.cycle_mean(|s| s.wall_loss).max(0.0)
+        } else {
+            0.0
+        };
+        // Every watt the crankshaft spends on friction is a watt rubbed into the
+        // bearings, the bores and the oil, and all of it lands in the block. It
+        // is a third of the warm-up heat at idle, and it is what makes a cold
+        // engine warm itself faster than a warm one would.
+        let friction_heat = if turning {
+            self.friction.torque(
+                self.ring.peak_pressure(),
+                self.model.geometry.mean_piston_speed(rpm.abs()),
+                self.total_displacement(),
+            ) * self.omega.abs()
+        } else {
+            0.0
+        };
+
+        let cylinders = self.firing.len().max(1) as f64;
+        self.thermal
+            .integrate(dt, chamber_heat * cylinders, friction_heat);
+
+        let area = self.model.heat.mean_surface_area(&self.model.geometry);
+        self.model.heat.wall_temperature = self.thermal.wall_temperature(chamber_heat, area);
+    }
+
+    /// Sets the dressed block mass, resizing the thermal mass that follows it.
+    ///
+    /// The two cannot drift apart: how much metal there is decides both where
+    /// the structural modes sit and how long the engine takes to warm up.
+    pub fn set_block_mass(&mut self, mass: f64) {
+        self.block_mass = mass.max(1.0);
+        let temperature = self.thermal.block_temperature();
+        self.thermal =
+            EngineThermal::new(self.block_mass, self.environment.temperature, temperature);
+    }
+
+    /// Puts every thermal mass back to ambient: an engine that stood overnight.
+    pub fn cold_start(&mut self) {
+        self.thermal = EngineThermal::cold(self.block_mass, self.environment.temperature);
     }
 
     /// Pushes the summed per-bank fluxes into the manifolds.

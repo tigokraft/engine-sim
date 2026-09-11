@@ -233,6 +233,11 @@ impl KnockModel {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WoschniModel {
     /// Mean combustion-chamber wall temperature [K].
+    ///
+    /// State, not a setting: [`crate::physics::thermal`] integrates the block it
+    /// belongs to and writes this every frame, so a cold engine has a cold
+    /// chamber and takes less heat out of its charge. The value a model is built
+    /// with is only what it runs on until the first frame has been solved.
     pub wall_temperature: f64,
     /// Velocity coefficient during gas exchange [-].
     pub c1_gas_exchange: f64,
@@ -280,6 +285,21 @@ impl WoschniModel {
     /// Instantaneous wetted area: crown + head + exposed liner [m^2].
     pub fn surface_area(&self, geometry: &CylinderGeometry, theta: f64) -> f64 {
         2.0 * geometry.piston_area() + PI * geometry.bore * geometry.piston_position(theta)
+    }
+
+    /// Cycle-mean wetted area [m^2].
+    ///
+    /// The instantaneous area swings between the crown and head alone at TDC and
+    /// the whole exposed liner at BDC. What the path from the chamber surface
+    /// into the block metal sees over a cycle is the mean of that, and the mean
+    /// of the slider-crank displacement is the crank radius plus a small
+    /// second-order term from the rod obliquity: expanding the radical gives
+    /// `<x> = r + r^2 / (4 l)`, since the cosine averages away over a full
+    /// revolution and `<sin^2> = 1/2`.
+    pub fn mean_surface_area(&self, geometry: &CylinderGeometry) -> f64 {
+        let r = geometry.crank_radius();
+        let mean_position = r + r * r / (4.0 * geometry.rod_length.max(1e-6));
+        2.0 * geometry.piston_area() + PI * geometry.bore * mean_position
     }
 }
 

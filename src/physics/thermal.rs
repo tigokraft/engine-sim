@@ -348,6 +348,95 @@ pub fn chamber_wall_temperature(block_temperature: f64, heat_flow: f64, area: f6
     (block_temperature + rise).min(MAX_WALL_TEMPERATURE)
 }
 
+// ---------------------------------------------------------------------------
+// The engine's thermal state
+// ---------------------------------------------------------------------------
+
+/// Every temperature in the engine that is not a gas state.
+///
+/// One body for the block, driven by the wall heat Woschni already computes plus
+/// the work friction is turning into heat, and cooled through the thermostat.
+/// The chamber wall the solver reads is derived from it rather than stored: it
+/// is the block temperature plus the drop the current heat flux makes across the
+/// head.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineThermal {
+    /// The block, head and the coolant and oil they carry.
+    pub block: ThermalMass,
+    /// The thermostat that decides where the block plateaus.
+    pub thermostat: Thermostat,
+    /// Ambient air the whole engine eventually loses to [K].
+    pub ambient: f64,
+}
+
+impl EngineThermal {
+    /// A thermal state for a dressed block of `block_mass`, at `temperature`.
+    pub fn new(block_mass: f64, ambient: f64, temperature: f64) -> Self {
+        let thermostat = Thermostat::default();
+        let capacity = WARM_UP_MASS_FRACTION * block_mass.max(1.0) * METAL_SPECIFIC_HEAT;
+        Self {
+            block: ThermalMass::new(
+                temperature,
+                capacity,
+                thermostat.conductance(temperature),
+                ambient,
+            ),
+            thermostat,
+            ambient,
+        }
+    }
+
+    /// An engine that has been running long enough to be on its thermostat.
+    ///
+    /// The default, because a block built to be solved at a given speed is a
+    /// block somebody wants steady-state numbers from. Starting cold is the
+    /// deliberate act; see [`Self::cold`].
+    pub fn soaked(block_mass: f64, ambient: f64) -> Self {
+        let open = Thermostat::default().open_temperature;
+        Self::new(block_mass, ambient, open)
+    }
+
+    /// An engine that has stood overnight: everything at ambient.
+    pub fn cold(block_mass: f64, ambient: f64) -> Self {
+        Self::new(block_mass, ambient, ambient)
+    }
+
+    /// Advances the block by one frame.
+    ///
+    /// `chamber_heat` is the wall loss summed over every cylinder [W] and
+    /// `friction_heat` the power the crankshaft is spending on friction [W],
+    /// all of which ends up in the oil and the bearings and from there in the
+    /// block.
+    pub fn integrate(&mut self, dt: f64, chamber_heat: f64, friction_heat: f64) {
+        self.block.sink_temperature = self.ambient;
+        self.block.conductance = self.thermostat.conductance(self.block.temperature);
+        self.block
+            .integrate(dt, chamber_heat.max(0.0) + friction_heat.max(0.0));
+    }
+
+    /// Block metal temperature [K].
+    pub fn block_temperature(&self) -> f64 {
+        self.block.temperature
+    }
+
+    /// Chamber wall temperature the solver should run against [K].
+    ///
+    /// `chamber_heat` is one cylinder's mean wall loss [W] and `area` its
+    /// cycle-mean wetted surface [m^2].
+    pub fn wall_temperature(&self, chamber_heat: f64, area: f64) -> f64 {
+        chamber_wall_temperature(self.block.temperature, chamber_heat, area)
+    }
+
+    /// How cold the engine still is, `1` at ambient and `0` on the thermostat [-].
+    ///
+    /// What a fast-idle schedule and a warm-up enrichment are both written
+    /// against: one number saying how far through the warm-up the engine is.
+    pub fn cold_fraction(&self) -> f64 {
+        let span = (self.thermostat.open_temperature - self.ambient).max(1.0);
+        ((self.thermostat.open_temperature - self.block.temperature) / span).clamp(0.0, 1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

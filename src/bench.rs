@@ -121,7 +121,7 @@ impl EnginePreset {
         let mut block = EngineBlock::new(self.model, self.firing.clone(), environment);
         block.exhaust = self.exhaust.clone();
         block.intake_system = self.intake.clone();
-        block.block_mass = self.block_mass;
+        block.set_block_mass(self.block_mass);
         block.rebuild_exhaust_banks();
         block
     }
