@@ -675,6 +675,30 @@ impl Default for MechanicalSpec {
 }
 
 impl MechanicalSpec {
+    /// Mechanical spec for a direct-injection diesel: the injector dominates.
+    ///
+    /// A common-rail injector is a solenoid snapping a needle open against two
+    /// thousand bar, several times per cycle, and the pump that feeds it is
+    /// hung off the same drive. That is why a diesel idling at the kerb is
+    /// audibly a box of hammers while a petrol engine idling next to it is
+    /// audibly a flame. The rest follows the same logic: the valve gear is
+    /// heavier because the compression it seals against is higher, so it lands
+    /// harder, and the piston is bigger and running a longer skirt in a colder
+    /// bore, so it slaps harder. The cam and the injection pump are driven by a
+    /// gear train rather than a chain, because a chain would stretch under the
+    /// torque reversals the pump puts through it — and a gear train sings.
+    pub fn diesel() -> Self {
+        Self {
+            intake_valve: Some(ImpulsiveSpec::per_cylinder(0.55)),
+            exhaust_valve: Some(ImpulsiveSpec::per_cylinder(0.65)),
+            piston_slap: Some(ImpulsiveSpec::per_cylinder(0.80)),
+            injector: Some(ImpulsiveSpec::per_cylinder(1.00)),
+            timing_chain: None,
+            gear_whine: Some(ImpulsiveSpec::order(23.0, 0.30)),
+            accessory: Some(ImpulsiveSpec::order(1.37, 0.25)),
+        }
+    }
+
     /// Mechanical spec for a rotary engine: no valves, no reciprocating pistons,
     /// but phasing gears, eccentric shaft drive, oil pump gear whine and accessories.
     pub fn rotary() -> Self {

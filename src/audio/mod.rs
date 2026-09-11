@@ -351,6 +351,35 @@ impl Induction {
         }
     }
 
+    /// The variable-geometry turbine a diesel wears.
+    ///
+    /// Vanes that swivel shut at low speed keep the turbine's effective area
+    /// small exactly where a fixed wheel would still be waiting for gas, so a
+    /// VGT is on boost from just above idle and has no wastegate at all — the
+    /// vanes are the wastegate. It also has no blow-off valve, because there is
+    /// no throttle plate for the charge to slam into on a lift: a diesel's
+    /// inlet tract is open from the filter to the valve at every load it ever
+    /// sees. The engine under it turns to five thousand rather than seven, so
+    /// the shaft reference is lower and the whistle sits lower with it.
+    pub const fn variable_geometry() -> Self {
+        Self::Turbocharged {
+            shaft: TurboModel {
+                max_shaft_rpm: 165_000.0,
+                reference_engine_rpm: 4_600.0,
+                spool_up: 0.30,
+                spool_down: 0.42,
+                shaft_rpm: 0.0,
+            },
+            voice: TurboVoicing {
+                order: 2.0,
+                reference_rpm: 132_000.0,
+                level: 0.026,
+            },
+            blow_off: None,
+            wastegate: None,
+        }
+    }
+
     /// A twin-screw / Roots-type positive displacement supercharger.
     ///
     /// Driven directly by belt from the crankshaft, its whine frequency is
