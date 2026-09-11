@@ -5,7 +5,7 @@
 //! audio hardware, which is what lets a measurement run in CI, and nothing here
 //! reads the time except to report what the render cost.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::Instant;
@@ -371,6 +371,156 @@ pub fn write_wav(path: &Path, samples: &[f32], channels: u16, sample_rate: u32) 
     }
     file.flush()?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Reading a recording back in
+// ---------------------------------------------------------------------------
+
+/// Audio read off disk: a reference recording, or a render written earlier.
+///
+/// The counterpart of [`write_wav`], and the only way a measurement gets at
+/// something this crate did not synthesise. A reference keeps the rate it was
+/// recorded at rather than being resampled to [`OFFLINE_RATE`]: the analysis
+/// takes a rate as an argument, and resampling a reference would put an
+/// interpolation filter's own rolloff over the top of the noise-floor tilt the
+/// comparison is trying to read.
+#[derive(Debug, Clone)]
+pub struct Recording {
+    /// Interleaved samples, [`Self::channels`] per frame, full scale ±1.
+    pub samples: Vec<f32>,
+    /// Channels in the interleave.
+    pub channels: usize,
+    /// Sample rate [Hz].
+    pub sample_rate: f64,
+}
+
+impl Recording {
+    /// Frames in the recording.
+    pub fn frames(&self) -> usize {
+        self.samples.len() / self.channels.max(1)
+    }
+
+    /// Length of the recording [s].
+    pub fn seconds(&self) -> f64 {
+        self.frames() as f64 / self.sample_rate.max(f64::MIN_POSITIVE)
+    }
+
+    /// The channels averaged to mono, as [`Render::mono`] does it.
+    ///
+    /// The same convention on both sides of a comparison matters more than
+    /// which convention it is: a sum would put 6 dB on whatever a recording
+    /// happens to have in both channels and nothing on what it has in one.
+    pub fn mono(&self) -> Vec<f32> {
+        let channels = self.channels.max(1);
+        self.samples
+            .chunks(channels)
+            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+            .collect()
+    }
+}
+
+/// Reads a WAV file: 8/16/24/32-bit PCM or 32/64-bit float, any rate.
+///
+/// Every one of those is something a reference recording actually arrives as —
+/// a phone records 16-bit, a field recorder 24-bit, and anything that has been
+/// through an editor comes back 32-bit float. Chunks are walked rather than
+/// assumed to be in a fixed place, because a file out of a real editor carries
+/// `LIST`, `id3 ` and `bext` chunks ahead of the audio.
+pub fn read_wav(path: &Path) -> Result<Recording> {
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        anyhow::bail!("{} is not a RIFF/WAVE file", path.display());
+    }
+
+    let u16_at = |i: usize| u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+    let u32_at =
+        |i: usize| u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+
+    let mut format: Option<(u16, usize, f64, u16)> = None;
+    let mut audio: Option<(usize, usize)> = None;
+
+    // Chunks are `id[4] size[4] payload[size]`, each payload padded to an even
+    // length. A truncated final chunk is taken for what is there rather than
+    // rejected: a recording that stopped mid-write is still measurable.
+    let mut at = 12usize;
+    while at + 8 <= bytes.len() {
+        let id = &bytes[at..at + 4];
+        let size = u32_at(at + 4) as usize;
+        let start = at + 8;
+        let end = (start + size).min(bytes.len());
+
+        if id == b"fmt " && end - start >= 16 {
+            let mut tag = u16_at(start);
+            let channels = u16_at(start + 2) as usize;
+            let rate = u32_at(start + 4) as f64;
+            let bits = u16_at(start + 14);
+            // WAVE_FORMAT_EXTENSIBLE keeps the real format tag in the first two
+            // bytes of its sub-format GUID.
+            if tag == 0xFFFE && end - start >= 26 {
+                tag = u16_at(start + 24);
+            }
+            format = Some((tag, channels, rate, bits));
+        } else if id == b"data" {
+            audio = Some((start, end));
+        }
+
+        at = start + size + (size & 1);
+    }
+
+    let (tag, channels, sample_rate, bits) =
+        format.with_context(|| format!("{} has no fmt chunk", path.display()))?;
+    let (start, end) = audio.with_context(|| format!("{} has no data chunk", path.display()))?;
+    if channels == 0 || sample_rate <= 0.0 {
+        anyhow::bail!(
+            "{} declares {channels} channels at {sample_rate} Hz",
+            path.display()
+        );
+    }
+
+    let payload = &bytes[start..end];
+    let samples: Vec<f32> = match (tag, bits) {
+        // Unsigned, centred on 128, and the only PCM format that is.
+        (1, 8) => payload
+            .iter()
+            .map(|&b| (b as f32 - 128.0) / 128.0)
+            .collect(),
+        (1, 16) => payload
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32_768.0)
+            .collect(),
+        // Sign-extended into the top three bytes of an i32, then scaled by the
+        // 24-bit full scale.
+        (1, 24) => payload
+            .chunks_exact(3)
+            .map(|c| i32::from_le_bytes([0, c[0], c[1], c[2]]) as f32 / 2_147_483_648.0)
+            .collect(),
+        (1, 32) => payload
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32 / 2_147_483_648.0)
+            .collect(),
+        (3, 32) => payload
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+        (3, 64) => payload
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32)
+            .collect(),
+        _ => anyhow::bail!(
+            "{} is format {tag} at {bits} bits, which this harness cannot read",
+            path.display()
+        ),
+    };
+
+    // Whole frames only: half a frame at the end of a file is not a sample of
+    // anything, and leaving it in would put the channels out of step.
+    let frames = samples.len() / channels;
+    Ok(Recording {
+        samples: samples[..frames * channels].to_vec(),
+        channels,
+        sample_rate,
+    })
 }
 
 #[cfg(test)]
