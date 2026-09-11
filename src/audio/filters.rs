@@ -366,6 +366,12 @@ impl Smoothed {
         self.value
     }
 
+    /// Target value the smoother is gliding towards.
+    #[inline(always)]
+    pub fn target(&self) -> f32 {
+        self.target
+    }
+
     /// Advances by `n` samples at once, for control-rate use.
     #[inline]
     pub fn advance(&mut self, n: usize) -> f32 {

@@ -2493,6 +2493,8 @@ impl EngineSynth {
         self.stations.collector = self.collector_temperature.advance(block);
         self.stations.tailpipe = self.tailpipe_temperature.advance(block);
         self.network.tune(gamma, gas_constant, &self.stations);
+        self.network
+            .set_mean_flow(self.snapshot.intake_mass_flow, gamma, gas_constant);
         // The Transit-Time Decision Rule, applied where the reflection it is
         // talking about actually happens: the closed valve at the head of each
         // primary. Every cylinder has its own primary now, so each one gets the

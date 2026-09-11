@@ -248,9 +248,14 @@ pub struct WaveguidePipe {
     backward_line: DelayLine,
     forward_loss: ViscothermalLoss,
     backward_loss: ViscothermalLoss,
-    delay_samples: Smoothed,
+    forward_delay_samples: Smoothed,
+    backward_delay_samples: Smoothed,
     admittance: f32,
     sample_rate: f32,
+    mach: f32,
+    gamma: f32,
+    gas_constant: f32,
+    temperature: f32,
 }
 
 impl WaveguidePipe {
@@ -276,7 +281,8 @@ impl WaveguidePipe {
             gas_constant,
             COLDEST_EXHAUST_TEMPERATURE_K,
         );
-        let max_delay_samples = (max_delay_sec * sample_rate).ceil() as usize + 8;
+        // Sized with 2x headroom for mean-flow convective bias up to M = 0.5.
+        let max_delay_samples = ((max_delay_sec / 0.5) * sample_rate).ceil() as usize + 32;
 
         let initial_delay_sec = runner_delay_seconds(length_f32, gamma, gas_constant, temperature);
 
@@ -300,14 +306,23 @@ impl WaveguidePipe {
             // 40 ms time constant matches the engine temperature glide: fast enough
             // to follow throttle snaps, slow enough that fractional interpolation
             // never produces audible doppler pitch clicks.
-            delay_samples: Smoothed::new(initial_delay_samples, sample_rate, 0.040),
+            forward_delay_samples: Smoothed::new(initial_delay_samples, sample_rate, 0.040),
+            backward_delay_samples: Smoothed::new(initial_delay_samples, sample_rate, 0.040),
             admittance,
             sample_rate,
+            mach: 0.0,
+            gamma,
+            gas_constant,
+            temperature,
         }
     }
 
     /// Retunes propagation delay, acoustic admittance, and wall losses for current gas state.
     pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
+        self.gamma = gamma;
+        self.gas_constant = gas_constant;
+        self.temperature = temperature;
+
         let c = speed_of_sound(gamma, gas_constant, temperature);
         let rho = REFERENCE_PRESSURE_PA / (gas_constant * temperature.max(1.0));
         self.admittance = self.area / (rho * c).max(1e-4);
@@ -318,13 +333,45 @@ impl WaveguidePipe {
         self.backward_loss
             .tune(r, self.length, c, gamma, self.sample_rate);
 
-        // Retune the loss filters first, then take the delay they now add out of
-        // the line. What the pipe owes the wave is L / c of travel; the filters
-        // have already supplied part of it.
-        let delay_sec = runner_delay_seconds(self.length, gamma, gas_constant, temperature);
-        let samples = delay_sec * self.sample_rate - self.compensation();
-        self.delay_samples
-            .set_target(samples.clamp(1.0, self.forward_line.max_delay()));
+        self.update_delay_targets();
+    }
+
+    /// Updates forward and backward delay targets accounting for mean flow Mach number.
+    ///
+    /// Acoustic waves run downstream at `c + u = c(1 + M)` and upstream at
+    /// `c - u = c(1 - M)`. Effective tuning lengths become asymmetric and
+    /// load-dependent, shifting fundamental resonance by `1 - M^2`.
+    fn update_delay_targets(&mut self) {
+        let delay_sec =
+            runner_delay_seconds(self.length, self.gamma, self.gas_constant, self.temperature);
+        let comp = self.compensation();
+        let fwd_sec = delay_sec / (1.0 + self.mach).max(0.05);
+        let bwd_sec = delay_sec / (1.0 - self.mach).max(0.05);
+        let fwd_samples = fwd_sec * self.sample_rate - comp;
+        let bwd_samples = bwd_sec * self.sample_rate - comp;
+        self.forward_delay_samples
+            .set_target(fwd_samples.clamp(1.0, self.forward_line.max_delay()));
+        self.backward_delay_samples
+            .set_target(bwd_samples.clamp(1.0, self.backward_line.max_delay()));
+    }
+
+    /// Sets the mean-flow Mach number along the pipe: positive downstream (0 -> 1).
+    pub fn set_mach(&mut self, mach: f32) {
+        self.mach = mach.clamp(-0.85, 0.85);
+        self.update_delay_targets();
+    }
+
+    /// Current mean-flow Mach number [-].
+    pub fn mach(&self) -> f32 {
+        self.mach
+    }
+
+    /// Immediately snaps forward and backward delays to their current targets.
+    pub fn snap_delays(&mut self) {
+        self.forward_delay_samples
+            .snap(self.forward_delay_samples.target());
+        self.backward_delay_samples
+            .snap(self.backward_delay_samples.target());
     }
 
     /// Filter delay to take out of each direction of travel [samples].
@@ -372,7 +419,18 @@ impl WaveguidePipe {
     /// is deliberately shorter by whatever the loss and boundary filters
     /// contribute, and that bookkeeping is nobody else's business.
     pub fn delay_samples(&self) -> f32 {
-        self.delay_samples.value() + self.compensation()
+        0.5 * (self.forward_delay_samples.value() + self.backward_delay_samples.value())
+            + self.compensation()
+    }
+
+    /// Current forward acoustic transit delay [samples].
+    pub fn forward_delay_samples(&self) -> f32 {
+        self.forward_delay_samples.value() + self.compensation()
+    }
+
+    /// Current backward acoustic transit delay [samples].
+    pub fn backward_delay_samples(&self) -> f32 {
+        self.backward_delay_samples.value() + self.compensation()
     }
 
     /// One-way transit time through the pipe [s].
@@ -390,9 +448,10 @@ impl WaveguidePipe {
     /// - `out_port1`: wave emerging at port 1 from the forward delay line ($p^+(L)$).
     #[inline(always)]
     pub fn read_outputs(&mut self) -> (f32, f32) {
-        let d = self.delay_samples.next_value();
-        let raw0 = self.backward_line.read(d);
-        let raw1 = self.forward_line.read(d);
+        let d_fwd = self.forward_delay_samples.next_value();
+        let d_bwd = self.backward_delay_samples.next_value();
+        let raw0 = self.backward_line.read(d_bwd);
+        let raw1 = self.forward_line.read(d_fwd);
         let out0 = self.backward_loss.process(raw0);
         let out1 = self.forward_loss.process(raw1);
         (out0, out1)
@@ -413,6 +472,10 @@ impl WaveguidePipe {
         self.backward_line.reset();
         self.forward_loss.reset();
         self.backward_loss.reset();
+        self.forward_delay_samples
+            .snap(self.forward_delay_samples.target());
+        self.backward_delay_samples
+            .snap(self.backward_delay_samples.target());
     }
 }
 
@@ -1230,6 +1293,7 @@ impl SilencerElement {
 ///   cross and mix directly.
 /// - [`BankCrossover::HPipe`]: a balance tube linking the banks through two 3-port junctions.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum BankCrossover {
     /// Independent dual exhaust with no link between banks.
     None,
@@ -1687,6 +1751,30 @@ impl ExhaustNetwork {
         }
         for m in &mut self.mouths {
             m.tune(c_tail);
+        }
+    }
+
+    /// Sets mean-flow Mach number for the primaries and tailpipes from mass flow [kg/s].
+    ///
+    /// At higher load and flow rates, gas velocity biases propagation delays
+    /// downstream at `c + u` and upstream at `c - u`.
+    pub fn set_mean_flow(&mut self, mass_flow: f32, gamma: f32, gas_constant: f32) {
+        let n_cyl = self.primaries.len().max(1);
+        let cyl_flow = mass_flow.max(0.0) / n_cyl as f32;
+        for p in &mut self.primaries {
+            let temp = p.temperature;
+            let c = speed_of_sound(gamma, gas_constant, temp);
+            let rho = REFERENCE_PRESSURE_PA / (gas_constant * temp.max(1.0));
+            let u = cyl_flow / (rho * p.area()).max(1e-5);
+            p.set_mach((u / c).clamp(-0.85, 0.85));
+        }
+        let bank_flow = mass_flow.max(0.0) / self.bank_count.max(1) as f32;
+        for tp in &mut self.tailpipes {
+            let temp = tp.temperature;
+            let c = speed_of_sound(gamma, gas_constant, temp);
+            let rho = REFERENCE_PRESSURE_PA / (gas_constant * temp.max(1.0));
+            let u = bank_flow / (rho * tp.area()).max(1e-5);
+            tp.set_mach((u / c).clamp(-0.85, 0.85));
         }
     }
 
