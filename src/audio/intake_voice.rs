@@ -652,6 +652,77 @@ mod tests {
     }
 
     #[test]
+    fn itbs_are_brighter_than_a_single_throttle() {
+        // Individual throttle bodies (ITBs) radiate directly through short velocity
+        // stacks to atmosphere with no plenum or airbox compliance. A single-throttle
+        // plenum/airbox system acts as an acoustic lowpass filter, attenuating high-frequency
+        // valve-closing transients.
+        // Therefore, ITBs produce measurably more high-frequency / high-order content
+        // than a single-throttle setup on the same engine.
+        let fs = 48_000.0f32;
+
+        let itb_system = IntakeSystem {
+            runners: vec![crate::physics::PipeSection::new(0.18, 0.0015, 300.0); 4],
+            plenum_volume: 0.0,
+            throttle: ThrottleLayout::IndividualBodies { bore: 0.045 },
+            airbox: None,
+            snorkel: None,
+            trumpet_flanged: true,
+        };
+
+        let single_system = IntakeSystem {
+            runners: vec![crate::physics::PipeSection::new(0.25, 0.0015, 300.0); 4],
+            plenum_volume: 0.0035,
+            throttle: ThrottleLayout::Single { bore: 0.065 },
+            airbox: Some(crate::physics::PipeSection::new(0.20, 0.015, 300.0)),
+            snorkel: Some(crate::physics::PipeSection::new(0.30, 0.003, 300.0)),
+            trumpet_flanged: false,
+        };
+
+        let mut net_itb = IntakeNetwork::new(&itb_system, 4, fs);
+        let mut net_single = IntakeNetwork::new(&single_system, 4, fs);
+
+        net_itb.set_throttle(1.0);
+        net_single.set_throttle(1.0);
+
+        let rpm = 3_000.0f32;
+        let f_firing = 4.0 / 2.0 * (rpm / 60.0); // 100 Hz
+        let period = (fs / f_firing) as usize; // 480 samples
+
+        let n_samples = 48_000;
+        let mut out_itb = Vec::with_capacity(n_samples);
+        let mut out_single = Vec::with_capacity(n_samples);
+
+        for n in 0..n_samples {
+            let mut excits = [0.0f32; 4];
+            let cyl = (n / period) % 4;
+            let phase = n % period;
+            if phase < 120 {
+                let flow = 0.05 * (std::f32::consts::PI * phase as f32 / 120.0).sin();
+                let d_flow = if phase > 100 { -0.05 * fs / 20.0 } else { 0.0 };
+                excits[cyl] = induction_rarefaction_pa(flow, 0.0015, 343.0)
+                    + valve_slam_pa(d_flow, 0.20, 0.0015);
+            }
+            out_itb.push(net_itb.step(&excits));
+            out_single.push(net_single.step(&excits));
+        }
+
+        let steady = 4_800..n_samples;
+        let itb_high = magnitude_at(&out_itb[steady.clone()], 3_000.0, fs);
+        let itb_low = magnitude_at(&out_itb[steady.clone()], f_firing, fs);
+        let itb_ratio = itb_high / itb_low.max(1e-6);
+
+        let single_high = magnitude_at(&out_single[steady.clone()], 3_000.0, fs);
+        let single_low = magnitude_at(&out_single[steady], f_firing, fs);
+        let single_ratio = single_high / single_low.max(1e-6);
+
+        assert!(
+            itb_ratio > 1.5 * single_ratio,
+            "ITBs must be brighter than single throttle: ITB ratio={itb_ratio:.4} vs single ratio={single_ratio:.4}"
+        );
+    }
+
+    #[test]
     fn intake_network_constructs_and_runs_stable() {
         let system = IntakeSystem::default_for_cylinders(4);
         let mut network = IntakeNetwork::new(&system, 4, 48_000.0);
