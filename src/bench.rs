@@ -193,6 +193,7 @@ impl EnginePreset {
             Self::twin_turbo_v8(),
             Self::turbo_inline_six(),
             Self::turbo_diesel_four(),
+            Self::big_single(),
         ]
     }
 
@@ -681,6 +682,91 @@ impl EnginePreset {
             inertia: 0.44,
             load: (5.0, 0.016, 9.0e-5),
             aperture_positions: AperturePositions::front_engine_dual(),
+            anti_lag: false,
+        }
+    }
+
+    /// 660 cc big single.
+    ///
+    /// One cylinder, one firing every two revolutions, and a flywheel light
+    /// enough that the engine visibly changes speed inside its own cycle. That
+    /// last part is the whole point of the preset: the crank ripple integrated
+    /// at audio rate in Stage 1c is present on every engine here, but on a V12
+    /// it is a couple of tenths of a percent and on this it is several percent
+    /// at idle — the firing interval breathes, the pulse train is not periodic,
+    /// and what comes out is the lope a thumper has and a four does not.
+    ///
+    /// Everything else follows from having one of everything: a single long
+    /// primary with no collector to merge into, one throttle body on a stub
+    /// runner with no plenum to smooth it, and forty-five kilos of engine to
+    /// hang it all on, which rings at the top of the block band rather than the
+    /// bottom.
+    pub fn big_single() -> Self {
+        Self {
+            name: "Big Single",
+            note: "One firing every two turns: the crank itself is the rhythm.",
+            model: CylinderModel {
+                // Oversquare and short-stroke, the way a modern thumper is
+                // built so that it can rev at all.
+                geometry: CylinderGeometry::new(0.1000, 0.0840, 0.1450, 12.0),
+                valves: ValveTrain {
+                    intake: ValveEvent::new(deg(695.0), deg(255.0), 0.0115, 0.042, 0.66),
+                    exhaust: ValveEvent::new(deg(485.0), deg(250.0), 0.0105, 0.036, 0.62),
+                },
+                ..CylinderModel::default()
+            },
+            firing: FiringOrder::single(),
+            induction: Induction::NaturallyAspirated,
+            mechanical: MechanicalSpec {
+                // No timing chain long enough to whirr and no gear train: a
+                // single runs a short chain and a balance shaft, and the
+                // balancer is the one thing on it that sings.
+                timing_chain: None,
+                gear_whine: Some(ImpulsiveSpec::order(2.0, 0.22)),
+                piston_slap: Some(ImpulsiveSpec::per_cylinder(0.70)),
+                ..MechanicalSpec::default()
+            },
+            exhaust: ExhaustSystem {
+                // A long single primary straight into a megaphone: with one
+                // cylinder there is nothing to collect, so the only tuning
+                // available is the length of the one pipe.
+                primaries: vec![PipeSection::from_diameter(0.62, 0.042, 880.0)],
+                collector: Collector::from_diameter(1, 0.048, 0.16),
+                secondary: vec![],
+                crossover: Crossover::None,
+                silencers: vec![Silencer::Absorptive {
+                    length: 0.36,
+                    area: PI * 0.024 * 0.024,
+                    packing_thickness: 0.022,
+                    packing_absorption: 0.75,
+                }],
+                tailpipe: PipeSection::from_diameter(0.35, 0.048, 620.0),
+                tailpipe_flanged: false,
+                cutout: false,
+            },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.18, 0.048, 310.0)],
+                plenum_volume: 0.0,
+                throttle: ThrottleLayout::IndividualBodies { bore: 0.046 },
+                airbox: Some(PipeSection::from_diameter(0.16, 0.075, 300.0)),
+                snorkel: None,
+                trumpet_flanged: true,
+            },
+            block_mass: 45.0,
+            // There is no second bore to be spaced from, so this is the width
+            // of the one barrel and its jacket rather than a centre distance.
+            bore_spacing: 0.125,
+            redline: 7_600.0,
+            idle: 1_250.0,
+            // A tenth of a kilogram metre squared, which is a light flywheel on
+            // a heavy piston: exactly the combination that ripples.
+            inertia: 0.10,
+            load: (1.0, 0.004, 2.2e-5),
+            aperture_positions: AperturePositions {
+                tailpipes: vec![[0.20, -1.0, 0.30]],
+                intake: [-0.15, 0.5, 0.70],
+                block: [0.0, 0.2, 0.45],
+            },
             anti_lag: false,
         }
     }
