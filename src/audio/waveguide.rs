@@ -373,7 +373,7 @@ impl WaveguidePipe {
 
     /// Sets the mean-flow Mach number along the pipe: positive downstream (0 -> 1).
     pub fn set_mach(&mut self, mach: f32) {
-        self.mach = mach.clamp(-0.85, 0.85);
+        self.mach = mach.clamp(-MAX_MEAN_FLOW_MACH, MAX_MEAN_FLOW_MACH);
         self.update_delay_targets();
     }
 
@@ -1526,6 +1526,39 @@ impl ExhaustTemperatures {
     }
 }
 
+/// Highest mean-flow Mach number a pipe is allowed to carry [-].
+///
+/// The time a wave takes to travel upstream goes as `1 / (1 - M)`, so at
+/// `M = 1` the pipe never returns anything at all and above it the model is no
+/// longer acoustic. Real exhaust flow does not reach it; the clamp is there so
+/// that a transient in the solver cannot ask a delay line for a negative delay.
+pub const MAX_MEAN_FLOW_MACH: f32 = 0.85;
+
+/// Mean-flow Mach number in a pipe carrying `mass_flow` [-].
+///
+/// `u = mdot / (rho A)` with `rho = p / (R T)` at the reference pressure, and
+/// `M = u / c`. It is what tilts a pipe's two delays apart — downstream at
+/// `c + u` and upstream at `c - u` — and therefore what drops its resonance to
+/// `c (1 - M^2) / 4L`, the mean-flow line of Appendix A.
+///
+/// Named here rather than written out inside the network because the
+/// calibration in `examples/calibrate.rs` predicts that resonance and has to be
+/// working from the same flow the network is: a prediction on a different Mach
+/// number reports the difference between two guesses at the gas velocity as an
+/// error in the geometry.
+pub fn mean_flow_mach(
+    mass_flow: f32,
+    area: f32,
+    gamma: f32,
+    gas_constant: f32,
+    temperature: f32,
+) -> f32 {
+    let c = speed_of_sound(gamma, gas_constant, temperature);
+    let rho = REFERENCE_PRESSURE_PA / (gas_constant * temperature.max(1.0));
+    let u = mass_flow.max(0.0) / (rho * area).max(1e-5);
+    (u / c).clamp(-MAX_MEAN_FLOW_MACH, MAX_MEAN_FLOW_MACH)
+}
+
 /// Complete physical 1D exhaust waveguide network.
 ///
 /// Instantiated from an [`ExhaustSystem`] geometry description:
@@ -1824,19 +1857,13 @@ impl ExhaustNetwork {
         let n_cyl = self.primaries.len().max(1);
         let cyl_flow = mass_flow.max(0.0) / n_cyl as f32;
         for p in &mut self.primaries {
-            let temp = p.temperature;
-            let c = speed_of_sound(gamma, gas_constant, temp);
-            let rho = REFERENCE_PRESSURE_PA / (gas_constant * temp.max(1.0));
-            let u = cyl_flow / (rho * p.area()).max(1e-5);
-            p.set_mach((u / c).clamp(-0.85, 0.85));
+            let mach = mean_flow_mach(cyl_flow, p.area(), gamma, gas_constant, p.temperature);
+            p.set_mach(mach);
         }
         let bank_flow = mass_flow.max(0.0) / self.bank_count.max(1) as f32;
         for tp in &mut self.tailpipes {
-            let temp = tp.temperature;
-            let c = speed_of_sound(gamma, gas_constant, temp);
-            let rho = REFERENCE_PRESSURE_PA / (gas_constant * temp.max(1.0));
-            let u = bank_flow / (rho * tp.area()).max(1e-5);
-            tp.set_mach((u / c).clamp(-0.85, 0.85));
+            let mach = mean_flow_mach(bank_flow, tp.area(), gamma, gas_constant, tp.temperature);
+            tp.set_mach(mach);
         }
     }
 
