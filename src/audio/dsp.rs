@@ -540,6 +540,36 @@ impl Default for CentrifugalVoicing {
     }
 }
 
+/// What an atmospheric blow-off / dump valve sounds like.
+///
+/// Distinct from compressor surge flutter: rather than periodic cyclic stall
+/// pulses chuffing through the compressor inlet, a dump valve vents trapped
+/// charge air into the atmosphere upon throttle lift under boost as a smooth,
+/// broadband whoosh.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlowOffVoicing {
+    /// Compressor speed fraction of reference speed required to open the valve [-].
+    pub threshold: f32,
+    /// Decay time constant for the venting whoosh envelope [s].
+    pub decay_time: f32,
+    /// Center frequency of the broadband venting noise [Hz].
+    pub center_hz: f32,
+    /// Level of the blow-off valve in the mix [-].
+    pub level: f32,
+}
+
+impl Default for BlowOffVoicing {
+    /// A fast atmospheric dump valve releasing a ~2.8 kHz rush of air.
+    fn default() -> Self {
+        Self {
+            threshold: 0.35,
+            decay_time: 0.15,
+            center_hz: 2_800.0,
+            level: 0.045,
+        }
+    }
+}
+
 /// How an impulsive mechanical source sets its recurrence rate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SourceRate {
@@ -655,6 +685,8 @@ pub struct SynthConfig {
     pub roots: Option<RootsVoicing>,
     /// The centrifugal supercharger, or `None` if not fitted.
     pub centrifugal: Option<CentrifugalVoicing>,
+    /// Blow-off / dump valve, or `None` if not fitted.
+    pub blow_off: Option<BlowOffVoicing>,
     /// Unburnt fuel per cycle above which backfires become possible [kg].
     pub backfire_fuel_threshold: f64,
     /// Runner temperature above which backfires become possible [K].
@@ -766,6 +798,7 @@ impl SynthConfig {
             turbo: None,
             roots: None,
             centrifugal: None,
+            blow_off: None,
             // A cut charge on the shipped V8 carries 24-36 mg of fuel to the
             // exhaust, so 12 mg puts a real spark cut at 2-3x the threshold —
             // enough to crackle hard, while a partial misfire stays below it.
@@ -2049,6 +2082,69 @@ impl CentrifugalVoice {
     }
 }
 
+/// Scaling that normalises [`BlowOffVoice`] to roughly unity RMS during peak venting.
+const BLOW_OFF_UNITY_RMS: f32 = 2.8;
+
+/// Atmospheric blow-off / dump valve voice.
+///
+/// Venting triggered when the driver lifts off the throttle with boost pressure
+/// in the charge tract. Emits a smooth broadband whoosh that decays exponentially,
+/// distinct from cyclic compressor surge flutter.
+#[derive(Debug, Clone)]
+struct BlowOffVoice {
+    envelope: f32,
+    decay_rate: f32,
+    filter: Biquad,
+    prev_throttle: f32,
+    sample_rate: f32,
+}
+
+impl BlowOffVoice {
+    fn new(sample_rate: f32) -> Self {
+        Self {
+            envelope: 0.0,
+            decay_rate: (-1.0 / (0.15 * sample_rate)).exp(),
+            filter: Biquad::new(BiquadCoeffs::bandpass(sample_rate, 2_800.0, 1.2)),
+            prev_throttle: 0.0,
+            sample_rate,
+        }
+    }
+
+    fn tune(&mut self, voicing: &BlowOffVoicing, throttle: f32, turbo_rpm: f32, ref_rpm: f32) {
+        let boost_ratio = (turbo_rpm / ref_rpm.max(1.0)).clamp(0.0, 1.5);
+        // Lift condition: throttle was significantly open and is now closed.
+        let is_lift = self.prev_throttle > 0.30 && throttle < 0.15;
+        if is_lift && boost_ratio > voicing.threshold {
+            // Valve snaps open with intensity proportional to trapped boost.
+            self.envelope = (self.envelope + boost_ratio).min(1.5);
+        }
+        self.prev_throttle = throttle;
+
+        self.decay_rate = (-1.0 / (voicing.decay_time.max(0.01) * self.sample_rate)).exp();
+        self.filter.set_coeffs(BiquadCoeffs::bandpass(
+            self.sample_rate,
+            voicing.center_hz,
+            1.2,
+        ));
+    }
+
+    #[inline(always)]
+    fn process(&mut self, noise: &mut Noise) -> f32 {
+        if self.envelope < 1e-5 {
+            return 0.0;
+        }
+        let env = self.envelope;
+        self.envelope *= self.decay_rate;
+        self.filter.process(noise.next_bipolar()) * env * BLOW_OFF_UNITY_RMS
+    }
+
+    fn reset(&mut self) {
+        self.envelope = 0.0;
+        self.prev_throttle = 0.0;
+        self.filter.reset();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Backfire
 // ---------------------------------------------------------------------------
@@ -2310,6 +2406,7 @@ pub struct EngineSynth {
     turbo: TurboVoice,
     roots: RootsVoice,
     centrifugal: CentrifugalVoice,
+    blow_off: BlowOffVoice,
     backfire: BackfireVoice,
     mechanical: MechanicalVoice,
     knock: KnockVoice,
@@ -2513,6 +2610,7 @@ impl EngineSynth {
             turbo: TurboVoice::new(fs),
             roots: RootsVoice::new(fs),
             centrifugal: CentrifugalVoice::new(fs),
+            blow_off: BlowOffVoice::new(fs),
             backfire: BackfireVoice::new(fs),
             mechanical: MechanicalVoice::from_spec(&config.mechanical, fs),
             knock: KnockVoice::new(fs),
@@ -2673,6 +2771,7 @@ impl EngineSynth {
         self.turbo.reset();
         self.roots.reset();
         self.centrifugal.reset();
+        self.blow_off.reset();
         self.mechanical.reset();
         self.knock.reset();
         self.propagation.reset();
@@ -2810,6 +2909,18 @@ impl EngineSynth {
         if let Some(voicing) = self.config.centrifugal {
             self.centrifugal
                 .tune(&voicing, self.snapshot.rpm, self.snapshot.throttle);
+        }
+        if let Some(voicing) = self.config.blow_off {
+            let ref_rpm = self
+                .config
+                .turbo
+                .map_or(130_000.0, |t| t.reference_rpm as f32);
+            self.blow_off.tune(
+                &voicing,
+                self.snapshot.throttle,
+                self.snapshot.turbo_rpm,
+                ref_rpm,
+            );
         }
 
         self.backfire.tune(&self.config, &self.snapshot);
@@ -3068,6 +3179,10 @@ impl EngineSynth {
             Some(voicing) => self.centrifugal.process() * voicing.level as f32,
             None => 0.0,
         };
+        let blow_off = match self.config.blow_off {
+            Some(voicing) => self.blow_off.process(&mut self.noise) * voicing.level as f32,
+            None => 0.0,
+        };
         let intake_rad =
             self.intake_network.step(&self.intake_excitations) / REFERENCE_INTAKE_PRESSURE;
         // Combustion and the mechanical rig arrive at the block as one force,
@@ -3084,6 +3199,7 @@ impl EngineSynth {
         let block_rad = turbo
             + roots
             + centrifugal
+            + blow_off
             + self.structure.process(drive) * self.config.structure_level as f32;
         let intake_rad = intake_rad * self.config.intake_level as f32;
 
@@ -5374,5 +5490,68 @@ mod tests {
             sum += s.abs();
         }
         assert!(sum > 0.01, "centrifugal voice produced silence");
+    }
+
+    #[test]
+    fn dump_valve_fires_on_lift_with_boost_present_and_never_without_boost() {
+        let voicing = BlowOffVoicing::default();
+        let ref_rpm = 130_000.0;
+        let mut noise = Noise::new(42);
+
+        // Case 1: Lift without boost (turbo shaft not spinning)
+        let mut voice = BlowOffVoice::new(FS);
+        // Throttle opened without boost
+        voice.tune(&voicing, 1.0, 0.0, ref_rpm);
+        // Driver lifts
+        voice.tune(&voicing, 0.0, 0.0, ref_rpm);
+        assert_eq!(
+            voice.envelope, 0.0,
+            "dump valve must not trigger without boost"
+        );
+        let mut silent_sum = 0.0f32;
+        for _ in 0..2000 {
+            silent_sum += voice.process(&mut noise).abs();
+        }
+        assert_eq!(
+            silent_sum, 0.0,
+            "dump valve without boost must produce zero audio"
+        );
+
+        // Case 2: Lift with boost (turbo spinning fast)
+        // Throttle opened with boost
+        voice.tune(&voicing, 1.0, 110_000.0, ref_rpm);
+        // Driver lifts
+        voice.tune(&voicing, 0.0, 110_000.0, ref_rpm);
+        let initial_env = voice.envelope;
+        assert!(
+            initial_env > 0.5,
+            "dump valve must trigger on lift with boost present, got envelope {initial_env}"
+        );
+
+        // Process venting whoosh
+        let mut whoosh_sum = 0.0f32;
+        for _ in 0..2000 {
+            let s = voice.process(&mut noise);
+            assert!(s.is_finite());
+            whoosh_sum += s.abs();
+        }
+        assert!(
+            whoosh_sum > 1.0,
+            "dump valve with boost must produce audible venting whoosh"
+        );
+        assert!(
+            voice.envelope < initial_env,
+            "dump valve envelope must decay while venting"
+        );
+
+        // Advance further (~0.5s) so the envelope decays fully
+        for _ in 0..24_000 {
+            voice.process(&mut noise);
+        }
+        assert!(
+            voice.envelope < 0.05,
+            "dump valve envelope should decay toward zero over half a second, got {}",
+            voice.envelope
+        );
     }
 }

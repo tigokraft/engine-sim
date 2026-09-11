@@ -64,8 +64,8 @@ pub mod structure;
 pub mod waveguide;
 
 pub use dsp::{
-    CentrifugalVoicing, CylinderTap, EngineSnapshot, EngineSynth, ImpulsiveSpec, MechanicalSpec,
-    RootsVoicing, SourceRate, SynthConfig, TurboVoicing, MAX_CYLINDERS,
+    BlowOffVoicing, CentrifugalVoicing, CylinderTap, EngineSnapshot, EngineSynth, ImpulsiveSpec,
+    MechanicalSpec, RootsVoicing, SourceRate, SynthConfig, TurboVoicing, MAX_CYLINDERS,
 };
 pub use filters::MufflerGeometry;
 pub use propagation::{Aperture, AperturePath, AperturePositions, Listener, PropagationModel};
@@ -225,6 +225,8 @@ pub enum Induction {
         shaft: TurboModel,
         /// What that shaft is heard as.
         voice: TurboVoicing,
+        /// Optional blow-off / dump valve fitted to the charge pipe.
+        blow_off: Option<BlowOffVoicing>,
     },
     /// A Roots or twin-screw positive displacement supercharger, crank-order locked.
     RootsSupercharged {
@@ -235,6 +237,8 @@ pub enum Induction {
     CentrifugalSupercharged {
         /// What the supercharger sounds like.
         voice: CentrifugalVoicing,
+        /// Optional blow-off / dump valve fitted to the charge pipe.
+        blow_off: Option<BlowOffVoicing>,
     },
 }
 
@@ -258,6 +262,7 @@ impl Induction {
                 reference_rpm: 160_000.0,
                 level: 0.028,
             },
+            blow_off: None,
         }
     }
 
@@ -281,6 +286,7 @@ impl Induction {
                 reference_rpm: 145_000.0,
                 level: 0.020,
             },
+            blow_off: None,
         }
     }
 
@@ -307,6 +313,7 @@ impl Induction {
                 reference_rpm: 116_000.0,
                 level: 0.031,
             },
+            blow_off: None,
         }
     }
 
@@ -339,6 +346,27 @@ impl Induction {
                 reference_rpm: 6_800.0,
                 level: 0.024,
             },
+            blow_off: None,
+        }
+    }
+
+    /// Equips a blow-off / dump valve to this forced-induction configuration.
+    pub const fn with_blow_off(self, bov: BlowOffVoicing) -> Self {
+        match self {
+            Self::Turbocharged {
+                shaft,
+                voice,
+                blow_off: _,
+            } => Self::Turbocharged {
+                shaft,
+                voice,
+                blow_off: Some(bov),
+            },
+            Self::CentrifugalSupercharged { voice, blow_off: _ } => Self::CentrifugalSupercharged {
+                voice,
+                blow_off: Some(bov),
+            },
+            other => other,
         }
     }
 
@@ -383,7 +411,16 @@ impl Induction {
     /// The centrifugal supercharger voicing, if one is fitted.
     pub fn centrifugal_voice(&self) -> Option<CentrifugalVoicing> {
         match *self {
-            Self::CentrifugalSupercharged { voice } => Some(voice),
+            Self::CentrifugalSupercharged { voice, .. } => Some(voice),
+            _ => None,
+        }
+    }
+
+    /// The blow-off valve voicing, if one is fitted.
+    pub fn blow_off_voice(&self) -> Option<BlowOffVoicing> {
+        match *self {
+            Self::Turbocharged { blow_off, .. } => blow_off,
+            Self::CentrifugalSupercharged { blow_off, .. } => blow_off,
             _ => None,
         }
     }
@@ -713,6 +750,13 @@ impl SynthConfig {
         self.turbo = induction.voice();
         self.roots = induction.roots_voice();
         self.centrifugal = induction.centrifugal_voice();
+        self.blow_off = induction.blow_off_voice();
+        self
+    }
+
+    /// Fits an atmospheric blow-off / dump valve.
+    pub fn with_blow_off(mut self, blow_off: BlowOffVoicing) -> Self {
+        self.blow_off = Some(blow_off);
         self
     }
 }
