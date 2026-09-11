@@ -686,11 +686,18 @@ impl Dashboard {
             vital("IMEP", format!("{:>8.2} bar", t.imep / 1e5), INK),
             vital("BMEP", format!("{:>8.2} bar", t.bmep / 1e5), INK),
             vital("brake power", format!("{:>8.1} kW", t.power_kw), LIVE),
-            vital(
-                "knock integral",
-                format!("{:>8.3}", t.knock_integral),
-                knock_colour,
-            ),
+            // A compression-ignition engine autoignites on purpose, every
+            // cycle, so a knock integral on it would read "1.000" for ever and
+            // mean nothing. What matters on one is how long the charge took to
+            // light, which is the same integral read the other way up.
+            match t.ignition_delay {
+                Some(delay) => vital("ignition delay", format!("{:>8.2} ms", delay * 1e3), INK),
+                None => vital(
+                    "knock integral",
+                    format!("{:>8.3}", t.knock_integral),
+                    knock_colour,
+                ),
+            },
             vital(
                 "firing rate",
                 format!("{:>8.1} Hz", firing_hz(t.rpm, t.cylinders)),

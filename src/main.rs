@@ -527,6 +527,11 @@ fn publish(
     shared.mean_piston_speed = block.geometry().mean_piston_speed(driveline.rpm);
     shared.knock_integral = output.knock_integral;
     shared.knocking = output.knocking;
+    shared.ignition_delay = block
+        .master
+        .latch
+        .autoignition
+        .map(|ignition| ignition.delay);
 
     shared.turbo_fitted = rig.source.has_turbo();
     shared.turbo_rpm = rig.source.turbo_shaft_rpm();

@@ -281,6 +281,14 @@ pub struct Telemetry {
     pub knock_integral: f64,
     /// Whether the charge is knocking.
     pub knocking: bool,
+    /// Ignition delay this cycle's charge took to light itself [s].
+    ///
+    /// `None` on a spark engine, where the coil decides and there is no delay
+    /// to solve. The same Arrhenius integral as the knock one above, read the
+    /// other way up: on a petrol engine reaching one is the failure mode, and
+    /// on a diesel it is how the engine runs at all. See
+    /// [`crate::physics::thermodynamics::Autoignition`].
+    pub ignition_delay: Option<f64>,
 
     /// Whether this engine has a turbo at all; see [`crate::audio::Induction`].
     ///
@@ -343,6 +351,7 @@ impl Default for Telemetry {
             mean_piston_speed: 0.0,
             knock_integral: 0.0,
             knocking: false,
+            ignition_delay: None,
             turbo_fitted: false,
             turbo_rpm: 0.0,
             turbo_surge: 0.0,
