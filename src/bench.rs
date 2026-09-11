@@ -1887,6 +1887,63 @@ mod tests {
     }
 
     #[test]
+    fn a_diesel_has_no_spark_to_cut_and_so_never_pops() {
+        // The driver holding the ignition cut, and the engine sitting on its
+        // limiter, are the two ways a petrol engine sends a cylinder's worth of
+        // raw fuel down a red-hot pipe. Neither exists on a diesel: there is no
+        // coil to interrupt, and its limiter takes the fuel away instead — so
+        // the charge that would have popped was never metered in the first
+        // place.
+        let cut = EngineControls {
+            spark_cut: true,
+            ..EngineControls::wide_open()
+        };
+
+        let unburnt = |preset: &EnginePreset, rpm: f64| {
+            let block = primed(preset, rpm);
+            let mut source = preset.snapshot_source(&block);
+            source
+                .sample(&block, rpm, 1.0 / 240.0, cut)
+                .unburnt_fuel_mass
+        };
+
+        let diesel = EnginePreset::turbo_diesel_four();
+        let petrol = EnginePreset::inline_four();
+        assert_eq!(
+            unburnt(&diesel, 3_000.0),
+            0.0,
+            "a cut coil sent fuel out of an engine that has no coil"
+        );
+        assert!(
+            unburnt(&petrol, 3_000.0) > 0.0,
+            "the petrol four should be pumping its charge out unburnt on a cut"
+        );
+
+        // And on the limiter the same holds for the opposite reason: the
+        // diesel's cut is a fuel cut, so its cylinders are empty.
+        let mut on_the_limiter = diesel.block(Environment::default());
+        let mut driveline = Driveline::new(&diesel);
+        driveline.throttle_target = 1.0;
+        let dt = 1.0 / 240.0;
+        let mut reached = false;
+        let mut cut_kind = crate::physics::control::LimiterCut::None;
+        for _ in 0..(240 * 20) {
+            driveline.update(&on_the_limiter, dt);
+            on_the_limiter.update(dt, driveline.rpm);
+            reached |= driveline.on_the_limiter();
+            if on_the_limiter.ecu.active_cut != crate::physics::control::LimiterCut::None {
+                cut_kind = on_the_limiter.ecu.active_cut;
+            }
+        }
+        assert!(reached, "the diesel never got to its limiter");
+        assert_eq!(
+            cut_kind,
+            crate::physics::control::LimiterCut::Fuel,
+            "a diesel's limiter has to take the fuel, not a spark it does not have"
+        );
+    }
+
+    #[test]
     fn every_preset_has_valid_aperture_positions() {
         for preset in EnginePreset::catalogue() {
             assert!(
