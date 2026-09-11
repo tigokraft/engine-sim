@@ -580,6 +580,83 @@ mod tests {
         assert!((render.rpm.at(0.0) - preset.idle).abs() < 1.0);
     }
 
+    /// What the harness writes, the harness reads: a render survives the trip
+    /// through a file with every sample bit-exact.
+    ///
+    /// The float WAV exists so that a measurement taken off a file is the same
+    /// measurement as one taken off the buffer it came from. If this ever
+    /// fails, every reading in `docs/measurements` taken from a written WAV is
+    /// a reading of the file format.
+    #[test]
+    fn a_float_wav_round_trips_bit_for_bit() {
+        let dir = std::env::temp_dir().join("engine-sim-wav-round-trip");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("float.wav");
+
+        let written: Vec<f32> = (0..2_000)
+            .map(|i| (i as f32 * 0.01).sin() * 0.9 * if i % 2 == 0 { 1.0 } else { -0.5 })
+            .collect();
+        write_wav(&path, &written, 2, 48_000).expect("writing");
+
+        let read = read_wav(&path).expect("reading");
+        assert_eq!(read.channels, 2);
+        assert_eq!(read.sample_rate, 48_000.0);
+        assert_eq!(read.frames(), 1_000);
+        let differing = read
+            .samples
+            .iter()
+            .zip(&written)
+            .position(|(a, b)| a.to_bits() != b.to_bits());
+        assert_eq!(differing, None, "the file changed sample {differing:?}");
+        let _ = fs::remove_file(&path);
+    }
+
+    /// A reference recording arrives as 16-bit PCM at 44.1 kHz far more often
+    /// than as anything else, and it has to read at the right level and rate.
+    #[test]
+    fn a_sixteen_bit_recording_reads_at_the_right_level() {
+        let dir = std::env::temp_dir().join("engine-sim-wav-round-trip");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("pcm16.wav");
+
+        // Hand-built, because the harness cannot write this format: one mono
+        // frame at half scale, one at minus half scale, at 44.1 kHz.
+        let mut file = Vec::new();
+        file.extend_from_slice(b"RIFF");
+        file.extend_from_slice(&(4u32 + 24 + 8 + 4).to_le_bytes());
+        file.extend_from_slice(b"WAVE");
+        file.extend_from_slice(b"fmt ");
+        file.extend_from_slice(&16u32.to_le_bytes());
+        file.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        file.extend_from_slice(&1u16.to_le_bytes()); // mono
+        file.extend_from_slice(&44_100u32.to_le_bytes());
+        file.extend_from_slice(&88_200u32.to_le_bytes());
+        file.extend_from_slice(&2u16.to_le_bytes());
+        file.extend_from_slice(&16u16.to_le_bytes());
+        file.extend_from_slice(b"data");
+        file.extend_from_slice(&4u32.to_le_bytes());
+        file.extend_from_slice(&16_384i16.to_le_bytes());
+        file.extend_from_slice(&(-16_384i16).to_le_bytes());
+        fs::write(&path, &file).expect("writing");
+
+        let read = read_wav(&path).expect("reading");
+        assert_eq!(read.channels, 1);
+        assert_eq!(read.sample_rate, 44_100.0);
+        assert_eq!(read.samples, vec![0.5, -0.5]);
+        let _ = fs::remove_file(&path);
+    }
+
+    /// Something that is not a WAV at all is refused, not read as noise.
+    #[test]
+    fn a_file_that_is_not_a_wav_is_refused() {
+        let dir = std::env::temp_dir().join("engine-sim-wav-round-trip");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("not-a-wav.txt");
+        fs::write(&path, b"this is not a recording of anything").expect("writing");
+        assert!(read_wav(&path).is_err());
+        let _ = fs::remove_file(&path);
+    }
+
     /// Mono is the mean of the channels, not their sum.
     #[test]
     fn mono_averages_the_channels() {
