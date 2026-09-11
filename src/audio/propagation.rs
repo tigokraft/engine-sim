@@ -27,7 +27,7 @@
 
 use std::f32::consts::PI;
 
-use crate::audio::filters::DelayLine;
+use crate::audio::filters::{DelayLine, OnePole};
 
 /// Speed of sound in ambient air at reference conditions (20 °C, 101.3 kPa) [m/s].
 pub const SPEED_OF_SOUND_AIR: f32 = 343.2;
@@ -40,6 +40,12 @@ pub const REFERENCE_PROPAGATION_DISTANCE: f32 = 1.0;
 
 /// Maximum propagation distance supported by internal delay lines [m].
 pub const MAX_PROPAGATION_DISTANCE: f32 = 40.0;
+
+/// Base cutoff frequency for air absorption at reference distance (1 m) [Hz].
+pub const AIR_ABSORPTION_BASE_HZ: f32 = 20_000.0;
+
+/// Air absorption rolloff rate per metre of propagation distance [1/m].
+pub const AIR_ABSORPTION_RATE: f32 = 0.05;
 
 /// Normalizes a 3D vector to unit length.
 #[inline]
@@ -77,6 +83,24 @@ pub fn path_delay_seconds(distance: f32, c: f32) -> f32 {
 #[inline]
 pub fn path_delay_samples(distance: f32, c: f32, sample_rate: f32) -> f32 {
     path_delay_seconds(distance, c) * sample_rate
+}
+
+/// High-frequency cutoff for atmospheric air absorption over distance $r$ [Hz].
+///
+/// Models the progressive high-frequency attenuation of sound in air (ISO 9613-1).
+#[inline]
+pub fn air_absorption_cutoff(distance: f32) -> f32 {
+    let excess = (distance - REFERENCE_PROPAGATION_DISTANCE).max(0.0);
+    AIR_ABSORPTION_BASE_HZ / (1.0 + AIR_ABSORPTION_RATE * excess)
+}
+
+/// Geometric distance attenuation factor $r_0 / r$ [-].
+///
+/// Follows the inverse-square law for sound intensity, which corresponds to
+/// $1/r$ for acoustic pressure in the free field.
+#[inline]
+pub fn distance_attenuation(distance: f32) -> f32 {
+    REFERENCE_PROPAGATION_DISTANCE / distance.max(0.1)
 }
 
 /// An acoustic radiating aperture on the engine / vehicle.
@@ -186,13 +210,15 @@ impl Listener {
 
 /// Propagation path from one aperture to the listener's ears.
 ///
-/// Owns its delay lines sized for [`MAX_PROPAGATION_DISTANCE`].
+/// Owns its delay lines sized for [`MAX_PROPAGATION_DISTANCE`] and air absorption filters.
 #[derive(Debug, Clone)]
 pub struct AperturePath {
     pub aperture: Aperture,
     sample_rate: f32,
     left_delay: DelayLine,
     right_delay: DelayLine,
+    left_air: OnePole,
+    right_air: OnePole,
 }
 
 impl AperturePath {
@@ -205,13 +231,17 @@ impl AperturePath {
             sample_rate,
             left_delay: DelayLine::with_max_delay(max_samples),
             right_delay: DelayLine::with_max_delay(max_samples),
+            left_air: OnePole::new(sample_rate, AIR_ABSORPTION_BASE_HZ),
+            right_air: OnePole::new(sample_rate, AIR_ABSORPTION_BASE_HZ),
         }
     }
 
-    /// Clears internal delay lines.
+    /// Clears internal delay lines and filters.
     pub fn reset(&mut self) {
         self.left_delay.reset();
         self.right_delay.reset();
+        self.left_air.reset();
+        self.right_air.reset();
     }
 
     /// Delays one input sample by the physical path length to each ear.
@@ -232,6 +262,26 @@ impl AperturePath {
         self.right_delay.push(sample);
 
         (self.left_delay.read(d_left), self.right_delay.read(d_right))
+    }
+
+    /// Propagates sample through path delay, air absorption lowpass, and 1/r distance attenuation.
+    #[inline]
+    pub fn step_attenuated(&mut self, sample: f32, listener: &Listener) -> (f32, f32) {
+        let (left_ear, right_ear) = listener.ears();
+        let r_left = self.aperture.distance_to(left_ear);
+        let r_right = self.aperture.distance_to(right_ear);
+
+        let (del_left, del_right) = self.step_delay(sample, listener);
+
+        self.left_air
+            .set_cutoff(self.sample_rate, air_absorption_cutoff(r_left));
+        self.right_air
+            .set_cutoff(self.sample_rate, air_absorption_cutoff(r_right));
+
+        let left = self.left_air.process(del_left) * distance_attenuation(r_left);
+        let right = self.right_air.process(del_right) * distance_attenuation(r_right);
+
+        (left, right)
     }
 }
 
@@ -275,7 +325,6 @@ mod tests {
         let c = SPEED_OF_SOUND_AIR; // 343.2 m/s
 
         // Test 1: Impulse delay matches r / c.
-        // Choose distance 3.432 m -> delay = 3.432 / 343.2 = 0.010 s = 480 samples.
         let dist = 3.432;
         let aperture = Aperture::new([0.0, 0.0, 1.0], 0.01, [0.0, -1.0, 0.0]);
         let listener = Listener {
@@ -302,11 +351,6 @@ mod tests {
         );
 
         // Test 2: Two apertures with path difference produce expected comb cancellation.
-        // Aperture A at [0, 0, 1], distance 5 m.
-        // Aperture B at [0, 1, 1], distance 6 m.
-        // Path difference = 1.0 m -> delay difference = 1.0 / 343.2 s.
-        // Comb notch frequency: f_notch = c / (2 * delta_r) = 343.2 / 2 = 171.6 Hz.
-        // Comb peak frequency: f_peak = c / delta_r = 343.2 Hz.
         let ap_a = Aperture::new([0.0, 0.0, 1.0], 0.01, [0.0, -1.0, 0.0]);
         let ap_b = Aperture::new([0.0, 1.0, 1.0], 0.01, [0.0, -1.0, 0.0]);
         let listener_comb = Listener {
@@ -347,6 +391,106 @@ mod tests {
             level_at_peak > 1.90,
             "Comb peak at f = c / delta_r should reinforce to ~2.0, got {}",
             level_at_peak
+        );
+    }
+
+    #[test]
+    fn total_level_falls_as_one_over_r_with_distance() {
+        let sample_rate = 48_000.0;
+        let aperture = Aperture::new([0.0, 0.0, 1.0], 0.01, [0.0, -1.0, 0.0]);
+
+        // Measure low-frequency sine amplitude at 1m, 2m, and 4m distance.
+        // At 80 Hz, air absorption is negligible, isolating the geometric 1/r law.
+        let freq = 80.0;
+        let distances = [1.0f32, 2.0, 4.0];
+        let mut amplitudes = Vec::new();
+
+        for &dist in &distances {
+            let listener = Listener {
+                position: [0.0, -dist, 1.0],
+                ear_spacing: 0.0,
+            };
+            let mut path = AperturePath::new(aperture, sample_rate);
+            let mut max_val = 0.0f32;
+            for n in 0..3000 {
+                let t = n as f32 / sample_rate;
+                let sig = (2.0 * PI * freq * t).sin();
+                let (l, _) = path.step_attenuated(sig, &listener);
+                if n > 1500 && l.abs() > max_val {
+                    max_val = l.abs();
+                }
+            }
+            amplitudes.push(max_val);
+        }
+
+        assert!(
+            (amplitudes[0] - 1.0).abs() < 0.02,
+            "Expected ~1.0 at 1m, got {}",
+            amplitudes[0]
+        );
+        assert!(
+            (amplitudes[1] - 0.5).abs() < 0.02,
+            "Expected ~0.5 at 2m, got {}",
+            amplitudes[1]
+        );
+        assert!(
+            (amplitudes[2] - 0.25).abs() < 0.02,
+            "Expected ~0.25 at 4m, got {}",
+            amplitudes[2]
+        );
+
+        let ratio_1_2 = amplitudes[0] / amplitudes[1];
+        assert!(
+            (ratio_1_2 - 2.0).abs() < 0.05,
+            "Level should halve when doubling distance: got ratio {}",
+            ratio_1_2
+        );
+
+        let ratio_1_4 = amplitudes[0] / amplitudes[2];
+        assert!(
+            (ratio_1_4 - 4.0).abs() < 0.10,
+            "Level should quarter when quadrupling distance: got ratio {}",
+            ratio_1_4
+        );
+    }
+
+    #[test]
+    fn air_absorption_attenuates_high_frequencies_over_distance() {
+        let sample_rate = 48_000.0;
+        let aperture = Aperture::new([0.0, 0.0, 1.0], 0.01, [0.0, -1.0, 0.0]);
+        let dist = 20.0;
+        let listener = Listener {
+            position: [0.0, -dist, 1.0],
+            ear_spacing: 0.0,
+        };
+
+        let measure_response = |freq: f32| -> f32 {
+            let mut path = AperturePath::new(aperture, sample_rate);
+            let mut max_val = 0.0f32;
+            for n in 0..4000 {
+                let t = n as f32 / sample_rate;
+                let sig = (2.0 * PI * freq * t).sin();
+                let (l, _) = path.step_attenuated(sig, &listener);
+                if n > 2000 && l.abs() > max_val {
+                    max_val = l.abs();
+                }
+            }
+            // Normalize by 1/r gain so we only observe air absorption
+            max_val / distance_attenuation(dist)
+        };
+
+        let low_gain = measure_response(100.0);
+        let high_gain = measure_response(10_000.0);
+
+        assert!(
+            (low_gain - 1.0).abs() < 0.05,
+            "Low frequencies should pass unattenuated by air absorption: got {}",
+            low_gain
+        );
+        assert!(
+            high_gain < 0.85,
+            "10 kHz should be measurably attenuated at 20 m: got {}",
+            high_gain
         );
     }
 }
