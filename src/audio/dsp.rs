@@ -86,6 +86,7 @@ use crate::audio::filters::{
     firing_interval_seconds, soft_clip, waveguide_damping, Biquad, BiquadCoeffs, BlockResonator,
     DcBlocker, ModalBank, Noise, OnePole, Smoothed,
 };
+use crate::audio::intake_voice::IntakeNetwork;
 use crate::audio::waveguide::ExhaustNetwork;
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
 
@@ -2097,6 +2098,7 @@ pub struct EngineSynth {
     /// Pressure radiated from each bank's mouth this sample.
     radiated: Vec<f32>,
     intake: IntakeVoice,
+    intake_network: IntakeNetwork,
     turbo: TurboVoice,
     backfire: BackfireVoice,
     mechanical: MechanicalVoice,
@@ -2196,6 +2198,7 @@ impl EngineSynth {
             bank_excitations: vec![0.0; config.bank_count],
             radiated: vec![0.0; config.bank_count],
             intake: IntakeVoice::new(fs),
+            intake_network: IntakeNetwork::new(&config.intake, config.cylinders.len(), fs),
             turbo: TurboVoice::new(fs),
             backfire: BackfireVoice::new(fs),
             mechanical: MechanicalVoice::from_spec(&config.mechanical, fs),
@@ -2259,6 +2262,16 @@ impl EngineSynth {
         self.network.bank_mean_round_trip_seconds(bank_idx)
     }
 
+    /// Reference to the intake waveguide network.
+    pub fn intake_network(&self) -> &IntakeNetwork {
+        &self.intake_network
+    }
+
+    /// Mutable reference to the intake waveguide network.
+    pub fn intake_network_mut(&mut self) -> &mut IntakeNetwork {
+        &mut self.intake_network
+    }
+
     /// Master-cycle phase, `0..1` over 720 crank degrees.
     #[inline(always)]
     fn cycle_phase(&self) -> f32 {
@@ -2297,6 +2310,7 @@ impl EngineSynth {
             .set_target(snapshot.exhaust_gas_constant);
         self.intake_flow.set_target(snapshot.intake_mass_flow);
         self.throttle.set_target(snapshot.throttle);
+        self.intake_network.set_throttle(snapshot.throttle);
         self.knock.set_intensity(snapshot.knock_intensity);
         self.cycle.accept(&snapshot);
     }
@@ -2304,6 +2318,7 @@ impl EngineSynth {
     /// Clears every filter and delay line without changing parameters.
     pub fn reset(&mut self) {
         self.network.reset();
+        self.intake_network.reset();
         for pool in self.backfire_pulses.iter_mut() {
             pool.reset();
         }

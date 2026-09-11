@@ -1,0 +1,388 @@
+//! 1D digital waveguide network for engine intake and induction acoustics.
+//!
+//! # Intake acoustics
+//!
+//! Sound in the induction tract travels through digital waveguides:
+//! bidirectional delay lines carrying forward-travelling pressure waves $p^+$
+//! (toward the atmosphere / mouth) and backward-travelling pressure waves $p^-$
+//! (toward the intake valves).
+//!
+//! Topology:
+//! ```text
+//! intake valve -> port -> runner -> plenum junction (N runners) -> throttle
+//!     -> airbox -> snorkel -> mouth radiation -> listener
+//! ```
+//!
+//! For engines fitted with individual throttle bodies (ITBs), the runners vent
+//! directly to atmosphere through velocity stack mouths with no shared plenum.
+//!
+//! Processing runs in `f32` at the audio sample rate with zero allocation
+//! in the audio callback.
+
+use crate::audio::filters::speed_of_sound;
+use crate::audio::radiation::Mouth;
+use crate::audio::waveguide::{ScatteringJunction, ValveTermination, WaveguidePipe};
+use crate::physics::plumbing::{IntakeSystem, ThrottleLayout};
+
+/// Reference ambient temperature for intake air [K].
+pub const INTAKE_AMBIENT_TEMPERATURE_K: f32 = 300.0;
+
+/// Specific heat ratio of fresh air [-].
+pub const INTAKE_AIR_GAMMA: f32 = 1.40;
+
+/// Specific gas constant of fresh air [J/(kg K)].
+pub const INTAKE_GAS_CONSTANT: f32 = 287.0;
+
+/// 1D digital waveguide network representing the complete intake system.
+#[derive(Debug, Clone)]
+pub struct IntakeNetwork {
+    /// Intake runners (one per cylinder).
+    runners: Vec<WaveguidePipe>,
+    /// Valve boundary conditions at the cylinder ports.
+    valves: Vec<ValveTermination>,
+    /// Junction where all runners meet the central plenum cavity.
+    plenum_junction: Option<ScatteringJunction>,
+    /// Central plenum cavity duct.
+    plenum_pipe: Option<WaveguidePipe>,
+    /// Upstream airbox duct, if fitted.
+    airbox_pipe: Option<WaveguidePipe>,
+    /// Air inlet snorkel duct, if fitted.
+    snorkel_pipe: Option<WaveguidePipe>,
+    /// Mouth radiation termination for single-throttle systems.
+    single_mouth: Option<Mouth>,
+    /// Mouth radiation terminations for ITB systems (one per runner).
+    itb_mouths: Vec<Mouth>,
+
+    // Preallocated buffers for real-time processing
+    runner_in_0: Vec<f32>,
+    runner_to_plenum: Vec<f32>,
+    plenum_scatter_in: Vec<f32>,
+    plenum_scatter_out: Vec<f32>,
+    plenum_to_downstream: f32,
+    downstream_to_plenum: f32,
+
+    /// Number of cylinders.
+    cylinder_count: usize,
+    /// Sample rate [Hz].
+    sample_rate: f32,
+    /// Current throttle position, `0..=1` [-].
+    throttle: f32,
+    /// Throttle arrangement and geometry.
+    layout: ThrottleLayout,
+}
+
+impl IntakeNetwork {
+    /// Constructs a new intake waveguide network from an [`IntakeSystem`] description.
+    pub fn new(intake: &IntakeSystem, cylinder_count: usize, sample_rate: f32) -> Self {
+        let n_cyl = cylinder_count.max(1);
+        let gamma = INTAKE_AIR_GAMMA;
+        let r = INTAKE_GAS_CONSTANT;
+        let temp = INTAKE_AMBIENT_TEMPERATURE_K;
+        let c = speed_of_sound(gamma, r, temp);
+
+        let is_itb = matches!(intake.throttle, ThrottleLayout::IndividualBodies { .. });
+
+        // 1. Runners and valve terminations
+        let mut runners = Vec::with_capacity(n_cyl);
+        let mut valves = Vec::with_capacity(n_cyl);
+        let mut itb_mouths = Vec::with_capacity(if is_itb { n_cyl } else { 0 });
+
+        for i in 0..n_cyl {
+            let spec = if !intake.runners.is_empty() {
+                intake.runners[i % intake.runners.len()]
+            } else {
+                crate::physics::plumbing::PipeSection::from_diameter(0.30, 0.042, 310.0)
+            };
+
+            if is_itb {
+                let radius = (spec.area / std::f64::consts::PI).sqrt() as f32;
+                let mouth = Mouth::new(sample_rate, radius, intake.trumpet_flanged, c);
+                let eff_len = spec.length + mouth.end_correction() as f64;
+                let mut pipe = WaveguidePipe::new(eff_len, spec.area, sample_rate, gamma, r, temp);
+                pipe.set_boundary_phase_delay(mouth.phase_delay_samples());
+                runners.push(pipe);
+                itb_mouths.push(mouth);
+            } else {
+                let pipe = WaveguidePipe::new(spec.length, spec.area, sample_rate, gamma, r, temp);
+                runners.push(pipe);
+            }
+            valves.push(ValveTermination::new(spec.area));
+        }
+
+        // 2. Single throttle path (plenum, airbox, snorkel, mouth)
+        let (plenum_junction, plenum_pipe, airbox_pipe, snorkel_pipe, single_mouth) = if is_itb {
+            (None, None, None, None, None)
+        } else {
+            // Plenum cavity: length 0.20 m, area = volume / length
+            let plenum_len = 0.20f64;
+            let plenum_area = (intake.plenum_volume / plenum_len).max(1e-5);
+            let plenum_pipe =
+                WaveguidePipe::new(plenum_len, plenum_area, sample_rate, gamma, r, temp);
+
+            // Scattering junction: N runners + 1 plenum pipe
+            let mut junction_areas = Vec::with_capacity(n_cyl + 1);
+            for r in &runners {
+                junction_areas.push(r.area() as f64);
+            }
+            junction_areas.push(plenum_area);
+            let plenum_junction = ScatteringJunction::from_areas(&junction_areas);
+
+            // Airbox
+            let airbox_pipe = intake.airbox.map(|box_spec| {
+                WaveguidePipe::new(box_spec.length, box_spec.area, sample_rate, gamma, r, temp)
+            });
+
+            // Snorkel
+            let snorkel_pipe = intake.snorkel.map(|snork_spec| {
+                WaveguidePipe::new(
+                    snork_spec.length,
+                    snork_spec.area,
+                    sample_rate,
+                    gamma,
+                    r,
+                    temp,
+                )
+            });
+
+            // Exit mouth
+            let exit_spec = intake.snorkel.or(intake.airbox).unwrap_or_else(|| {
+                crate::physics::plumbing::PipeSection::from_diameter(0.20, 0.070, 300.0)
+            });
+            let mouth_radius = (exit_spec.area / std::f64::consts::PI).sqrt() as f32;
+            let mouth = Mouth::new(sample_rate, mouth_radius, intake.trumpet_flanged, c);
+
+            (
+                Some(plenum_junction),
+                Some(plenum_pipe),
+                airbox_pipe,
+                snorkel_pipe,
+                Some(mouth),
+            )
+        };
+
+        let runner_in_0 = vec![0.0; n_cyl];
+        let runner_to_plenum = vec![0.0; n_cyl];
+        let plenum_scatter_in = vec![0.0; n_cyl + 1];
+        let plenum_scatter_out = vec![0.0; n_cyl + 1];
+
+        Self {
+            runners,
+            valves,
+            plenum_junction,
+            plenum_pipe,
+            airbox_pipe,
+            snorkel_pipe,
+            single_mouth,
+            itb_mouths,
+            runner_in_0,
+            runner_to_plenum,
+            plenum_scatter_in,
+            plenum_scatter_out,
+            plenum_to_downstream: 0.0,
+            downstream_to_plenum: 0.0,
+            cylinder_count: n_cyl,
+            sample_rate,
+            throttle: 0.0,
+            layout: intake.throttle,
+        }
+    }
+
+    /// Retunes propagation delays and losses for current gas state.
+    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
+        let c = speed_of_sound(gamma, gas_constant, temperature);
+        for p in &mut self.runners {
+            p.tune(gamma, gas_constant, temperature);
+        }
+        if let Some(p) = &mut self.plenum_pipe {
+            p.tune(gamma, gas_constant, temperature);
+        }
+        if let Some(p) = &mut self.airbox_pipe {
+            p.tune(gamma, gas_constant, temperature);
+        }
+        if let Some(p) = &mut self.snorkel_pipe {
+            p.tune(gamma, gas_constant, temperature);
+        }
+        if let Some(m) = &mut self.single_mouth {
+            m.tune(c);
+        }
+        for m in &mut self.itb_mouths {
+            m.tune(c);
+        }
+    }
+
+    /// Updates valve effective flow areas for all cylinders.
+    pub fn set_valve_areas(&mut self, valve_areas: &[f64]) {
+        for (v, &area) in self.valves.iter_mut().zip(valve_areas.iter()) {
+            v.set_effective_area(area);
+        }
+    }
+
+    /// Updates the throttle position, `0.0..=1.0` [-].
+    pub fn set_throttle(&mut self, throttle: f32) {
+        self.throttle = throttle.clamp(0.0, 1.0);
+    }
+
+    /// Number of cylinders in this intake system.
+    pub fn cylinder_count(&self) -> usize {
+        self.cylinder_count
+    }
+
+    /// Audio sample rate [Hz].
+    pub fn sample_rate(&self) -> f32 {
+        self.sample_rate
+    }
+
+    /// Throttle arrangement and geometry.
+    pub fn layout(&self) -> &ThrottleLayout {
+        &self.layout
+    }
+
+    /// Steps the intake waveguide network by one audio sample.
+    ///
+    /// - `excitations`: slice of acoustic pressure excitations per cylinder [Pa].
+    ///
+    /// Returns the radiated acoustic pressure [Pa].
+    #[inline(always)]
+    pub fn step(&mut self, excitations: &[f32]) -> f32 {
+        let n_cyl = self.runners.len();
+
+        if !self.itb_mouths.is_empty() {
+            // Individual throttle bodies (ITBs)
+            let mut total_rad = 0.0f32;
+            for i in 0..n_cyl {
+                let (p_at_valve, p_at_mouth) = self.runners[i].read_outputs();
+                let excit = if i < excitations.len() {
+                    excitations[i]
+                } else {
+                    0.0
+                };
+                let p_in_valve = self.valves[i].step(excit, p_at_valve);
+                let (p_refl, p_rad) = self.itb_mouths[i].step(p_at_mouth);
+                self.runners[i].push_inputs(p_in_valve, p_refl);
+                total_rad += p_rad;
+            }
+            total_rad / (n_cyl as f32).sqrt().max(1.0)
+        } else {
+            // Single throttle with plenum
+            // 1. Read runner outputs at valve and plenum boundaries
+            for i in 0..n_cyl {
+                let (p_at_valve, p_at_plenum) = self.runners[i].read_outputs();
+                let excit = if i < excitations.len() {
+                    excitations[i]
+                } else {
+                    0.0
+                };
+                self.runner_in_0[i] = self.valves[i].step(excit, p_at_valve);
+                self.runner_to_plenum[i] = p_at_plenum;
+            }
+
+            // 2. Read plenum cavity outputs
+            let (p_plenum_at_runners, p_plenum_at_exit) = match &mut self.plenum_pipe {
+                Some(p) => p.read_outputs(),
+                None => (0.0, 0.0),
+            };
+
+            // 3. Scatter at plenum junction: N runners + plenum cavity
+            if let Some(junc) = &self.plenum_junction {
+                for i in 0..n_cyl {
+                    self.plenum_scatter_in[i] = self.runner_to_plenum[i];
+                }
+                self.plenum_scatter_in[n_cyl] = p_plenum_at_runners;
+
+                junc.scatter(&self.plenum_scatter_in, &mut self.plenum_scatter_out);
+
+                for i in 0..n_cyl {
+                    let p_back_to_runner = self.plenum_scatter_out[i];
+                    self.runners[i].push_inputs(self.runner_in_0[i], p_back_to_runner);
+                }
+            }
+
+            // 4. Downstream chain: plenum -> airbox -> snorkel -> mouth
+            let p_into_plenum_0 = self.plenum_scatter_out[n_cyl];
+
+            let mut wave_forward = p_plenum_at_exit;
+            let mut wave_backward = 0.0f32;
+
+            if let Some(airbox) = &mut self.airbox_pipe {
+                let (p_box_in, p_box_out) = airbox.read_outputs();
+                airbox.push_inputs(wave_forward, self.downstream_to_plenum);
+                wave_forward = p_box_out;
+                wave_backward = p_box_in;
+            }
+
+            if let Some(snorkel) = &mut self.snorkel_pipe {
+                let (p_snork_in, p_snork_out) = snorkel.read_outputs();
+                snorkel.push_inputs(wave_forward, self.downstream_to_plenum);
+                wave_forward = p_snork_out;
+                wave_backward = p_snork_in;
+            }
+
+            let radiated = if let Some(mouth) = &mut self.single_mouth {
+                let (refl, rad) = mouth.step(wave_forward);
+                self.downstream_to_plenum = refl;
+                rad
+            } else {
+                0.0
+            };
+
+            if let Some(plenum) = &mut self.plenum_pipe {
+                plenum.push_inputs(p_into_plenum_0, wave_backward);
+            }
+
+            radiated
+        }
+    }
+
+    /// Resets all internal delay lines and filters.
+    pub fn reset(&mut self) {
+        for r in &mut self.runners {
+            r.reset();
+        }
+        for v in &mut self.valves {
+            v.set_effective_area(0.0);
+        }
+        if let Some(p) = &mut self.plenum_pipe {
+            p.reset();
+        }
+        if let Some(p) = &mut self.airbox_pipe {
+            p.reset();
+        }
+        if let Some(p) = &mut self.snorkel_pipe {
+            p.reset();
+        }
+        if let Some(m) = &mut self.single_mouth {
+            m.reset();
+        }
+        for m in &mut self.itb_mouths {
+            m.reset();
+        }
+        self.runner_in_0.fill(0.0);
+        self.runner_to_plenum.fill(0.0);
+        self.plenum_scatter_in.fill(0.0);
+        self.plenum_scatter_out.fill(0.0);
+        self.plenum_to_downstream = 0.0;
+        self.downstream_to_plenum = 0.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intake_network_constructs_and_runs_stable() {
+        let system = IntakeSystem::default_for_cylinders(4);
+        let mut network = IntakeNetwork::new(&system, 4, 48_000.0);
+        network.tune(
+            INTAKE_AIR_GAMMA,
+            INTAKE_GAS_CONSTANT,
+            INTAKE_AMBIENT_TEMPERATURE_K,
+        );
+
+        let excitations = [100.0, 0.0, 0.0, 0.0];
+        for _ in 0..1000 {
+            let rad = network.step(&excitations);
+            assert!(rad.is_finite());
+        }
+    }
+}
