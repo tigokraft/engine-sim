@@ -516,6 +516,109 @@ impl DieselCombustion {
     }
 }
 
+/// What lights the charge, and therefore what shape the heat release has.
+///
+/// The two topologies are not a parameter of one model. A spark engine's burn
+/// starts when the coil fires, at an angle the ECU chooses, and proceeds as one
+/// flame front through a charge that was mixed long before; a compression
+/// engine's starts when the air gets hot enough, at an angle nobody chooses,
+/// and proceeds in two stages because the fuel arrives in the middle of it.
+/// Every consumer of a heat release has to know which it is holding, which is
+/// what an enum is for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HeatRelease {
+    /// Spark ignition: one Wiebe from the spark.
+    Spark(WiebeProfile),
+    /// Compression ignition: two Wiebes from a solved autoignition point.
+    Compression(DieselCombustion),
+}
+
+impl Default for HeatRelease {
+    fn default() -> Self {
+        Self::Spark(WiebeProfile::default())
+    }
+}
+
+impl HeatRelease {
+    /// Burn rate with respect to crank angle [1/rad].
+    ///
+    /// A compression-ignition cycle whose charge never autoignited releases no
+    /// heat at all: that is a misfire, and it is the honest answer rather than
+    /// a fallback.
+    pub fn dburned_dtheta(&self, theta: f64, latch: &CycleLatch) -> f64 {
+        match self {
+            Self::Spark(wiebe) => wiebe.dburned_dtheta(theta),
+            Self::Compression(diesel) => match &latch.autoignition {
+                Some(ignition) => diesel.dburned_dtheta(theta, ignition),
+                None => 0.0,
+            },
+        }
+    }
+
+    /// True while heat release is actively happening.
+    pub fn is_burning(&self, theta: f64, latch: &CycleLatch) -> bool {
+        match self {
+            Self::Spark(wiebe) => wiebe.is_burning(theta),
+            Self::Compression(diesel) => match &latch.autoignition {
+                Some(ignition) => diesel.is_burning(theta, ignition),
+                None => false,
+            },
+        }
+    }
+
+    /// Fraction of the fuel's chemical energy that shows up as heat [-].
+    pub fn combustion_efficiency(&self) -> f64 {
+        match self {
+            Self::Spark(wiebe) => wiebe.combustion_efficiency,
+            Self::Compression(diesel) => diesel.combustion_efficiency,
+        }
+    }
+
+    /// Where heat release is commanded from: the spark, or the injector opening
+    /// [rad, cycle coords].
+    ///
+    /// Not where it starts on a diesel — that is
+    /// [`Autoignition::angle`], and it is solved rather than commanded.
+    pub fn commanded_angle(&self) -> f64 {
+        match self {
+            Self::Spark(wiebe) => wiebe.spark_angle,
+            Self::Compression(diesel) => diesel.injection_angle,
+        }
+    }
+
+    /// Nominal angular extent of the burn [rad].
+    pub fn duration(&self) -> f64 {
+        match self {
+            Self::Spark(wiebe) => wiebe.duration,
+            Self::Compression(diesel) => diesel.diffusion_duration,
+        }
+    }
+
+    /// The spark profile, on an engine that has a spark plug.
+    pub fn spark(&self) -> Option<&WiebeProfile> {
+        match self {
+            Self::Spark(wiebe) => Some(wiebe),
+            Self::Compression(_) => None,
+        }
+    }
+
+    /// The spark profile for the ECU to retime, on an engine that has one.
+    pub fn spark_mut(&mut self) -> Option<&mut WiebeProfile> {
+        match self {
+            Self::Spark(wiebe) => Some(wiebe),
+            Self::Compression(_) => None,
+        }
+    }
+
+    /// The compression-ignition profile, on an engine that has no spark plug.
+    pub fn compression(&self) -> Option<&DieselCombustion> {
+        match self {
+            Self::Spark(_) => None,
+            Self::Compression(diesel) => Some(diesel),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Wall heat transfer: Woschni
 // ---------------------------------------------------------------------------
@@ -883,6 +986,12 @@ pub struct CycleLatch {
     pub volume: f64,
     /// Ratio of specific heats of the trapped charge at IVC [-].
     pub gamma: f64,
+    /// Where this cycle's charge lit itself, on a compression-ignition engine.
+    ///
+    /// `None` on a spark engine — there is nothing to solve, the coil decides —
+    /// and also on a compression engine whose charge was too cold to light,
+    /// which is a misfire. See [`DieselCombustion::autoignition`].
+    pub autoignition: Option<Autoignition>,
 }
 
 impl CycleLatch {
@@ -894,6 +1003,7 @@ impl CycleLatch {
             temperature: env.temperature,
             volume: geometry.max_volume(),
             gamma: gas.gamma_unburned,
+            autoignition: None,
         }
     }
 
@@ -991,8 +1101,8 @@ pub struct CylinderModel {
     pub geometry: CylinderGeometry,
     /// Working-gas properties.
     pub gas: GasProperties,
-    /// Wiebe heat release.
-    pub wiebe: WiebeProfile,
+    /// Heat release: a spark engine's single Wiebe or a diesel's two.
+    pub combustion: HeatRelease,
     /// Woschni wall heat transfer.
     pub heat: WoschniModel,
     /// Valve events.
@@ -1012,7 +1122,7 @@ impl Default for CylinderModel {
         Self {
             geometry: CylinderGeometry::default(),
             gas: GasProperties::default(),
-            wiebe: WiebeProfile::default(),
+            combustion: HeatRelease::default(),
             heat: WoschniModel::default(),
             valves: ValveTrain::default(),
             knock: KnockModel::default(),
@@ -1044,7 +1154,7 @@ impl CylinderModel {
         );
 
         let dxb_dt = if st.latch.fuel_mass > 0.0 {
-            self.wiebe.dburned_dtheta(theta) * omega
+            self.combustion.dburned_dtheta(theta, &st.latch) * omega
         } else {
             0.0
         };
@@ -1056,7 +1166,7 @@ impl CylinderModel {
         };
         let heat_release = st.latch.fuel_mass
             * self.fuel_lhv
-            * (self.wiebe.combustion_efficiency * richness_efficiency)
+            * (self.combustion.combustion_efficiency() * richness_efficiency)
             * dxb_dt;
 
         let motored = st.latch.motored_pressure(volume);
@@ -1096,7 +1206,7 @@ impl CylinderModel {
 
         let mut w = self.heat.c1_closed * mean_piston_speed;
         // The combustion term only exists once there are products to expand.
-        if st.cylinder.burned_fraction > 1e-6 || self.wiebe.is_burning(theta) {
+        if st.cylinder.burned_fraction > 1e-6 || self.combustion.is_burning(theta, &st.latch) {
             let reference = st.latch.pressure * st.latch.volume;
             if reference > 1e-12 {
                 w += self.heat.c2_combustion * self.geometry.displacement() * st.latch.temperature
@@ -1146,7 +1256,7 @@ impl CylinderModel {
         // No fuel, no flame: a motored or fuel-cut cylinder must keep unburned
         // gas properties, not just skip the heat release.
         let dxb_chem = if st.latch.fuel_mass > 0.0 {
-            self.wiebe.dburned_dtheta(theta) * omega
+            self.combustion.dburned_dtheta(theta, &st.latch) * omega
         } else {
             0.0
         };
@@ -1158,7 +1268,7 @@ impl CylinderModel {
         };
         let heat_release = st.latch.fuel_mass
             * self.fuel_lhv
-            * (self.wiebe.combustion_efficiency * richness_efficiency)
+            * (self.combustion.combustion_efficiency() * richness_efficiency)
             * dxb_chem;
 
         // --- wall loss -------------------------------------------------------
@@ -1210,6 +1320,32 @@ impl CylinderModel {
             dburned,
             dknock,
         }
+    }
+
+    /// The per-cycle references implied by the charge trapped in `cylinder`.
+    ///
+    /// On a compression-ignition engine this is also where the cycle's ignition
+    /// point is solved, because this is the moment everything it depends on is
+    /// known: the charge is sealed, nothing has burned, and the isentrope it
+    /// will ride to the injector opening is fixed. Solving it once here rather
+    /// than inside the derivative is not an optimisation — the derivative is
+    /// evaluated four times per substep at angles the crank has not reached,
+    /// and an ignition angle that moved between RK4 stages would not be one.
+    pub fn latch(&self, cylinder: &CylinderState, omega: f64) -> CycleLatch {
+        let mut latch = CycleLatch {
+            fuel_mass: self.trapped_fuel_mass(cylinder.mass, cylinder.burned_fraction),
+            pressure: cylinder.pressure(&self.geometry, &self.gas),
+            temperature: cylinder.temperature,
+            volume: self.geometry.safe_volume(cylinder.theta),
+            gamma: self.gas.gamma(cylinder.burned_fraction),
+            autoignition: None,
+        };
+        if latch.fuel_mass > 0.0 {
+            if let HeatRelease::Compression(diesel) = &self.combustion {
+                latch.autoignition = diesel.autoignition(&latch, &self.geometry, omega);
+            }
+        }
+        latch
     }
 
     /// Trapped fuel mass implied by a charge mass and its residual fraction [kg].
@@ -1530,7 +1666,7 @@ impl Rk4Solver {
                 plan.dtheta,
                 model.valves.intake.close_angle(),
             ) {
-                self.latch_cycle(model, st);
+                self.latch_cycle(model, st, omega);
             }
             // The exhaust valve cracking open ends the cycle's knock window.
             if crossed(previous_theta, plan.dtheta, model.valves.exhaust.open_angle) {
@@ -1560,15 +1696,8 @@ impl Rk4Solver {
     }
 
     /// Latches the per-cycle references from the state trapped at IVC.
-    fn latch_cycle(&self, model: &CylinderModel, st: &mut ThermoState) {
-        let cyl = &st.cylinder;
-        st.latch = CycleLatch {
-            fuel_mass: model.trapped_fuel_mass(cyl.mass, cyl.burned_fraction),
-            pressure: cyl.pressure(&model.geometry, &model.gas),
-            temperature: cyl.temperature,
-            volume: model.geometry.safe_volume(cyl.theta),
-            gamma: model.gas.gamma(cyl.burned_fraction),
-        };
+    fn latch_cycle(&self, model: &CylinderModel, st: &mut ThermoState, omega: f64) {
+        st.latch = model.latch(&st.cylinder, omega);
         st.knock_integral = 0.0;
     }
 }
@@ -1613,7 +1742,9 @@ mod tests {
         m.heat.scaling = 0.0;
         m.valves.intake.duration = 0.0;
         m.valves.exhaust.duration = 0.0;
-        m.wiebe.combustion_efficiency = 0.0;
+        if let Some(wiebe) = m.combustion.spark_mut() {
+            wiebe.combustion_efficiency = 0.0;
+        }
         m
     }
 
@@ -1786,6 +1917,7 @@ mod tests {
             temperature: env.temperature,
             volume: model.geometry.max_volume(),
             gamma: model.gas.gamma_unburned,
+            autoignition: None,
         };
 
         let before = st.cylinder.pressure(&model.geometry, &model.gas);
@@ -1948,6 +2080,114 @@ mod tests {
         }
     }
 
+    /// A charge trapped at BDC at a stated pressure and temperature.
+    fn trapped(geometry: &CylinderGeometry, pressure: f64, temperature: f64) -> CycleLatch {
+        CycleLatch {
+            fuel_mass: 1.0e-5,
+            pressure,
+            temperature,
+            volume: geometry.max_volume(),
+            gamma: 1.38,
+            autoignition: None,
+        }
+    }
+
+    #[test]
+    fn ignition_delay_lengthens_on_a_colder_compression() {
+        // The whole reason a diesel is hard to start and clatters when it is:
+        // the charge has to reach the temperature on its own, and a cylinder
+        // that starts colder takes longer to get there. Nothing schedules this.
+        let diesel = DieselCombustion::default();
+        let geometry = CylinderGeometry::new(0.083, 0.092, 0.147, 18.0);
+        let omega = rpm_to_omega(1_500.0);
+
+        let hot = diesel
+            .autoignition(&trapped(&geometry, 1.6e5, 330.0), &geometry, omega)
+            .expect("a warm charge must light");
+        let cold = diesel
+            .autoignition(&trapped(&geometry, 1.6e5, 290.0), &geometry, omega)
+            .expect("a cool charge must still light on 18:1");
+
+        assert!(
+            cold.delay > hot.delay,
+            "a colder charge must be slower to light: {:.2} ms against {:.2} ms",
+            cold.delay * 1e3,
+            hot.delay * 1e3
+        );
+        assert!(
+            cold.angle > hot.angle,
+            "a longer delay must also put ignition later in the cycle"
+        );
+        // And the late one piles up more fuel while it waits, which is the
+        // clatter.
+        assert!(
+            cold.premixed_fraction > hot.premixed_fraction,
+            "the colder cycle did not premix more: {:.3} against {:.3}",
+            cold.premixed_fraction,
+            hot.premixed_fraction
+        );
+        // A real DI diesel lights within a millisecond or two of the injector.
+        assert!(
+            (0.2e-3..3.0e-3).contains(&hot.delay),
+            "implausible delay: {:.2} ms",
+            hot.delay * 1e3
+        );
+    }
+
+    #[test]
+    fn compression_ratio_is_what_makes_a_diesel_light_at_all() {
+        let diesel = DieselCombustion::default();
+        let omega = rpm_to_omega(1_500.0);
+        let squeeze = |ratio: f64| {
+            let geometry = CylinderGeometry::new(0.083, 0.092, 0.147, ratio);
+            diesel.autoignition(&trapped(&geometry, 1.6e5, 330.0), &geometry, omega)
+        };
+
+        let high = squeeze(20.0).expect("20:1 must light");
+        let low = squeeze(14.0).expect("14:1 must still light on a warm charge");
+        assert!(
+            low.delay > high.delay,
+            "less squeeze must mean a longer wait: {:.2} ms against {:.2} ms",
+            low.delay * 1e3,
+            high.delay * 1e3
+        );
+        // A petrol engine's squeeze cannot light diesel at all, which is why
+        // one has no injectors in it.
+        assert!(
+            squeeze(9.0).is_none(),
+            "9:1 compression lit a diesel charge, which no engine has ever done"
+        );
+    }
+
+    #[test]
+    fn the_latch_solves_ignition_only_on_a_compression_engine() {
+        let env = Environment::default();
+        let omega = rpm_to_omega(1_500.0);
+        let mut model = CylinderModel {
+            geometry: CylinderGeometry::new(0.083, 0.092, 0.147, 18.0),
+            ..CylinderModel::default()
+        };
+        let mut cylinder =
+            CylinderState::at_ambient(&model.geometry, &model.gas, env.pressure, env.temperature);
+        cylinder.theta = PI;
+        cylinder.mass =
+            env.pressure * model.geometry.max_volume() / (model.gas.r_unburned * env.temperature);
+
+        assert!(
+            model.latch(&cylinder, omega).autoignition.is_none(),
+            "a spark engine has nothing to autoignite"
+        );
+
+        model.combustion = HeatRelease::Compression(DieselCombustion::default());
+        let latch = model.latch(&cylinder, omega);
+        let ignition = latch.autoignition.expect("the diesel charge must light");
+        assert!(ignition.angle > model.combustion.commanded_angle());
+        // And with the fuel cut there is no spray to light, so there is no
+        // ignition point either.
+        model.fuel_cut = true;
+        assert!(model.latch(&cylinder, omega).autoignition.is_none());
+    }
+
     #[test]
     fn a_longer_delay_puts_more_of_the_charge_in_the_spike() {
         // The one link that makes the clatter physical rather than voiced: the
@@ -2008,7 +2248,13 @@ mod tests {
 
         let run = |spark_deg: f64| {
             let model = CylinderModel {
-                wiebe: WiebeProfile::new(deg(spark_deg), deg(60.0), 5.0, 2.0, 0.97),
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    deg(spark_deg),
+                    deg(60.0),
+                    5.0,
+                    2.0,
+                    0.97,
+                )),
                 // A 14:1 squeeze to put the end gas firmly into knock territory.
                 geometry: CylinderGeometry::new(0.086, 0.086, 0.1345, 14.0),
                 ..CylinderModel::default()
@@ -2027,6 +2273,7 @@ mod tests {
                 temperature: st.cylinder.temperature,
                 volume: model.geometry.max_volume(),
                 gamma: model.gas.gamma_unburned,
+                autoignition: None,
             };
             for _ in 0..300 {
                 st = solver.substep(&model, &st, omega, deg(1.0), &ports);
@@ -2179,6 +2426,7 @@ mod tests {
                     temperature: st.cylinder.temperature,
                     volume: model.geometry.safe_volume(st.cylinder.theta),
                     gamma: model.gas.gamma(st.cylinder.burned_fraction),
+                    autoignition: None,
                 };
             }
             let p = st.cylinder.pressure(&model.geometry, &model.gas);

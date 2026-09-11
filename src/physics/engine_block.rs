@@ -35,7 +35,7 @@ use crate::physics::cylinder::{wrap_cycle, CylinderGeometry, GasProperties, CYCL
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
 use crate::physics::thermal::{EngineThermal, OilViscosity};
 use crate::physics::thermodynamics::{
-    CycleLatch, CylinderModel, PortConditions, Rk4Solver, StepReport, ThermoState,
+    CylinderModel, PortConditions, Rk4Solver, StepReport, ThermoState,
 };
 
 /// One cell per crank degree over the full four-stroke cycle.
@@ -1154,7 +1154,7 @@ impl EngineBlock {
 
         let thermal = EngineThermal::soaked(180.0, &exhaust, environment.temperature);
         let ecu = EngineControlUnit {
-            base_wiebe_duration: model.wiebe.duration,
+            base_wiebe_duration: model.combustion.duration(),
             ..EngineControlUnit::default()
         };
 
@@ -1327,8 +1327,15 @@ impl EngineBlock {
         let limiter = self.ecu.evaluate_limiter(rpm);
         let dfco = self.ecu.update_dfco(self.throttle, rpm);
         self.model.fuel_cut = dfco || limiter == LimiterCut::Fuel;
-        self.model.wiebe.spark_angle = self.ecu.spark_angle_with_throttle(load, rpm, self.throttle);
-        self.model.wiebe.duration = self.ecu.wiebe_duration(afr);
+        // Spark timing is the ECU's on an engine that has a coil. A diesel has
+        // none: its heat release starts where the Arrhenius integral says, and
+        // the latch solves that per cycle. See [`HeatRelease`].
+        let spark_angle = self.ecu.spark_angle_with_throttle(load, rpm, self.throttle);
+        let wiebe_duration = self.ecu.wiebe_duration(afr);
+        if let Some(wiebe) = self.model.combustion.spark_mut() {
+            wiebe.spark_angle = spark_angle;
+            wiebe.duration = wiebe_duration;
+        }
         for bank in &mut self.exhaust_banks {
             bank.plenum.gamma = self.model.gas.gamma_burned;
             bank.plenum.gas_constant = self.model.gas.r_burned;
@@ -1597,14 +1604,7 @@ impl EngineBlock {
 
     /// Forces the per-cycle latch, for tests and for seeding a warm start.
     pub fn latch_now(&mut self) {
-        let cyl = self.master.cylinder;
-        self.master.latch = CycleLatch {
-            fuel_mass: self.model.trapped_fuel_mass(cyl.mass, cyl.burned_fraction),
-            pressure: cyl.pressure(&self.model.geometry, &self.model.gas),
-            temperature: cyl.temperature,
-            volume: self.model.geometry.safe_volume(cyl.theta),
-            gamma: self.model.gas.gamma(cyl.burned_fraction),
-        };
+        self.master.latch = self.model.latch(&self.master.cylinder, self.omega);
     }
 }
 

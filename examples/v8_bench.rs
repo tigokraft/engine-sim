@@ -116,8 +116,8 @@ fn header(block: &EngineBlock) {
     println!("  compression       {:.1} :1", g.compression_ratio);
     println!(
         "  spark / burn      {:.0} deg BTDC / {:.0} deg duration",
-        360.0 - block.model.wiebe.spark_angle.to_degrees(),
-        block.model.wiebe.duration.to_degrees()
+        360.0 - block.model.combustion.commanded_angle().to_degrees(),
+        block.model.combustion.duration().to_degrees()
     );
     println!(
         "  valve timing      IVO {:.0} IVC {:.0} / EVO {:.0} EVC {:.0} (cycle deg)",

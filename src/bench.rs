@@ -32,7 +32,9 @@ use crate::physics::engine_block::{EngineBlock, FiringOrder};
 use crate::physics::plumbing::{
     Collector, Crossover, ExhaustSystem, IntakeSystem, PipeSection, Silencer, ThrottleLayout,
 };
-use crate::physics::thermodynamics::{CylinderModel, ValveEvent, ValveTrain, WiebeProfile};
+use crate::physics::thermodynamics::{
+    CylinderModel, HeatRelease, ValveEvent, ValveTrain, WiebeProfile,
+};
 
 /// Speed below which the engine has stalled [rev/min].
 pub const STALL_RPM: f64 = 400.0;
@@ -306,7 +308,13 @@ impl EnginePreset {
                 geometry: CylinderGeometry::new(0.094, 0.0810, 0.1420, 12.5),
                 // A shorter burn: flat-plane vees are built to rev, and a race
                 // chamber lights faster than a road one.
-                wiebe: WiebeProfile::new(deg(342.0), deg(52.0), 5.0, 2.1, 0.97),
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    deg(342.0),
+                    deg(52.0),
+                    5.0,
+                    2.1,
+                    0.97,
+                )),
                 ..CylinderModel::default()
             },
             firing: FiringOrder::flat_plane_v8(),
@@ -354,7 +362,13 @@ impl EnginePreset {
             note: "72 deg firing, unevenly split across the banks: metallic and hard.",
             model: CylinderModel {
                 geometry: CylinderGeometry::new(0.0845, 0.0928, 0.1540, 12.7),
-                wiebe: WiebeProfile::new(deg(344.0), deg(54.0), 5.0, 2.0, 0.97),
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    deg(344.0),
+                    deg(54.0),
+                    5.0,
+                    2.0,
+                    0.97,
+                )),
                 ..CylinderModel::default()
             },
             firing: FiringOrder::v10(),
@@ -419,7 +433,13 @@ impl EnginePreset {
             note: "60 deg firing, even on both banks: no beat left to hear, only pitch.",
             model: CylinderModel {
                 geometry: CylinderGeometry::new(0.095, 0.0764, 0.1380, 11.8),
-                wiebe: WiebeProfile::new(deg(344.0), deg(50.0), 5.0, 2.1, 0.97),
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    deg(344.0),
+                    deg(50.0),
+                    5.0,
+                    2.1,
+                    0.97,
+                )),
                 ..CylinderModel::default()
             },
             firing: FiringOrder::v12(),
@@ -492,7 +512,13 @@ impl EnginePreset {
                 // 654 cc per chamber, with a rod long enough to be nearly
                 // sinusoidal. See the doc comment above.
                 geometry: CylinderGeometry::new(0.1050, 0.0755, 0.4530, 10.0),
-                wiebe: WiebeProfile::new(deg(335.0), deg(90.0), 5.0, 1.6, 0.94),
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    deg(335.0),
+                    deg(90.0),
+                    5.0,
+                    1.6,
+                    0.94,
+                )),
                 valves: ValveTrain {
                     intake: ValveEvent::new(deg(680.0), deg(280.0), 0.014, 0.048, 0.70),
                     exhaust: ValveEvent::new(deg(480.0), deg(280.0), 0.013, 0.042, 0.68),

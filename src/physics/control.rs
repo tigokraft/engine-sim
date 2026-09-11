@@ -717,7 +717,8 @@ mod tests {
         use crate::environment::Environment;
         use crate::physics::cylinder::{deg, wrap_cycle, CylinderGeometry};
         use crate::physics::thermodynamics::{
-            CycleLatch, CylinderModel, PortConditions, Rk4Solver, ThermoState, WiebeProfile,
+            CycleLatch, CylinderModel, HeatRelease, PortConditions, Rk4Solver, ThermoState,
+            WiebeProfile,
         };
 
         // Engine operating near the knock threshold: 10.5:1 compression ratio
@@ -741,7 +742,13 @@ mod tests {
 
             let model = CylinderModel {
                 geometry: geom,
-                wiebe: WiebeProfile::new(spark_angle, deg(60.0), 5.0, 2.0, 0.97),
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    spark_angle,
+                    deg(60.0),
+                    5.0,
+                    2.0,
+                    0.97,
+                )),
                 ..CylinderModel::default()
             };
             let ports = PortConditions::from_environment(&env, &model.gas);
@@ -757,6 +764,7 @@ mod tests {
                 temperature: st.cylinder.temperature,
                 volume: model.geometry.max_volume(),
                 gamma: model.gas.gamma_unburned,
+                autoignition: None,
             };
 
             for _ in 0..300 {
