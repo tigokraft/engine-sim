@@ -945,6 +945,49 @@ mod tests {
     }
 
     #[test]
+    fn a_cold_engine_idles_above_a_warm_one_and_converges() {
+        let preset = EnginePreset::cross_plane_v8();
+        let dt = 1.0 / 120.0;
+
+        let mut block = preset.block(Environment::default());
+        block.cold_start();
+        let mut driveline = Driveline::new(&preset);
+
+        // Ten seconds of a cold start: the governor is holding a fast idle.
+        let mut idle_for = |block: &mut EngineBlock, driveline: &mut Driveline, seconds: f64| {
+            for _ in 0..(seconds / dt) as usize {
+                driveline.update(block, dt);
+                block.update(dt, driveline.rpm);
+            }
+            driveline.rpm
+        };
+
+        let cold = idle_for(&mut block, &mut driveline, 10.0);
+        assert!(
+            cold > preset.idle * 1.25,
+            "a stone-cold engine idled at {cold:.0} rpm against a warm {:.0}",
+            preset.idle
+        );
+
+        // And it comes back down on its own, on the block's temperature rather
+        // than on a timer: no throttle input anywhere in this test.
+        let warm = idle_for(&mut block, &mut driveline, 120.0);
+        assert!(
+            warm < cold,
+            "the fast idle never came down: {warm:.0} rpm after two minutes"
+        );
+        assert!(
+            (warm - preset.idle).abs() < 120.0,
+            "converged to {warm:.0} rpm rather than the {:.0} rpm it idles at warm",
+            preset.idle
+        );
+        assert!(
+            driveline.throttle_target == 0.0,
+            "the test drove the throttle instead of letting the governor do it"
+        );
+    }
+
+    #[test]
     fn a_presets_shaft_and_its_voice_always_agree() {
         // The two halves of a turbo are wired up separately — one into the
         // snapshot source, one into the synth — and disagreeing is silent in
