@@ -1013,4 +1013,72 @@ mod tests {
             "Acoustic energy must arrive at the listener"
         );
     }
+
+    #[test]
+    fn ground_notch_matches_the_path_difference() {
+        let sample_rate = 48_000.0;
+        let hs = 0.5f32;
+        let hr = 1.2f32;
+        let d = 4.0f32;
+        let source_pos = [0.0, 0.0, hs];
+        let receiver_pos = [d, 0.0, hr];
+
+        let delta_r = ground_path_difference(source_pos, receiver_pos);
+        let predicted_f_notch = ground_notch_hz(delta_r, SPEED_OF_SOUND_AIR);
+
+        let aperture = Aperture::new(source_pos, 1e-6, [1.0, 0.0, 0.0]);
+        let listener = Listener {
+            position: receiver_pos,
+            ear_spacing: 0.0,
+        };
+
+        // Measure steady-state transmission amplitude as a function of frequency
+        let measure_amplitude = |freq: f32| -> f32 {
+            let mut path = AperturePath::new(aperture, sample_rate);
+            let mut max_val = 0.0f32;
+            let n_samples = (sample_rate * 0.1) as usize; // 100 ms
+            for n in 0..n_samples {
+                let t = n as f32 / sample_rate;
+                let sig = (2.0 * PI * freq * t).sin();
+                let (l, _) = path.step_propagated(sig, &listener);
+                if n > n_samples / 2 && l.abs() > max_val {
+                    max_val = l.abs();
+                }
+            }
+            max_val
+        };
+
+        let amp_notch = measure_amplitude(predicted_f_notch);
+        let amp_half = measure_amplitude(0.5 * predicted_f_notch);
+        let amp_double = measure_amplitude(2.0 * predicted_f_notch);
+
+        // Transmission at notch must be much lower than below and above it
+        assert!(
+            amp_notch < 0.25 * amp_half,
+            "Cancellation notch at {predicted_f_notch:.1} Hz must be deep: notch={amp_notch}, half={amp_half}"
+        );
+        assert!(
+            amp_notch < 0.20 * amp_double,
+            "Cancellation notch at {predicted_f_notch:.1} Hz must be deep: notch={amp_notch}, double={amp_double}"
+        );
+
+        // Sweep in 5 Hz steps around predicted notch and verify minimum lands right at predicted notch
+        let mut min_amp = f32::MAX;
+        let mut min_freq = 0.0f32;
+        let f_start = (predicted_f_notch * 0.7) as u32;
+        let f_end = (predicted_f_notch * 1.3) as u32;
+        for f in (f_start..=f_end).step_by(5) {
+            let amp = measure_amplitude(f as f32);
+            if amp < min_amp {
+                min_amp = amp;
+                min_freq = f as f32;
+            }
+        }
+
+        let error = (min_freq - predicted_f_notch).abs() / predicted_f_notch;
+        assert!(
+            error < 0.03,
+            "Minimum transmission frequency ({min_freq:.1} Hz) must match predicted notch ({predicted_f_notch:.1} Hz) within 3%"
+        );
+    }
 }
