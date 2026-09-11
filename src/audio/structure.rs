@@ -87,9 +87,11 @@ pub const BLOCK_HEIGHT_RATIO: f32 = 4.0;
 /// Thinnest cylinder wall the model will assume [m].
 ///
 /// The wall between two bores is `(spacing - bore) / 2` and gets thin fast on a
-/// short-deck engine; siamesed-bore blocks put it near 3 mm and no production
-/// block goes below it, so neither does this.
-pub const MIN_BORE_WALL: f32 = 0.0035;
+/// short-deck engine. A high-output V10 on 90 mm centres with an 84.5 mm bore
+/// is down to 2.75 mm of iron between one cylinder and the next, which is about
+/// as far as a siamesed block goes; nothing in the catalogue is thinner and
+/// neither is this.
+pub const MIN_BORE_WALL: f32 = 0.0025;
 
 /// Young's modulus of a stamped steel oil pan [Pa].
 pub const PAN_MODULUS: f32 = 200.0e9;
