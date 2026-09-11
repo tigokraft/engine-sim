@@ -24,17 +24,17 @@ The analysis is an 8192-point Hann STFT at 48 kHz: a 5.86 Hz bin, and a 17.6 Hz 
 
 | Engine | Spec | Induction | Firing order | Top resonance | Clean |
 |---|---|---|---:|---:|---|
-| [Inline-4](inline-4.md) | 2.0 L  4 cyl  11.5:1 | naturally aspirated | 2 | 195 Hz | yes |
-| [Cross-plane V8](cross-plane-v8.md) | 5.0 L  8 cyl  11.0:1 | naturally aspirated | 4 | 170 Hz | yes |
-| [Flat-plane V8](flat-plane-v8.md) | 4.5 L  8 cyl  12.5:1 | naturally aspirated | 4 | 147 Hz | yes |
-| [V10](v10.md) | 5.2 L  10 cyl  12.7:1 | naturally aspirated | 5 | 148 Hz | yes |
-| [V12](v12.md) | 6.5 L  12 cyl  11.8:1 | naturally aspirated | 6 | 160 Hz | yes |
-| [2-Rotor Wankel](2-rotor-wankel.md) | 2.6 L  4 cyl  10.0:1 | naturally aspirated | 2 | 200 Hz | yes |
-| [Turbo Inline-4](turbo-inline-4.md) | 2.0 L  4 cyl  9.6:1 | turbocharged | 2 | 191 Hz | yes |
-| [Twin-turbo V8](twin-turbo-v8.md) | 4.0 L  8 cyl  10.0:1 | turbocharged | 4 | 170 Hz | yes |
-| [Turbo Inline-6](turbo-inline-6.md) | 3.0 L  6 cyl  9.2:1 | turbocharged | 3 | 180 Hz | yes |
+| [Inline-4](inline-4.md) | 2.0 L  4 cyl  11.5:1 | naturally aspirated | 2 | 8220 Hz | yes |
+| [Cross-plane V8](cross-plane-v8.md) | 5.0 L  8 cyl  11.0:1 | naturally aspirated | 4 | 7184 Hz | yes |
+| [Flat-plane V8](flat-plane-v8.md) | 4.5 L  8 cyl  12.5:1 | naturally aspirated | 4 | 9013 Hz | yes |
+| [V10](v10.md) | 5.2 L  10 cyl  12.7:1 | naturally aspirated | 5 | 404 Hz | yes |
+| [V12](v12.md) | 6.5 L  12 cyl  11.8:1 | naturally aspirated | 6 | 2297 Hz | yes |
+| [2-Rotor Wankel](2-rotor-wankel.md) | 2.6 L  4 cyl  10.0:1 | naturally aspirated | 2 | 8385 Hz | yes |
+| [Turbo Inline-4](turbo-inline-4.md) | 2.0 L  4 cyl  9.6:1 | turbocharged | 2 | 7693 Hz | yes |
+| [Twin-turbo V8](twin-turbo-v8.md) | 4.0 L  8 cyl  10.0:1 | turbocharged | 4 | 10547 Hz | yes |
+| [Turbo Inline-6](turbo-inline-6.md) | 3.0 L  6 cyl  9.2:1 | turbocharged | 3 | 7986 Hz | yes |
 
-Every engine's strongest resonance lands in the same narrow band, because every engine is currently breathing through the same muffler: `SynthConfig::uniform` gives all nine eight litres of chamber behind a 50 mm neck, and `f = (c / 2 pi) sqrt(A_neck / (V L_neck))` puts that at `0.249 c`. The only thing separating one engine from another here is the temperature of its own exhaust, through `c = sqrt(gamma R T)`. Stage 3 is where they stop sharing plumbing, and this column is the first number it has to pull apart.
+Every engine now breathes through its own plumbing, so this column no longer reads the one muffler they all used to share and no longer lands in a narrow band. It is the most prominent peak in the sweep average and nothing more: a network of primaries, a collector and a silencer chain has modes all the way up, and which of them stands tallest is a property of that engine's pipes. Read the per-engine tables for the peaks in order rather than this one number.
 
 ## CPU
 
@@ -44,12 +44,12 @@ Unlike everything else here these figures are a property of the machine that ran
 
 | Engine | `idle_hold` | `sweep_up` | `sweep_down` | `tip_in` | `overrun_cut` | `limiter_bounce` | Synth core, worst |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Inline-4 | 237x | 79x | 70x | 111x | 70x | 49x | 0.13 % |
-| Cross-plane V8 | 235x | 81x | 71x | 114x | 72x | 51x | 0.17 % |
-| Flat-plane V8 | 215x | 69x | 60x | 98x | 60x | 43x | 0.16 % |
-| V10 | 208x | 69x | 61x | 97x | 61x | 43x | 0.18 % |
-| V12 | 217x | 71x | 61x | 97x | 60x | 43x | 0.19 % |
-| 2-Rotor Wankel | 220x | 67x | 59x | 96x | 58x | 41x | 0.12 % |
-| Turbo Inline-4 | 197x | 77x | 68x | 105x | 68x | 49x | 0.24 % |
-| Twin-turbo V8 | 188x | 72x | 63x | 98x | 64x | 46x | 0.31 % |
-| Turbo Inline-6 | 195x | 74x | 66x | 101x | 66x | 47x | 0.24 % |
+| Inline-4 | 73x | 55x | 49x | 68x | 49x | 38x | 0.93 % |
+| Cross-plane V8 | 71x | 45x | 41x | 53x | 41x | 33x | 1.17 % |
+| Flat-plane V8 | 73x | 42x | 38x | 50x | 38x | 29x | 1.17 % |
+| V10 | 58x | 37x | 33x | 43x | 34x | 27x | 1.51 % |
+| V12 | 57x | 37x | 34x | 44x | 34x | 27x | 1.47 % |
+| 2-Rotor Wankel | 100x | 50x | 44x | 62x | 43x | 33x | 0.71 % |
+| Turbo Inline-4 | 88x | 50x | 45x | 61x | 46x | 36x | 0.98 % |
+| Twin-turbo V8 | 59x | 38x | 34x | 44x | 35x | 29x | 1.61 % |
+| Turbo Inline-6 | 78x | 45x | 41x | 55x | 41x | 33x | 1.17 % |
