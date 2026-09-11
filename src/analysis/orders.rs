@@ -905,6 +905,71 @@ impl AverageSpectrum {
         diffs[diffs.len() / 2] / 0.6745 / std::f64::consts::SQRT_2
     }
 
+    /// Slope of the spectrum's own floor between `lo_hz` and `hi_hz`
+    /// [dB/octave], or `None` if the band is too narrow to fit a line to.
+    ///
+    /// The third comparison metric, after order balance and resonance
+    /// placement, and the one that says whether a synth is *shaped* like the
+    /// thing it is copying. A real recording's floor falls away with frequency
+    /// — viscothermal loss down the pipe goes as `sqrt(f)`, the radiating mouth
+    /// rolls off above `ka = 1`, and the air between the car and the microphone
+    /// takes the top off what is left. A model whose orders all land in the
+    /// right place can still read as synthetic because its floor is flat.
+    ///
+    /// Taken as the median of each octave band rather than a fit to every bin:
+    /// the floor is what is *left* when the resonances are taken out, and a
+    /// median over an octave of bins is the cheapest honest way to take them
+    /// out. A least-squares fit straight to the spectrum would be a fit to the
+    /// tallest peaks in it.
+    ///
+    /// Gain-invariant, like a balance and for the same reason: a slope does not
+    /// know what level it started from.
+    pub fn tilt_db_per_octave(&self, lo_hz: f64, hi_hz: f64) -> Option<f64> {
+        if self.frames == 0
+            || !(lo_hz.is_finite() && hi_hz.is_finite())
+            || lo_hz <= 0.0
+            || hi_hz <= 2.0 * lo_hz
+        {
+            return None;
+        }
+        let bin = self.bin_hz();
+        let top = ((hi_hz / bin).floor() as usize).min(self.power.len() - 1);
+
+        // One point per octave, at the band's geometric centre.
+        let mut points: Vec<(f64, f64)> = Vec::new();
+        let mut low = lo_hz.max(self.stft.resolution_floor());
+        while low * 2.0 <= hi_hz {
+            let first = (low / bin).ceil() as usize;
+            let last = ((2.0 * low / bin).floor() as usize).min(top);
+            if last > first + 8 {
+                let mut band: Vec<f64> = (first..=last).map(|k| self.bin_db(k)).collect();
+                band.sort_by(f64::total_cmp);
+                points.push((
+                    (low * std::f64::consts::SQRT_2).log2(),
+                    band[band.len() / 2],
+                ));
+            }
+            low *= 2.0;
+        }
+        if points.len() < 3 {
+            return None;
+        }
+
+        // Ordinary least squares through the octave medians.
+        let n = points.len() as f64;
+        let mean_x = points.iter().map(|p| p.0).sum::<f64>() / n;
+        let mean_y = points.iter().map(|p| p.1).sum::<f64>() / n;
+        let sxy: f64 = points
+            .iter()
+            .map(|(x, y)| (x - mean_x) * (y - mean_y))
+            .sum();
+        let sxx: f64 = points
+            .iter()
+            .map(|(x, _)| (x - mean_x) * (x - mean_x))
+            .sum();
+        (sxx > 0.0).then(|| sxy / sxx)
+    }
+
     /// The `count` most prominent peaks, in frequency order.
     ///
     /// `min_prominence_db` is a floor: the test actually applied is the larger
