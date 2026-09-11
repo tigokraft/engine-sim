@@ -1275,9 +1275,10 @@ fn markdown(all: &[Calibrated]) -> String {
         let _ = writeln!(out, "### Resonance placement\n");
         let _ = writeln!(
             out,
-            "| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | Implies |"
+            "| Mode | Formula | Predicted [Hz] | Measured [Hz] | Error | \
+             Level [dBFS] | Prominence [dB] | Implies |"
         );
-        let _ = writeln!(out, "|---|---|---:|---:|---:|---|");
+        let _ = writeln!(out, "|---|---|---:|---:|---:|---:|---:|---|");
         for (predicted, placement) in &c.placements {
             let implied = predicted
                 .length
@@ -1285,9 +1286,13 @@ fn markdown(all: &[Calibrated]) -> String {
                 .map_or_else(String::new, |l| {
                     format!("{} → {l:.3} m", predicted.parameter)
                 });
+            // The level and the prominence are what say how much a placement
+            // is worth: a mode standing 3 dB out of its surroundings is a
+            // shoulder that happened to be near a prediction, and one standing
+            // 25 dB out is the mode.
             let _ = writeln!(
                 out,
-                "| {} | `{}` | {:.1} | {} | {} | {implied} |",
+                "| {} | `{}` | {:.1} | {} | {} | {} | {} | {implied} |",
                 predicted.label,
                 predicted.formula,
                 predicted.hz,
@@ -1297,6 +1302,12 @@ fn markdown(all: &[Calibrated]) -> String {
                 placement
                     .error_pct()
                     .map_or_else(|| "—".into(), |e| format!("{e:+.1} %")),
+                placement
+                    .db
+                    .map_or_else(|| "—".into(), |db| format!("{db:.1}")),
+                placement
+                    .prominence_db
+                    .map_or_else(|| "—".into(), |db| format!("{db:.1}")),
             );
         }
 
