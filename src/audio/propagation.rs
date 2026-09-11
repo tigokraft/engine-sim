@@ -94,6 +94,22 @@ pub fn air_absorption_cutoff(distance: f32) -> f32 {
     AIR_ABSORPTION_BASE_HZ / (1.0 + AIR_ABSORPTION_RATE * excess)
 }
 
+/// Directivity cutoff frequency for an aperture of corner frequency $f_c$ at angle $\theta$ [Hz].
+///
+/// An open mouth is a monopole below $ka = 1$ ($f \le f_c$) and beams along its facing
+/// normal above $ka = 1$. Off-axis listeners receive full low-end but progressively
+/// lose high frequencies.
+#[inline]
+pub fn directivity_cutoff(angle_rad: f32, corner_hz: f32, sample_rate: f32) -> f32 {
+    let half_angle = angle_rad.clamp(0.0, PI) * 0.5;
+    let s = half_angle.sin();
+    if s < 1e-3 {
+        0.45 * sample_rate
+    } else {
+        (corner_hz / s).clamp(corner_hz, 0.45 * sample_rate)
+    }
+}
+
 /// Geometric distance attenuation factor $r_0 / r$ [-].
 ///
 /// Follows the inverse-square law for sound intensity, which corresponds to
@@ -219,6 +235,8 @@ pub struct AperturePath {
     right_delay: DelayLine,
     left_air: OnePole,
     right_air: OnePole,
+    left_directivity: OnePole,
+    right_directivity: OnePole,
 }
 
 impl AperturePath {
@@ -233,6 +251,8 @@ impl AperturePath {
             right_delay: DelayLine::with_max_delay(max_samples),
             left_air: OnePole::new(sample_rate, AIR_ABSORPTION_BASE_HZ),
             right_air: OnePole::new(sample_rate, AIR_ABSORPTION_BASE_HZ),
+            left_directivity: OnePole::new(sample_rate, 0.45 * sample_rate),
+            right_directivity: OnePole::new(sample_rate, 0.45 * sample_rate),
         }
     }
 
@@ -242,6 +262,8 @@ impl AperturePath {
         self.right_delay.reset();
         self.left_air.reset();
         self.right_air.reset();
+        self.left_directivity.reset();
+        self.right_directivity.reset();
     }
 
     /// Delays one input sample by the physical path length to each ear.
@@ -264,24 +286,45 @@ impl AperturePath {
         (self.left_delay.read(d_left), self.right_delay.read(d_right))
     }
 
-    /// Propagates sample through path delay, air absorption lowpass, and 1/r distance attenuation.
+    /// Propagates sample through mouth directivity, path delay, air absorption, and 1/r distance attenuation.
     #[inline]
-    pub fn step_attenuated(&mut self, sample: f32, listener: &Listener) -> (f32, f32) {
+    pub fn step_propagated(&mut self, sample: f32, listener: &Listener) -> (f32, f32) {
         let (left_ear, right_ear) = listener.ears();
         let r_left = self.aperture.distance_to(left_ear);
         let r_right = self.aperture.distance_to(right_ear);
+        let angle_left = self.aperture.angle_to(left_ear);
+        let angle_right = self.aperture.angle_to(right_ear);
 
         let (del_left, del_right) = self.step_delay(sample, listener);
+
+        let fc = self.aperture.corner_hz(SPEED_OF_SOUND_AIR);
+        self.left_directivity.set_cutoff(
+            self.sample_rate,
+            directivity_cutoff(angle_left, fc, self.sample_rate),
+        );
+        self.right_directivity.set_cutoff(
+            self.sample_rate,
+            directivity_cutoff(angle_right, fc, self.sample_rate),
+        );
+
+        let dir_left = self.left_directivity.process(del_left);
+        let dir_right = self.right_directivity.process(del_right);
 
         self.left_air
             .set_cutoff(self.sample_rate, air_absorption_cutoff(r_left));
         self.right_air
             .set_cutoff(self.sample_rate, air_absorption_cutoff(r_right));
 
-        let left = self.left_air.process(del_left) * distance_attenuation(r_left);
-        let right = self.right_air.process(del_right) * distance_attenuation(r_right);
+        let left = self.left_air.process(dir_left) * distance_attenuation(r_left);
+        let right = self.right_air.process(dir_right) * distance_attenuation(r_right);
 
         (left, right)
+    }
+
+    /// Backwards-compatible alias for [`Self::step_propagated`].
+    #[inline]
+    pub fn step_attenuated(&mut self, sample: f32, listener: &Listener) -> (f32, f32) {
+        self.step_propagated(sample, listener)
     }
 }
 
@@ -491,6 +534,58 @@ mod tests {
             high_gain < 0.85,
             "10 kHz should be measurably attenuated at 20 m: got {}",
             high_gain
+        );
+    }
+
+    #[test]
+    fn moving_the_listener_behind_the_car_attenuates_the_tailpipes_high_end_and_not_its_low_end() {
+        let sample_rate = 48_000.0;
+        // Tailpipe pointed downward (0, 0, -1) or transversely, common on road vehicles.
+        // A listener behind the car is off-axis relative to the downward aperture opening.
+        let tailpipe = Aperture::new([0.0, -2.0, 0.3], PI * 0.03 * 0.03, [0.0, 0.0, -1.0]);
+        let dist = 4.0;
+        let behind = Listener {
+            position: [0.0, -dist - 2.0, 0.3],
+            ear_spacing: 0.0,
+        };
+        // Directly on-axis under the opening at the exact same distance:
+        let on_axis = Listener {
+            position: [0.0, -2.0, 0.3 - dist],
+            ear_spacing: 0.0,
+        };
+
+        let measure_gain = |listener: &Listener, freq: f32| -> f32 {
+            let mut path = AperturePath::new(tailpipe, sample_rate);
+            let mut max_val = 0.0f32;
+            for n in 0..4000 {
+                let t = n as f32 / sample_rate;
+                let sig = (2.0 * PI * freq * t).sin();
+                let (l, _) = path.step_propagated(sig, listener);
+                if n > 2000 && l.abs() > max_val {
+                    max_val = l.abs();
+                }
+            }
+            max_val
+        };
+
+        // Low frequency (60 Hz), well below ka = 1 (corner ~ 1820 Hz):
+        let low_on_axis = measure_gain(&on_axis, 60.0);
+        let low_behind = measure_gain(&behind, 60.0);
+        assert!(
+            (low_behind - low_on_axis).abs() / low_on_axis < 0.05,
+            "Low frequencies must be omnidirectional (monopole): behind={}, on_axis={}",
+            low_behind,
+            low_on_axis
+        );
+
+        // High frequency (8000 Hz), well above ka = 1:
+        let high_on_axis = measure_gain(&on_axis, 8000.0);
+        let high_behind = measure_gain(&behind, 8000.0);
+        assert!(
+            high_behind < 0.55 * high_on_axis,
+            "High frequencies must beam along the aperture normal and attenuate off-axis: behind={}, on_axis={}",
+            high_behind,
+            high_on_axis
         );
     }
 }
