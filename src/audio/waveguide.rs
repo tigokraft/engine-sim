@@ -1607,13 +1607,14 @@ impl ExhaustNetwork {
         }
 
         // 3. Crossover and intermediate pipes
+        let temp_cross = stations.collector + (stations.tailpipe - stations.collector) * 0.25;
         let crossover = BankCrossover::from_crossover(
             &exhaust.crossover,
             exhaust.collector.outlet_area,
             sample_rate,
             gamma,
             r,
-            temp,
+            temp_cross,
         );
 
         // Where the banks meet is geometry, not a constant: the crossover sits a
@@ -1629,6 +1630,7 @@ impl ExhaustNetwork {
             crate::physics::plumbing::Crossover::Balance180 => Some(0.0),
         };
 
+        let temp_precross = stations.collector + (stations.tailpipe - stations.collector) * 0.15;
         let mut pre_cross_pipes = Vec::with_capacity(n_banks);
         if let Some(position) = cross_position {
             for _ in 0..n_banks {
@@ -1638,12 +1640,12 @@ impl ExhaustNetwork {
                     sample_rate,
                     gamma,
                     r,
-                    temp,
+                    temp_precross,
                 ));
             }
         }
 
-        // 4. Silencer chain per bank
+        // 4. Silencer chain per bank: interpolate temperatures down the gradient
         let mut silencers = vec![Vec::new(); n_banks];
         for chain in &mut silencers {
             for silencer in &exhaust.silencers {
@@ -1656,6 +1658,13 @@ impl ExhaustNetwork {
                     r,
                     temp,
                 );
+            }
+            let n = chain.len().max(1) as f32;
+            for (k, element) in chain.iter_mut().enumerate() {
+                let frac = (k as f32 + 0.5) / n;
+                let t_elem = stations.collector
+                    + (stations.tailpipe - stations.collector) * (0.2 + 0.7 * frac);
+                element.tune(gamma, r, t_elem);
             }
         }
 
@@ -1689,13 +1698,15 @@ impl ExhaustNetwork {
         // Preallocate buffers
         let prim_in_0 = vec![0.0; n_cyl];
         let prim_to_collector = vec![0.0; n_cyl];
-        let mut bank_prim_in = Vec::with_capacity(n_banks);
-        let mut bank_prim_refl = Vec::with_capacity(n_banks);
-        for cyls in &bank_cylinders {
-            let cnt = cyls.len();
-            bank_prim_in.push(vec![0.0; cnt]);
-            bank_prim_refl.push(vec![0.0; cnt]);
-        }
+        let bank_prim_in = bank_cylinders
+            .iter()
+            .map(|cyls| vec![0.0; cyls.len().max(1)])
+            .collect();
+        let bank_prim_refl = bank_cylinders
+            .iter()
+            .map(|cyls| vec![0.0; cyls.len().max(1)])
+            .collect();
+
         let chain_returns = silencers
             .iter()
             .map(|chain| vec![0.0; chain.len() + 1])
@@ -1736,13 +1747,19 @@ impl ExhaustNetwork {
         for coll in &mut self.collectors {
             coll.tune(gamma, gas_constant, stations.collector);
         }
-        self.crossover.tune(gamma, gas_constant, stations.collector);
+        let t_cross = stations.collector + (stations.tailpipe - stations.collector) * 0.25;
+        self.crossover.tune(gamma, gas_constant, t_cross);
+        let t_precross = stations.collector + (stations.tailpipe - stations.collector) * 0.15;
         for p in &mut self.pre_cross_pipes {
-            p.tune(gamma, gas_constant, stations.collector);
+            p.tune(gamma, gas_constant, t_precross);
         }
         for chain in &mut self.silencers {
-            for element in chain {
-                element.tune(gamma, gas_constant, stations.collector);
+            let n = chain.len().max(1) as f32;
+            for (k, element) in chain.iter_mut().enumerate() {
+                let frac = (k as f32 + 0.5) / n;
+                let t_elem = stations.collector
+                    + (stations.tailpipe - stations.collector) * (0.2 + 0.7 * frac);
+                element.tune(gamma, gas_constant, t_elem);
             }
         }
         let c_tail = speed_of_sound(gamma, gas_constant, stations.tailpipe);
@@ -2173,6 +2190,83 @@ mod tests {
                 error * 100.0
             );
         }
+    }
+
+    #[test]
+    fn pipe_with_hot_end_and_cold_end_resonates_between_bulk_predictions() {
+        // A pipe that runs hot at the port (~1000 K) and cool at the tailpipe (~400 K)
+        // has a sound speed that varies along its length. Its acoustic travel time
+        // is the sum of the travel times through the hot and cool zones, so its
+        // fundamental resonance must sit strictly between the two bulk predictions:
+        //   f_cold < f_resonance < f_hot
+        // and cannot land at either.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.4;
+        const R: f32 = 287.0;
+        const T_HOT: f32 = 1000.0;
+        const T_COLD: f32 = 400.0;
+
+        let c_hot = speed_of_sound(GAMMA, R, T_HOT);
+        let c_cold = speed_of_sound(GAMMA, R, T_COLD);
+
+        let l1 = 0.40f64; // hot section
+        let l2 = 0.40f64; // cold section
+        let radius = 0.025f64;
+        let area = std::f64::consts::PI * radius * radius;
+
+        let mouth = Mouth::new(FS, radius as f32, false, c_cold);
+        let eff_l2 = l2 + mouth.end_correction() as f64;
+        let total_effective = l1 + eff_l2;
+
+        let f_bulk_hot = c_hot / (4.0 * total_effective as f32);
+        let f_bulk_cold = c_cold / (4.0 * total_effective as f32);
+
+        let mut pipe_hot = WaveguidePipe::new(l1, area, FS, GAMMA, R, T_HOT);
+        let mut pipe_cold = WaveguidePipe::new(eff_l2, area, FS, GAMMA, R, T_COLD);
+        pipe_cold.set_boundary_phase_delay(mouth.phase_delay_samples());
+        pipe_cold.tune(GAMMA, R, T_COLD);
+        let junction = ScatteringJunction::new(&[pipe_hot.admittance(), pipe_cold.admittance()]);
+        let mut mouth = mouth;
+
+        let mut j_in = [0.0f32; 2];
+        let mut j_out = [0.0f32; 2];
+
+        let mut radiated = vec![0.0f32; 1 << 16];
+        for (i, out) in radiated.iter_mut().enumerate() {
+            let (p_at_closed, p1_to_j) = pipe_hot.read_outputs();
+            let (p2_to_j, p2_to_mouth) = pipe_cold.read_outputs();
+
+            j_in[0] = p1_to_j;
+            j_in[1] = p2_to_j;
+            junction.scatter(&j_in, &mut j_out);
+
+            let (p_reflected, p_rad) = mouth.step(p2_to_mouth);
+
+            let excitation = if i == 0 { 1.0 } else { 0.0 };
+            pipe_hot.push_inputs(excitation + p_at_closed, j_out[0]);
+            pipe_cold.push_inputs(j_out[1], p_reflected);
+            *out = p_rad;
+        }
+
+        let mut best = (0.0f32, 0.0f32);
+        let mut f = f_bulk_cold * 0.9;
+        while f <= f_bulk_hot * 1.1 {
+            let m = magnitude_at(&radiated[1..], f, FS);
+            if m > best.1 {
+                best = (f, m);
+            }
+            f += 0.05;
+        }
+
+        let measured_f = best.0;
+        assert!(
+            measured_f > f_bulk_cold + 2.0,
+            "Resonance ({measured_f:.1} Hz) must be strictly above cold prediction ({f_bulk_cold:.1} Hz)"
+        );
+        assert!(
+            measured_f < f_bulk_hot - 10.0,
+            "Resonance ({measured_f:.1} Hz) must be strictly below hot prediction ({f_bulk_hot:.1} Hz)"
+        );
     }
 
     #[test]
