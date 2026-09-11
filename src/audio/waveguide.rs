@@ -764,6 +764,11 @@ impl TaperedCollector {
         self.inlet_count
     }
 
+    /// One-way transit delay of the converging taper [samples].
+    pub fn taper_delay_samples(&self) -> f32 {
+        self.taper_pipe.delay_samples()
+    }
+
     /// Retunes propagation delay and acoustic admittance for current gas state.
     pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
         self.taper_pipe.tune(gamma, gas_constant, temperature);
@@ -1703,6 +1708,16 @@ impl ExhaustNetwork {
     pub fn primary_round_trip_seconds(&self, cylinder: usize) -> f32 {
         let i = cylinder.min(self.primaries.len() - 1);
         2.0 * self.primaries[i].transit_time_seconds()
+    }
+
+    /// One-way transit delay of a bank's collector taper [samples].
+    pub fn collector_delay_samples(&self, bank: usize) -> f32 {
+        self.collectors[bank.min(self.collectors.len() - 1)].taper_delay_samples()
+    }
+
+    /// One-way transit delay of a bank's tailpipe [samples].
+    pub fn tailpipe_delay_samples(&self, bank: usize) -> f32 {
+        self.tailpipes[bank.min(self.tailpipes.len() - 1)].delay_samples()
     }
 
     /// Damping currently applied to a cylinder's valve end, `0..=1` [-].

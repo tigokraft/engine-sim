@@ -3091,6 +3091,105 @@ mod tests {
         );
     }
 
+    /// Runs a cold cross-plane V8 at `rpm` for `seconds`, returning its snapshot.
+    ///
+    /// The whole warm-up chain in one call: Woschni's wall loss into the block,
+    /// the block into the chamber wall, the port gas into the pipe walls, and
+    /// the pipe walls back into the gas the audio path tunes on.
+    #[cfg(test)]
+    fn warmed_snapshot(seconds: f64, rpm: f64) -> EngineSnapshot {
+        use crate::audio::{EngineControls, SnapshotSource};
+        use crate::environment::Environment;
+        use crate::physics::engine_block::EngineBlock;
+
+        let mut block = EngineBlock::cross_plane_v8(Environment::default());
+        block.cold_start();
+        let mut source = SnapshotSource::new(&block);
+        let dt = 1.0 / 120.0;
+        let mut snapshot = EngineSnapshot::default();
+        for _ in 0..(seconds / dt) as usize {
+            block.update(dt, rpm);
+            snapshot = source.sample(&block, rpm, dt, EngineControls::default());
+        }
+        snapshot
+    }
+
+    /// Settles a synth on a snapshot and reads back what its pipes are tuned to.
+    ///
+    /// Returns `(primary, collector, tailpipe)` one-way delays [samples].
+    #[cfg(test)]
+    fn settled_delays(snapshot: &EngineSnapshot) -> (f32, f32, f32) {
+        let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
+        synth.set_snapshot(snapshot);
+        // Every temperature in the synth glides on an 80 ms constant; a second
+        // of audio leaves them all on target.
+        render(&mut synth, FS as usize);
+        (
+            synth.network.primary_delay_samples(0),
+            synth.network.collector_delay_samples(0),
+            synth.network.tailpipe_delay_samples(0),
+        )
+    }
+
+    #[test]
+    fn warming_up_raises_every_pipe_resonance_by_sqrt_of_the_ratio() {
+        // Two seconds in the exhaust is still near ambient; three minutes has it
+        // on its plateau. Nothing else about the engine differs.
+        let cold = warmed_snapshot(2.0, 3_000.0);
+        let hot = warmed_snapshot(180.0, 3_000.0);
+
+        let (cold_prim, cold_coll, cold_tail) = settled_delays(&cold);
+        let (hot_prim, hot_coll, hot_tail) = settled_delays(&hot);
+
+        // A pipe of fixed length resonates at `c / 4L` with `c = sqrt(gamma R T)`,
+        // so the whole of what warming does to its pitch is `sqrt(T2 / T1)` — and
+        // the delay it is built on is the reciprocal of that. Each station is
+        // checked against its own gas, because they are no longer the same gas.
+        let stations: [(&str, f32, f32, f32, f32); 3] = [
+            (
+                "primary",
+                cold.primary_temperature[0],
+                hot.primary_temperature[0],
+                cold_prim,
+                hot_prim,
+            ),
+            (
+                "collector",
+                cold.collector_temperature,
+                hot.collector_temperature,
+                cold_coll,
+                hot_coll,
+            ),
+            (
+                "tailpipe",
+                cold.tailpipe_temperature,
+                hot.tailpipe_temperature,
+                cold_tail,
+                hot_tail,
+            ),
+        ];
+        for (name, t_cold, t_hot, delay_cold, delay_hot) in stations {
+            assert!(
+                t_hot > 1.20 * t_cold,
+                "{name} barely warmed: {t_cold:.0} K to {t_hot:.0} K"
+            );
+            let expected = (t_hot / t_cold).sqrt();
+            let measured = delay_cold / delay_hot;
+            assert!(
+                (measured / expected - 1.0).abs() < 0.01,
+                "{name} rose by {measured:.4}, not the sqrt({t_hot:.0}/{t_cold:.0}) = {expected:.4} \
+                 its gas temperature says"
+            );
+        }
+
+        // And the gradient survives the trip through the snapshot: the back of
+        // the system is cooler than the front, so it is also flatter.
+        assert!(
+            hot.primary_temperature[0] > hot.tailpipe_temperature,
+            "the exhaust arrived at the audio path with no gradient in it"
+        );
+    }
+
     #[test]
     fn hotter_exhaust_raises_every_resonance_by_sqrt_of_the_ratio() {
         let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
@@ -4574,6 +4673,38 @@ mod tests {
         assert!(
             intake_gain_cut > 0.0,
             "valve seatings must continue on spark cut"
+        );
+    }
+
+    #[test]
+    fn a_cold_engine_carries_a_louder_mechanical_floor() {
+        // The other half of the warm-up: thick oil is more friction, more
+        // friction is a louder valvetrain and bearing racket, and nothing in the
+        // audio path had to be told about the temperature to make that happen.
+        let cold = warmed_snapshot(2.0, 3_000.0);
+        let hot = warmed_snapshot(180.0, 3_000.0);
+        assert!(
+            cold.friction_mep > 1.15 * hot.friction_mep,
+            "a cold engine reported {:.0} Pa of FMEP against a warm {:.0}",
+            cold.friction_mep,
+            hot.friction_mep
+        );
+
+        let floor = |snapshot: &EngineSnapshot| {
+            let mut config = SynthConfig::cross_plane_v8(FS);
+            config.exhaust_level = 0.0;
+            config.intake_level = 0.0;
+            let mut synth = EngineSynth::new(config);
+            synth.exhaust_level.snap(0.0);
+            synth.set_snapshot(snapshot);
+            render(&mut synth, 48_000);
+            rms(&render(&mut synth, 48_000))
+        };
+        let cold_floor = floor(&cold);
+        let hot_floor = floor(&hot);
+        assert!(
+            cold_floor > 1.10 * hot_floor,
+            "the mechanical floor did not follow the oil: {cold_floor:.6} cold, {hot_floor:.6} warm"
         );
     }
 
