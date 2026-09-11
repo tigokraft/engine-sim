@@ -917,7 +917,7 @@ fn print_engine(calibrated: &Calibrated) {
             },
         ),
         (Some((order, db)), false) if calibrated.against_recording => println!(
-            "  quiet orders:  loudest {db:+.1} dB on order {}  [the reference's              own quiet orders, covered by the tolerance above]",
+            "  quiet orders:  loudest {db:+.1} dB on order {}  [quiet in the reference too]",
             trim(order),
         ),
         (Some((order, db)), false) => println!(
