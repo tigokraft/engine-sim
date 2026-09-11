@@ -240,7 +240,7 @@ impl Induction {
             voice: TurboVoicing {
                 order: 2.3,
                 reference_rpm: 160_000.0,
-                level: 0.020,
+                level: 0.028,
             },
         }
     }
@@ -263,7 +263,7 @@ impl Induction {
             voice: TurboVoicing {
                 order: 1.9,
                 reference_rpm: 145_000.0,
-                level: 0.014,
+                level: 0.020,
             },
         }
     }
@@ -289,7 +289,7 @@ impl Induction {
             voice: TurboVoicing {
                 order: 1.5,
                 reference_rpm: 116_000.0,
-                level: 0.022,
+                level: 0.031,
             },
         }
     }
