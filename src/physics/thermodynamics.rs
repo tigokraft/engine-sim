@@ -217,6 +217,97 @@ impl KnockModel {
 }
 
 // ---------------------------------------------------------------------------
+// Compression ignition: the Arrhenius delay of a diesel spray
+// ---------------------------------------------------------------------------
+
+/// Arrhenius ignition delay of diesel fuel sprayed into hot compressed air.
+///
+/// ```text
+/// tau = A * ((CN_ref - CN_0) / (CN - CN_0))^b * (P / 1 bar)^-n * exp(T_a / T)
+/// ```
+///
+/// The same law as [`KnockModel`], and deliberately so: autoignition is one
+/// chemical process, and whether it is a catastrophe or the entire operating
+/// principle depends only on which engine it happens in. A petrol engine is
+/// built so the Livengood-Wu integral never reaches one before the flame gets
+/// there; a diesel is built so it always does, a few crank degrees after the
+/// injector opens. Both are `tau = A P^-n exp(E_a / R T)` with a fuel-quality
+/// prefactor in front, and the only real difference is the direction the rating
+/// pulls: octane resists ignition, cetane promotes it.
+///
+/// The coefficients are Wolfer's, which is the fit every diesel delay
+/// correlation since is measured against, with the cetane term from
+/// Hardenberg and Hase normalised to [`REFERENCE_CETANE`] so that the
+/// pre-exponential stays Wolfer's own number.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IgnitionDelay {
+    /// Cetane number of the fuel [-].
+    pub cetane_number: f64,
+    /// Pre-exponential time constant [s].
+    pub time_constant: f64,
+    /// Cetane exponent (positive: more cetane shortens the delay) [-].
+    pub cetane_exponent: f64,
+    /// Pressure exponent (negative: pressure shortens the delay) [-].
+    pub pressure_exponent: f64,
+    /// Reduced activation temperature `E_a / R_u` [K].
+    pub activation_temperature: f64,
+}
+
+/// Cetane number the pre-exponential is quoted at [-].
+///
+/// Pump diesel in Europe is 51 minimum and in North America 40 to 45; fifty is
+/// the middle of that and the number the reference delay belongs to.
+pub const REFERENCE_CETANE: f64 = 50.0;
+
+/// Cetane number at which Hardenberg and Hase's delay term goes singular [-].
+///
+/// Their fit divides by `CN - 17.2`, which says that a fuel below roughly
+/// cetane 17 will not compression-ignite at all. It is a real edge of the
+/// correlation rather than a numerical one, and it is why the cetane number is
+/// clamped above it rather than floored at zero.
+pub const CETANE_FLOOR: f64 = 17.2;
+
+/// One bar, the unit Wolfer's pressure term is quoted in [Pa].
+pub const BAR: f64 = 1.0e5;
+
+impl Default for IgnitionDelay {
+    /// Cetane 50 pump diesel on Wolfer's coefficients.
+    fn default() -> Self {
+        Self {
+            cetane_number: REFERENCE_CETANE,
+            time_constant: 0.44e-3,
+            cetane_exponent: 0.63,
+            pressure_exponent: -1.19,
+            activation_temperature: 4_650.0,
+        }
+    }
+}
+
+impl IgnitionDelay {
+    /// Ignition delay of the spray at a given charge pressure and temperature [s].
+    pub fn delay(&self, pressure: f64, temperature: f64) -> f64 {
+        let p_bar = (pressure / BAR).max(1e-3);
+        let t = temperature.clamp(200.0, 4000.0);
+        let cn = self.cetane_number.max(CETANE_FLOOR + 1.0);
+        let cetane =
+            ((REFERENCE_CETANE - CETANE_FLOOR) / (cn - CETANE_FLOOR)).powf(self.cetane_exponent);
+        let tau = self.time_constant
+            * cetane
+            * p_bar.powf(self.pressure_exponent)
+            * (self.activation_temperature / t).exp();
+        // The same guard `KnockModel` needs and for the same reason: below
+        // ~500 K the exponential runs away, and `1/tau` has to stay a finite,
+        // well-scaled rate at both ends.
+        tau.clamp(1e-6, 1e9)
+    }
+
+    /// Rate of the Livengood-Wu integral, `dI/dt = 1 / tau` [1/s].
+    pub fn rate(&self, pressure: f64, temperature: f64) -> f64 {
+        1.0 / self.delay(pressure, temperature)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Wall heat transfer: Woschni
 // ---------------------------------------------------------------------------
 
@@ -1553,6 +1644,44 @@ mod tests {
         assert!(hot.ignition_delay(p, t).is_finite());
         // Cold end gas is effectively inert, not infinite.
         assert!(hot.ignition_delay(1e5, 300.0).is_finite());
+    }
+
+    #[test]
+    fn diesel_delay_shortens_with_cetane_pressure_and_temperature() {
+        let pump = IgnitionDelay::default();
+        let poor = IgnitionDelay {
+            cetane_number: 35.0,
+            ..IgnitionDelay::default()
+        };
+
+        let (p, t) = (50e5, 850.0);
+        assert!(
+            poor.delay(p, t) > pump.delay(p, t),
+            "a low-cetane fuel must be slower to light, not faster"
+        );
+        // The reference fuel is quoted at the reference cetane, so its prefactor
+        // is Wolfer's own number with nothing else on it.
+        approx(
+            IgnitionDelay {
+                cetane_number: REFERENCE_CETANE,
+                ..IgnitionDelay::default()
+            }
+            .delay(BAR, 0.5 * pump.activation_temperature),
+            pump.time_constant * std::f64::consts::E.powi(2),
+            1e-9,
+        );
+        assert!(pump.delay(80e5, t) < pump.delay(40e5, t));
+        assert!(pump.delay(p, 950.0) < pump.delay(p, 750.0));
+        // A real diesel lights within a millisecond or so of the injector
+        // opening at top dead centre; anything else is a typo in a coefficient.
+        let tdc = pump.delay(55e5, 900.0);
+        assert!(
+            (0.2e-3..2.0e-3).contains(&tdc),
+            "implausible delay at TDC conditions: {:.3} ms",
+            tdc * 1e3
+        );
+        assert!(pump.delay(1e5, 300.0).is_finite());
+        assert!(pump.rate(p, t).is_finite() && pump.rate(p, t) > 0.0);
     }
 
     #[test]
