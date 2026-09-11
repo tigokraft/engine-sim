@@ -23,8 +23,8 @@
 use std::f64::consts::PI;
 
 use crate::audio::{
-    AperturePositions, EngineControls, ImpulsiveSpec, Induction, MechanicalSpec, SnapshotSource,
-    SynthConfig,
+    AperturePositions, BlowOffVoicing, EngineControls, ImpulsiveSpec, Induction, MechanicalSpec,
+    SnapshotSource, SynthConfig, WastegateVoicing,
 };
 use crate::environment::Environment;
 use crate::physics::cylinder::{deg, CylinderGeometry};
@@ -116,6 +116,8 @@ pub struct EnginePreset {
     pub load: (f64, f64, f64),
     /// Physical radiating aperture locations on the vehicle chassis [m].
     pub aperture_positions: AperturePositions,
+    /// Whether anti-lag is enabled on lift for this engine.
+    pub anti_lag: bool,
 }
 
 impl EnginePreset {
@@ -132,6 +134,7 @@ impl EnginePreset {
         block.set_block_mass(self.block_mass);
         block.rebuild_exhaust_banks();
         block.ecu.redline = self.redline;
+        block.ecu.anti_lag = self.anti_lag;
         block
     }
 
@@ -152,6 +155,11 @@ impl EnginePreset {
 
     /// Whether a turbo is fitted.
     pub fn is_turbocharged(&self) -> bool {
+        matches!(self.induction, Induction::Turbocharged { .. })
+    }
+
+    /// Whether any compressor is fitted (turbo or supercharger).
+    pub fn is_forced(&self) -> bool {
         self.induction.is_forced()
     }
 
@@ -227,6 +235,7 @@ impl EnginePreset {
             inertia: 0.22,
             load: (3.0, 0.010, 7.0e-5),
             aperture_positions: AperturePositions::front_engine_single(),
+            anti_lag: false,
         }
     }
 
@@ -240,7 +249,7 @@ impl EnginePreset {
                 ..CylinderModel::default()
             },
             firing: FiringOrder::cross_plane_v8(),
-            induction: Induction::NaturallyAspirated,
+            induction: Induction::roots(),
             mechanical: MechanicalSpec::default(),
             exhaust: ExhaustSystem {
                 primaries: vec![
@@ -266,7 +275,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout: true,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.38, 0.044, 310.0); 8],
@@ -284,6 +293,7 @@ impl EnginePreset {
             inertia: 0.45,
             load: (6.0, 0.020, 1.3e-4),
             aperture_positions: AperturePositions::front_engine_dual(),
+            anti_lag: false,
         }
     }
 
@@ -333,6 +343,7 @@ impl EnginePreset {
             inertia: 0.30,
             load: (5.0, 0.014, 6.5e-5),
             aperture_positions: AperturePositions::mid_engine_dual(),
+            anti_lag: false,
         }
     }
 
@@ -347,7 +358,7 @@ impl EnginePreset {
                 ..CylinderModel::default()
             },
             firing: FiringOrder::v10(),
-            induction: Induction::NaturallyAspirated,
+            induction: Induction::centrifugal().with_blow_off(BlowOffVoicing::default()),
             mechanical: MechanicalSpec {
                 gear_whine: Some(ImpulsiveSpec::order(35.0, 0.28)),
                 ..MechanicalSpec::default()
@@ -397,6 +408,7 @@ impl EnginePreset {
                 intake: [0.0, 0.30, 0.75],
                 block: [0.0, -0.4, 0.45],
             },
+            anti_lag: false,
         }
     }
 
@@ -450,6 +462,7 @@ impl EnginePreset {
                 intake: [0.0, 1.6, 0.65],
                 block: [0.0, 0.7, 0.5],
             },
+            anti_lag: false,
         }
     }
 
@@ -521,6 +534,7 @@ impl EnginePreset {
             inertia: 0.20,
             load: (4.0, 0.013, 7.0e-5),
             aperture_positions: AperturePositions::rotary(),
+            anti_lag: false,
         }
     }
 
@@ -540,7 +554,7 @@ impl EnginePreset {
                 ..CylinderModel::default()
             },
             firing: FiringOrder::inline_four(),
-            induction: Induction::small_single(),
+            induction: Induction::small_single().with_blow_off(BlowOffVoicing::default()),
             mechanical: MechanicalSpec::default(),
             exhaust: ExhaustSystem {
                 primaries: vec![PipeSection::from_diameter(0.35, 0.038, 900.0); 4],
@@ -576,6 +590,7 @@ impl EnginePreset {
                 intake: [0.2, 1.4, 0.65],
                 block: [0.0, 0.8, 0.5],
             },
+            anti_lag: true,
         }
     }
 
@@ -595,7 +610,7 @@ impl EnginePreset {
                 ..CylinderModel::default()
             },
             firing: FiringOrder::cross_plane_v8(),
-            induction: Induction::twin(),
+            induction: Induction::twin().with_wastegate(WastegateVoicing::default()),
             mechanical: MechanicalSpec::default(),
             exhaust: ExhaustSystem {
                 primaries: vec![
@@ -621,7 +636,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.4, 0.065, 600.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout: true,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.26, 0.044, 310.0); 8],
@@ -639,6 +654,7 @@ impl EnginePreset {
             inertia: 0.44,
             load: (5.0, 0.016, 9.0e-5),
             aperture_positions: AperturePositions::front_engine_dual(),
+            anti_lag: false,
         }
     }
 
@@ -659,7 +675,9 @@ impl EnginePreset {
                 ..CylinderModel::default()
             },
             firing: FiringOrder::inline_six(),
-            induction: Induction::large_single(),
+            induction: Induction::large_single()
+                .with_blow_off(BlowOffVoicing::default())
+                .with_wastegate(WastegateVoicing::default()),
             mechanical: MechanicalSpec::default(),
             exhaust: ExhaustSystem {
                 primaries: vec![PipeSection::from_diameter(0.48, 0.042, 900.0); 6],
@@ -696,6 +714,7 @@ impl EnginePreset {
                 intake: [0.25, 1.4, 0.65],
                 block: [0.0, 0.7, 0.5],
             },
+            anti_lag: false,
         }
     }
 }
@@ -743,6 +762,10 @@ pub struct Driveline {
     pub pumping: f64,
     /// Brake torque the block last reported at this speed [N m].
     pub torque: f64,
+    /// Whether the active exhaust cutout is open.
+    pub exhaust_cutout: bool,
+    /// Whether anti-lag is enabled on lift.
+    pub anti_lag: bool,
 }
 
 impl Driveline {
@@ -760,6 +783,8 @@ impl Driveline {
             load: preset.load,
             pumping: CLOSED_THROTTLE_PMEP * preset.displacement() / (4.0 * PI),
             torque: 0.0,
+            exhaust_cutout: preset.exhaust.cutout,
+            anti_lag: preset.anti_lag,
         }
     }
 
@@ -828,8 +853,8 @@ impl Driveline {
         EngineControls {
             throttle: self.throttle.clamp(0.0, 1.0),
             spark_cut: self.cutting(),
-            exhaust_cutout: false,
-            anti_lag: false,
+            exhaust_cutout: self.exhaust_cutout,
+            anti_lag: self.anti_lag,
         }
     }
 }
@@ -1059,6 +1084,107 @@ mod tests {
             turbocharged < EnginePreset::catalogue().len(),
             "every engine is turbocharged"
         );
+    }
+
+    #[test]
+    fn induction_hardware_is_fitted_across_presets() {
+        let v8 = EnginePreset::cross_plane_v8();
+        assert!(
+            matches!(v8.induction, Induction::RootsSupercharged { .. }),
+            "cross_plane_v8 should carry a Roots supercharger"
+        );
+        assert!(
+            v8.exhaust.cutout,
+            "cross_plane_v8 should have an active exhaust cutout"
+        );
+
+        let v10 = EnginePreset::v10();
+        assert!(
+            matches!(v10.induction, Induction::CentrifugalSupercharged { .. }),
+            "v10 should carry a centrifugal supercharger"
+        );
+
+        let t_i4 = EnginePreset::turbo_inline_four();
+        assert!(
+            t_i4.anti_lag,
+            "turbo_inline_four should have anti-lag armed"
+        );
+        let t_i4_block = t_i4.block(Environment::default());
+        assert!(
+            t_i4_block.ecu.anti_lag,
+            "block ECU must inherit preset's anti-lag setting"
+        );
+        assert!(
+            matches!(
+                t_i4.induction,
+                Induction::Turbocharged {
+                    blow_off: Some(_),
+                    ..
+                }
+            ),
+            "turbo_inline_four should carry a blow-off valve"
+        );
+
+        let tt_v8 = EnginePreset::twin_turbo_v8();
+        assert!(
+            tt_v8.exhaust.cutout,
+            "twin_turbo_v8 should have an active exhaust cutout"
+        );
+        assert!(
+            matches!(
+                tt_v8.induction,
+                Induction::Turbocharged {
+                    wastegate: Some(_),
+                    ..
+                }
+            ),
+            "twin_turbo_v8 should carry wastegate chatter"
+        );
+
+        let t_i6 = EnginePreset::turbo_inline_six();
+        assert!(
+            matches!(
+                t_i6.induction,
+                Induction::Turbocharged {
+                    blow_off: Some(_),
+                    wastegate: Some(_),
+                    ..
+                }
+            ),
+            "turbo_inline_six should carry both blow-off and wastegate chatter"
+        );
+
+        // Check that SynthConfig accurately mirrors every preset's induction voicing
+        for preset in EnginePreset::catalogue() {
+            let block = preset.block(Environment::default());
+            let config = preset.synth_config(&block, 48_000.0);
+            match preset.induction {
+                Induction::NaturallyAspirated => {
+                    assert!(config.turbo.is_none());
+                    assert!(config.roots.is_none());
+                    assert!(config.centrifugal.is_none());
+                }
+                Induction::Turbocharged {
+                    voice,
+                    blow_off,
+                    wastegate,
+                    ..
+                } => {
+                    assert_eq!(config.turbo, Some(voice));
+                    assert_eq!(config.blow_off, blow_off);
+                    assert_eq!(config.wastegate, wastegate);
+                }
+                Induction::RootsSupercharged { voice } => {
+                    assert_eq!(config.roots, Some(voice));
+                    assert!(config.turbo.is_none());
+                }
+                Induction::CentrifugalSupercharged { voice, blow_off } => {
+                    assert_eq!(config.centrifugal, Some(voice));
+                    assert_eq!(config.blow_off, blow_off);
+                    assert!(config.turbo.is_none());
+                }
+            }
+        }
     }
 
     #[test]
