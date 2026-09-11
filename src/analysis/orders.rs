@@ -1135,6 +1135,77 @@ pub fn place(predicted_hz: f64, peaks: &[Peak], window_pct: f64) -> Placement {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The reference the crank provides on its own
+// ---------------------------------------------------------------------------
+
+/// Highest order the crank's comb is a fair reference for, as a multiple of
+/// the firing order.
+///
+/// A firing is not a Dirac impulse: blowdown lasts a valve event, and a valve
+/// event is a fixed number of crank degrees whatever the engine speed, so its
+/// envelope is fixed in *order* and it rolls the comb off from somewhere above
+/// the firing order. Two octaves up is where the two disagree enough to matter
+/// — an exhaust event of 90 crank degrees puts its first null around order
+/// eight of a four — so the comb is quoted below it and an open question is
+/// recorded above it rather than a number nobody should trust.
+pub const CRANK_COMB_ORDERS: f64 = 2.0;
+
+/// Relative amplitude of each order in a train of firings at crank angles
+/// `offsets` [rad].
+///
+/// The crank's own order spectrum: `N` impulses in a 720-degree cycle, summed
+/// with the phase each one has at that order. It is the one part of an engine's
+/// order balance that owes nothing to the plumbing, the fuelling or the
+/// synthesis — an inline-four's even 180-degree spacing puts energy on the even
+/// orders and mathematically nothing anywhere else, and a cross-plane V8's
+/// 90-180-270-180 bank leaves 1.5 standing 3.7 dB under its firing order. That
+/// is what makes it usable as a reference: it is derived, not recorded, and it
+/// cannot be tuned.
+///
+/// Order `n` is cycles per crank *revolution* and the offsets are crank
+/// radians, so the phase of a firing at `theta` is `n * theta`.
+pub fn firing_comb(offsets: &[f64], orders: &[f64]) -> Vec<f64> {
+    orders
+        .iter()
+        .map(|&order| {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for &theta in offsets {
+                re += (order * theta).cos();
+                im -= (order * theta).sin();
+            }
+            re.hypot(im)
+        })
+        .collect()
+}
+
+/// The order balance the crank alone predicts, bank by bank.
+///
+/// Each bank is summed on its own and the banks added in power, because that is
+/// what the plumbing does with them: a vee's banks fire into separate
+/// collectors and radiate out of separate tailpipes, of different lengths, at
+/// different places on the car. Summing the banks *coherently* instead would
+/// assume the two paths are identical, and it would then predict that a
+/// cross-plane V8 has no half-order content at all — the banks' 1.5 content is
+/// in antiphase and would cancel exactly. It does not cancel, because the paths
+/// differ, so this is the reference and its distance from a measurement is how
+/// much the two banks did cancel.
+pub fn crank_balance(banks: &[Vec<f64>], orders: &[f64], reference_order: f64) -> Balance {
+    let mut power = vec![0.0f64; orders.len()];
+    for bank in banks {
+        for (sum, amplitude) in power.iter_mut().zip(firing_comb(bank, orders)) {
+            *sum += amplitude * amplitude;
+        }
+    }
+
+    let levels: Vec<(f64, Option<f64>)> = orders
+        .iter()
+        .zip(&power)
+        .map(|(&order, &power)| (order, Some(db(power.sqrt()))))
+        .collect();
+    Balance::from_levels(reference_order, &levels)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
