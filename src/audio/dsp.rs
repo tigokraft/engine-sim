@@ -966,6 +966,89 @@ impl CycleTables {
     }
 }
 
+/// The last two cycles the physics sent, and the crossfade between them.
+///
+/// A snapshot is a *sample* of a cycle that is itself changing — the charge
+/// warms, the manifold backs up, the cam gets swept past its tuned length — and
+/// it arrives at whatever cadence the physics loop happens to run at. Swapping
+/// the table outright on arrival would put a step into the excitation at that
+/// cadence: at 240 Hz, a 240 Hz buzz on every pulse in the engine, modulated by
+/// how hard the driver is working the throttle. That is precisely the
+/// frame-rate artefact the firing path already goes to some trouble to avoid,
+/// and it would arrive here by the back door.
+///
+/// So each new cycle is faded in rather than swapped in. The fade's starting
+/// point is the curve actually being played at the instant the new frame lands,
+/// baked down so an early arrival cannot step either — which makes the scheme
+/// independent of the physics cadence rather than tuned to one.
+#[derive(Debug, Clone)]
+struct CyclePlayer {
+    /// The curve being faded out of.
+    previous: CycleTables,
+    /// The curve most recently handed over.
+    current: CycleTables,
+    /// How far the fade has got, `0..1` [-].
+    ///
+    /// Ten milliseconds is two to three physics frames at the rate the sim
+    /// runs, which is long enough to bridge the arrivals and short enough that
+    /// the shape still follows a throttle stab. It is a glide on the pulse
+    /// *shape*; amplitude has its own, faster one.
+    blend: Smoothed,
+}
+
+impl CyclePlayer {
+    fn new(sample_rate: f32) -> Self {
+        Self {
+            previous: CycleTables::default(),
+            current: CycleTables::default(),
+            blend: Smoothed::new(1.0, sample_rate, 0.010),
+        }
+    }
+
+    /// Takes a new cycle, starting the fade from wherever the last one got to.
+    fn accept(&mut self, snapshot: &EngineSnapshot) {
+        let blend = self.blend.value();
+        for k in 0..CYCLE_TABLE {
+            let p = &mut self.previous;
+            let c = &self.current;
+            p.exhaust[k] += (c.exhaust[k] - p.exhaust[k]) * blend;
+            p.intake[k] += (c.intake[k] - p.intake[k]) * blend;
+        }
+        self.current = CycleTables::from_snapshot(snapshot);
+        self.blend.snap(0.0);
+        self.blend.set_target(1.0);
+    }
+
+    /// Advances the fade by one sample and returns where it stands.
+    #[inline(always)]
+    fn advance(&mut self) -> f32 {
+        self.blend.next_value()
+    }
+
+    /// Exhaust excitation at a cycle phase measured from EVO.
+    #[inline(always)]
+    fn exhaust_at(&self, phase: f32, blend: f32) -> f32 {
+        let a = self.previous.exhaust_at(phase);
+        let b = self.current.exhaust_at(phase);
+        a + (b - a) * blend
+    }
+
+    /// Intake port mass flow at a cycle phase measured from EVO [kg/s].
+    #[inline(always)]
+    fn intake_at(&self, phase: f32, blend: f32) -> f32 {
+        let a = self.previous.intake_at(phase);
+        let b = self.current.intake_at(phase);
+        a + (b - a) * blend
+    }
+
+    /// Drops both cycles and stops mid-fade.
+    fn reset(&mut self) {
+        self.previous = CycleTables::default();
+        self.current = CycleTables::default();
+        self.blend.snap(1.0);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Cycle-to-cycle combustion variation
 // ---------------------------------------------------------------------------
@@ -1992,7 +2075,7 @@ pub struct EngineSynth {
     /// One set for the whole engine, because the block runs one master cylinder
     /// and every other cylinder is that same cycle displaced in phase — which is
     /// exactly how each of them reads it here.
-    cycle: CycleTables,
+    cycle: CyclePlayer,
     /// Excitation presented to the network this sample, one per cylinder.
     excitations: Vec<f32>,
     /// One backfire pool per bank. A backfire is unburnt fuel lighting off in
@@ -2094,7 +2177,7 @@ impl EngineSynth {
         let mut synth = Self {
             banks,
             network,
-            cycle: CycleTables::default(),
+            cycle: CyclePlayer::new(fs),
             excitations: vec![0.0; n_cyl],
             backfire_pulses: vec![PulsePool::default(); config.bank_count],
             bank_excitations: vec![0.0; config.bank_count],
@@ -2196,7 +2279,7 @@ impl EngineSynth {
         self.intake_flow.set_target(snapshot.intake_mass_flow);
         self.throttle.set_target(snapshot.throttle);
         self.knock.set_intensity(snapshot.knock_intensity);
-        self.cycle = CycleTables::from_snapshot(&snapshot);
+        self.cycle.accept(&snapshot);
     }
 
     /// Clears every filter and delay line without changing parameters.
@@ -2205,6 +2288,7 @@ impl EngineSynth {
         for pool in self.backfire_pulses.iter_mut() {
             pool.reset();
         }
+        self.cycle.reset();
         self.excitations.fill(0.0);
         self.bank_excitations.fill(0.0);
         self.radiated.fill(0.0);
@@ -2476,6 +2560,9 @@ impl EngineSynth {
     /// — now at the sample rate instead of once a physics frame.
     #[inline(always)]
     fn fill_excitations(&mut self, turning: bool) -> f32 {
+        // Advanced whether or not the crank is, so a fade cannot be left
+        // half-finished by a stopped engine and resume when it restarts.
+        let blend = self.cycle.advance();
         if !turning {
             self.excitations.fill(0.0);
             return 0.0;
@@ -2502,12 +2589,12 @@ impl EngineSynth {
             self.excitations[index] = amplitude
                 * self
                     .cycle
-                    .exhaust_at(cylinder - retard - variation.phase_offset);
+                    .exhaust_at(cylinder - retard - variation.phase_offset, blend);
             // Induction is read at the bare cylinder phase. The retard and the
             // jitter are properties of *combustion* — how long the flame takes
             // to develop, and how much that varies — and a valve opening on the
             // intake side does not wait for a flame.
-            induction += self.cycle.intake_at(cylinder);
+            induction += self.cycle.intake_at(cylinder, blend);
         }
         induction
     }
@@ -2891,6 +2978,66 @@ mod tests {
     }
 
     #[test]
+    fn a_new_cycle_fades_in_rather_than_stepping() {
+        // The excitation is a *table* now, and the physics hands over a new one
+        // at whatever rate its loop runs. Swapping it outright would put a step
+        // into every cylinder's pulse at the physics frame rate, which is the
+        // artefact the firing path exists to avoid.
+        let mut config = SynthConfig::cross_plane_v8(FS);
+        config.combustion_variation_max = 0.0;
+        config.combustion_variation_min = 0.0;
+        let mut synth = EngineSynth::new(config);
+        let calm = loaded_snapshot();
+        synth.set_snapshot(&calm);
+        synth.cycle_hz.snap(calm.rpm / 120.0);
+        for (i, smoother) in synth.blowdown_pa.iter_mut().enumerate() {
+            smoother.snap(calm.blowdown_delta[i]);
+        }
+        synth.cycle.blend.snap(1.0);
+
+        let cycle_samples = (FS / (calm.rpm / 120.0)) as usize;
+        let mut buffer = [0.0f32; 2];
+        let mut slew_of = |synth: &mut EngineSynth, samples: usize| {
+            let mut worst = 0.0f32;
+            let mut previous = synth.excitations[0];
+            for _ in 0..samples {
+                synth.render(&mut buffer, 2);
+                worst = worst.max((synth.excitations[0] - previous).abs());
+                previous = synth.excitations[0];
+            }
+            worst
+        };
+        // The steepest the blowdown edge itself gets: the bar every other step
+        // in the excitation has to stay under.
+        let steady = slew_of(&mut synth, 2 * cycle_samples);
+
+        // A cycle off a different engine — the same pressure difference through
+        // a valve event half as long.
+        let (pressure, exhaust, intake) = synthetic_cycle(4.0e5, 120.0 / 720.0);
+        let jumped = EngineSnapshot {
+            cylinder_pressure: pressure,
+            exhaust_port_flow: exhaust,
+            intake_port_flow: intake,
+            ..calm
+        };
+
+        // Hand the two cycles over alternately at phases that walk right through
+        // cylinder 0's blowdown, because the worst step a swap can make is the
+        // one made while the pulse it is swapping is happening.
+        let mut worst = 0.0f32;
+        for k in 0..16 {
+            slew_of(&mut synth, cycle_samples / 16 + 3);
+            synth.set_snapshot(if k % 2 == 0 { &jumped } else { &calm });
+            worst = worst.max(slew_of(&mut synth, cycle_samples / 8));
+        }
+
+        assert!(
+            worst <= 1.2 * steady,
+            "a new cycle stepped the excitation: {worst} against a steady {steady}"
+        );
+    }
+
+    #[test]
     fn no_discontinuity_when_state_jumps() {
         // A snapshot that steps hard: idle to full load in one frame. Nothing in
         // the output may step with it.
@@ -2914,6 +3061,14 @@ mod tests {
         hot.intake_mass_flow = 0.45;
         hot.throttle = 1.0;
         hot.turbo_rpm = 160_000.0;
+        // The cycle itself jumps too, and by more than any real frame could: a
+        // different pressure curve through a valve event half as long. The
+        // tables are the excitation now, so a step in them is a step in the
+        // output unless something is bridging them.
+        let (pressure, exhaust, intake) = synthetic_cycle(12.0e5, 120.0 / 720.0);
+        hot.cylinder_pressure = pressure;
+        hot.exhaust_port_flow = exhaust;
+        hot.intake_port_flow = intake;
         synth.set_snapshot(&hot);
         let after = render(&mut synth, 48_000);
 
@@ -2936,6 +3091,24 @@ mod tests {
         let late = rms(&render(&mut synth, 9 * 48_000));
         assert!(late > 0.5 * early, "coasting decayed: {early} -> {late}");
         assert!(late < 2.0 * early, "coasting grew: {early} -> {late}");
+
+        // The excitation is played from a table now, and a table that stops
+        // being refreshed is still a table. What must not happen is the
+        // playback freezing on it: a held phase would present the pipes with one
+        // slice of the blowdown as a DC offset, which is silence with a step in
+        // front of it rather than an engine.
+        let mut buffer = [0.0f32; 2];
+        let (mut low, mut high) = (f32::MAX, f32::MIN);
+        for _ in 0..48_000 {
+            synth.render(&mut buffer, 2);
+            low = low.min(synth.excitations[0]);
+            high = high.max(synth.excitations[0]);
+        }
+        let amplitude = loaded_snapshot().blowdown_delta[0] / REFERENCE_BLOWDOWN;
+        assert!(
+            low < 0.05 * amplitude && high > 0.5 * amplitude,
+            "starved playback stopped swinging: {low} to {high}"
+        );
     }
 
     #[test]
@@ -3290,6 +3463,7 @@ mod tests {
         for (i, smoother) in synth.blowdown_pa.iter_mut().enumerate() {
             smoother.snap(idle_snapshot().blowdown_delta[i]);
         }
+        synth.cycle.blend.snap(1.0);
         synth.cycle_phase = 0.0;
 
         let cycles = 5usize;
@@ -3342,6 +3516,9 @@ mod tests {
         for (i, smoother) in synth.blowdown_pa.iter_mut().enumerate() {
             smoother.snap(snapshot.blowdown_delta[i]);
         }
+        // Start on the cycle the snapshot carries rather than fading into it,
+        // so the measurement is not taken part-way through the fade.
+        synth.cycle.blend.snap(1.0);
         synth.cycle_phase = 0.0;
 
         // A whole cycle, so both cylinders have had their turn. They play the
@@ -3458,6 +3635,9 @@ mod tests {
             for (i, smoother) in synth.blowdown_pa.iter_mut().enumerate() {
                 smoother.snap(snapshot.blowdown_delta[i]);
             }
+            // Start on the cycle the snapshot carries rather than fading into
+            // it, so the measurement is not taken part-way through the fade.
+            synth.cycle.blend.snap(1.0);
             synth.cycle_phase = 0.001;
 
             let expected_fires = 8 * cycles;
