@@ -2127,4 +2127,164 @@ mod tests {
         approx(block.cylinder_evo_pressure(1), 2.5e5, 1e-6);
         assert_eq!(block.evo_pressures()[1], 2.5e5);
     }
+
+    // -- thermal state ------------------------------------------------------
+
+    /// The solver clamps a frame to `1/30 s` and ages the thermal state on the
+    /// same clock, so every warm-up here is stepped inside that.
+    const THERMAL_DT: f64 = 1.0 / 120.0;
+
+    /// A cold cross-plane V8, ready to be warmed up.
+    fn cold_v8() -> EngineBlock {
+        let mut block = EngineBlock::cross_plane_v8(Environment::default());
+        block.cold_start();
+        block
+    }
+
+    /// Runs `block` at a fixed speed, reading `probe` every `interval` seconds.
+    fn warm_up(
+        block: &mut EngineBlock,
+        rpm: f64,
+        interval: f64,
+        samples: usize,
+        probe: impl Fn(&EngineBlock) -> f64,
+    ) -> Vec<f64> {
+        let steps = (interval / THERMAL_DT).round() as usize;
+        let mut trace = Vec::with_capacity(samples + 1);
+        trace.push(probe(block));
+        for _ in 0..samples {
+            for _ in 0..steps {
+                block.update(THERMAL_DT, rpm);
+            }
+            trace.push(probe(block));
+        }
+        trace
+    }
+
+    fn assert_rising(trace: &[f64], what: &str) {
+        for pair in trace.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "{what} fell from {:.2} to {:.2} during warm-up: {trace:.1?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn from_cold_every_pipe_warms_monotonically_to_a_plateau() {
+        let mut block = cold_v8();
+        let ambient = block.environment.temperature;
+        let trace = warm_up(&mut block, 3_000.0, 10.0, 20, |b| {
+            b.thermal.exhaust.primaries[0].wall.temperature
+        });
+
+        assert!(
+            (trace[0] - ambient).abs() < 1e-9,
+            "a cold start must begin at ambient, not {:.1} K",
+            trace[0]
+        );
+        assert_rising(&trace, "the primary wall");
+
+        // A plateau, not a ramp that ran out of test: the last ten seconds have
+        // to move the wall by a small fraction of what the first ten did.
+        let first = trace[1] - trace[0];
+        let last = trace[trace.len() - 1] - trace[trace.len() - 2];
+        assert!(
+            last < 0.05 * first,
+            "still climbing at {last:.1} K per ten seconds against {first:.1} K at the start"
+        );
+        // And it plateaued below the gas driving it, which is the only place a
+        // wall heated by that gas can settle.
+        assert!(
+            *trace.last().unwrap() < block.thermal.exhaust.primary_gas(0),
+            "the wall passed the gas heating it"
+        );
+    }
+
+    #[test]
+    fn the_exhaust_keeps_a_gradient_down_its_length() {
+        let mut block = cold_v8();
+        for _ in 0..(120.0 / THERMAL_DT) as usize {
+            block.update(THERMAL_DT, 3_000.0);
+        }
+        let port = block.exhaust_banks[0].plenum.temperature;
+        let primary = block.thermal.exhaust.primary_gas(0);
+        let tailpipe = block.thermal.exhaust.tailpipe_gas();
+        assert!(
+            port > primary && primary > tailpipe,
+            "no gradient: port {port:.0} K, primary {primary:.0} K, tailpipe {tailpipe:.0} K"
+        );
+    }
+
+    #[test]
+    fn a_stopped_hot_engine_cools_at_the_modelled_time_constant() {
+        let mut block = EngineBlock::cross_plane_v8(Environment::default());
+        let ambient = block.environment.temperature;
+        // Started just under the thermostat's rating, where the valve is shut
+        // and the only path out is the bypass — so the conductance, and with it
+        // the time constant, is a constant over the whole decay.
+        let start = block.thermal.thermostat.open_temperature - 6.0;
+        block.thermal.block.temperature = start;
+        block.thermal.block.conductance = block.thermal.thermostat.conductance(start);
+        let tau = block.thermal.block.time_constant();
+        assert!(
+            (600.0..3_600.0).contains(&tau),
+            "an engine cooling in still air takes {tau:.0} s, which is not an engine"
+        );
+
+        for _ in 0..(tau / THERMAL_DT) as usize {
+            block.update(THERMAL_DT, 0.0);
+        }
+
+        // One time constant leaves `1/e` of the excess over ambient.
+        let ratio = (block.thermal.block_temperature() - ambient) / (start - ambient);
+        approx(ratio, 1.0 / std::f64::consts::E, 1e-3);
+    }
+
+    #[test]
+    fn fmep_falls_monotonically_as_the_block_warms() {
+        let mut block = cold_v8();
+        let open = block.thermal.thermostat.open_temperature;
+        let oil = warm_up(&mut block, 2_000.0, 5.0, 16, |b| {
+            b.thermal.oil_temperature()
+        });
+
+        // Read at one fixed load and speed throughout, so what moves is the oil
+        // and nothing else: the claim is about viscosity, not about the engine
+        // making a different peak pressure when it is cold.
+        let fmep: Vec<f64> = oil
+            .iter()
+            .map(|&t| block.friction.fmep(60e5, 8.6, t))
+            .collect();
+
+        // Only while the engine is actually warming. Once the thermostat has it
+        // the temperature is flat to the last bit, and so is the friction; a
+        // strict inequality there would be asserting on rounding.
+        let warming = oil.iter().take_while(|&&t| t < open).count();
+        assert!(
+            warming > 4,
+            "the block reached its thermostat too fast to test"
+        );
+        assert_rising(&oil[..warming], "the oil temperature");
+        assert!(
+            *oil.last().unwrap() - oil[warming - 1] < oil[1] - oil[0],
+            "the block never settled on its thermostat: {oil:.1?}"
+        );
+        for pair in fmep[..warming].windows(2) {
+            assert!(
+                pair[1] < pair[0],
+                "FMEP rose from {:.0} to {:.0} Pa while the block was warming",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(
+            fmep[0] > 1.15 * fmep[warming - 1],
+            "a cold engine's FMEP is {:.0} Pa against {:.0} Pa warm, which is no change at all",
+            fmep[0],
+            fmep[warming - 1]
+        );
+    }
 }
