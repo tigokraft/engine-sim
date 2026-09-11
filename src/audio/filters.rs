@@ -1163,7 +1163,106 @@ pub fn soft_clip(x: f32) -> f32 {
     // Beyond +/-3 the rational form turns back on itself, so saturate first.
     let x = x.clamp(-3.0, 3.0);
     let x2 = x * x;
-    x * (27.0 + x2) / (27.0 + 9.0 * x2)
+    (x * (27.0 + x2) / (27.0 + 9.0 * x2)).clamp(-1.0, 1.0)
+}
+
+// ---------------------------------------------------------------------------
+// 2x Oversampled Clipper
+// ---------------------------------------------------------------------------
+
+/// 1st-order allpass section for polyphase half-band IIR filters.
+#[derive(Debug, Clone, Copy)]
+struct AllpassSection {
+    a: f32,
+    x1: f32,
+    y1: f32,
+}
+
+impl AllpassSection {
+    fn new(a: f32) -> Self {
+        Self {
+            a,
+            x1: 0.0,
+            y1: 0.0,
+        }
+    }
+
+    #[inline(always)]
+    fn process(&mut self, x: f32) -> f32 {
+        let y = self.a * (x - self.y1) + self.x1;
+        self.x1 = flush(x);
+        self.y1 = flush(y);
+        y
+    }
+
+    fn reset(&mut self) {
+        self.x1 = 0.0;
+        self.y1 = 0.0;
+    }
+}
+
+/// 2x oversampled soft clipper using a 5th-order elliptic polyphase IIR half-band filter.
+///
+/// Running non-linear saturation on fast transients at 48 kHz produces harmonics that
+/// fold over the Nyquist frequency into the audible band as aliasing distortion.
+///
+/// By upsampling 2x to 96 kHz before evaluating the Padé soft clipper, the high-order
+/// harmonics land well below the 48 kHz Nyquist limit and are filtered out by the
+/// decimation half-band lowpass before downsampling back to 1x.
+#[derive(Debug, Clone, Copy)]
+pub struct OversampledClipper {
+    up0: AllpassSection,
+    up1: AllpassSection,
+    down0: AllpassSection,
+    down1: AllpassSection,
+    down_delay: f32,
+}
+
+impl OversampledClipper {
+    /// Constructs a new 2x oversampled clipper with half-band filter state cleared.
+    pub fn new() -> Self {
+        Self {
+            up0: AllpassSection::new(0.14134867),
+            up1: AllpassSection::new(0.5899948),
+            down0: AllpassSection::new(0.14134867),
+            down1: AllpassSection::new(0.5899948),
+            down_delay: 0.0,
+        }
+    }
+
+    /// Resets all internal filter states to zero.
+    pub fn reset(&mut self) {
+        self.up0.reset();
+        self.up1.reset();
+        self.down0.reset();
+        self.down1.reset();
+        self.down_delay = 0.0;
+    }
+
+    /// Processes one sample at 1x sample rate with 2x oversampled soft clipping.
+    #[inline(always)]
+    pub fn process(&mut self, x: f32) -> f32 {
+        // 1x -> 2x upsampling polyphase branches
+        let u0 = self.up0.process(x);
+        let u1 = self.up1.process(x);
+
+        // Evaluate nonlinearity at 2x rate
+        let w0 = soft_clip(u0);
+        let w1 = soft_clip(u1);
+
+        // 2x -> 1x decimation polyphase branches
+        let d0 = self.down0.process(w0);
+        let d1 = self.down_delay;
+        self.down_delay = self.down1.process(w1);
+
+        (0.5 * (d0 + d1)).clamp(-1.0, 1.0)
+    }
+}
+
+impl Default for OversampledClipper {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -1687,6 +1786,69 @@ mod tests {
         assert!(
             resp_off < 0.15,
             "off-resonance response too high: {resp_off}"
+        );
+    }
+
+    #[test]
+    fn no_aliasing_products_above_the_excitations_bandlimit_after_oversampling() {
+        // An excitation bandlimited to 10 kHz fed into a soft clipper generates
+        // odd harmonics (30 kHz, 50 kHz, ...).
+        // In a discrete-time system at 48 kHz without oversampling, the 3rd harmonic
+        // at 30 kHz aliases across the 24 kHz Nyquist boundary down to 18 kHz,
+        // appearing as a prominent spurious tone above the 10 kHz excitation bandlimit.
+        // With 2x oversampling, the 30 kHz harmonic is created below the 96 kHz Nyquist
+        // (48 kHz) and attenuated by the decimation half-band filter before downsampling,
+        // leaving no measurable aliasing products above the excitation bandlimit.
+        const FS: f32 = 48_000.0;
+        const FREQ_IN: f32 = 10_000.0;
+        const N: usize = 8192;
+        let amp = 1.5; // Drives clipper into saturation
+
+        // 1. Without oversampling: measure aliased 3rd harmonic at 18 kHz
+        let mut re_no_os = 0.0f64;
+        let mut im_no_os = 0.0f64;
+        for i in 0..N {
+            let t = i as f32 / FS;
+            let inp = amp * (TAU * FREQ_IN * t).sin();
+            let out = soft_clip(inp);
+            if i >= N / 2 {
+                let phase = TAU * 18_000.0 * (i as f32 / FS);
+                re_no_os += out as f64 * phase.sin() as f64;
+                im_no_os += out as f64 * phase.cos() as f64;
+            }
+        }
+        let half = (N / 2) as f64;
+        let mag_no_os = 2.0 * (re_no_os * re_no_os + im_no_os * im_no_os).sqrt() / half;
+
+        // 2. With 2x oversampling:
+        let mut clipper = OversampledClipper::new();
+        let mut re_os = 0.0f64;
+        let mut im_os = 0.0f64;
+        for i in 0..N {
+            let t = i as f32 / FS;
+            let inp = amp * (TAU * FREQ_IN * t).sin();
+            let out = clipper.process(inp);
+            if i >= N / 2 {
+                let phase = TAU * 18_000.0 * (i as f32 / FS);
+                re_os += out as f64 * phase.sin() as f64;
+                im_os += out as f64 * phase.cos() as f64;
+            }
+        }
+        let mag_os = 2.0 * (re_os * re_os + im_os * im_os).sqrt() / half;
+
+        // Without oversampling, 18 kHz alias is prominent (> -20 dBFS, ~0.12)
+        assert!(
+            mag_no_os > 0.10,
+            "Expected strong aliasing at 18 kHz without oversampling, got {mag_no_os}"
+        );
+        // With 2x oversampling, aliasing product above excitation bandlimit is suppressed below 0.01 (-40 dBFS)
+        assert!(
+            mag_os < 0.01,
+            "Expected aliasing at 18 kHz to be eliminated/suppressed by oversampler, got {mag_os}"
+        );
+        assert!(
+            mag_os < 0.1 * mag_no_os,
+            "Oversampling must suppress aliasing by at least 20 dB: got {mag_os} vs {mag_no_os}"
         );
     }
 }

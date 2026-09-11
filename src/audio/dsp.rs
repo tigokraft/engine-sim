@@ -86,8 +86,8 @@
 use std::f32::consts::TAU;
 
 use crate::audio::filters::{
-    firing_interval_seconds, soft_clip, waveguide_damping, Biquad, BiquadCoeffs, DcBlocker,
-    ModalBank, Noise, OnePole, Smoothed,
+    firing_interval_seconds, waveguide_damping, Biquad, BiquadCoeffs, DcBlocker, ModalBank, Noise,
+    OnePole, OversampledClipper, Smoothed,
 };
 use crate::audio::intake_voice::IntakeNetwork;
 use crate::audio::structure::{combustion_drive, StructuralPath, StructuralSpec};
@@ -2180,6 +2180,7 @@ pub struct EngineSynth {
     snapshot: EngineSnapshot,
     noise: Noise,
     dc: [DcBlocker; 2],
+    clipper: [OversampledClipper; 2],
     /// The block as a radiating body: modes of the casting, pan and bore walls.
     structure: StructuralPath,
     /// Structural drive per unit of knock voice output [-].
@@ -2276,6 +2277,7 @@ impl EngineSynth {
             snapshot,
             noise: Noise::new(0x9E37_79B9),
             dc: [DcBlocker::default(); 2],
+            clipper: [OversampledClipper::new(); 2],
             // The runner and muffler are both bandpass-like and between them
             // leave the bottom octave thin, where a large engine's felt weight
             // actually lives. The block's own bending mode fills it in — and it
@@ -2800,7 +2802,7 @@ impl EngineSynth {
         for (i, sample) in out.iter_mut().enumerate() {
             // The blowdown train carries a standing offset, and a DC offset
             // costs headroom in the clipper without being audible at all.
-            *sample = soft_clip(self.dc[i].process(*sample) * gain);
+            *sample = self.clipper[i].process(self.dc[i].process(*sample) * gain);
         }
         (out[0], out[1])
     }
