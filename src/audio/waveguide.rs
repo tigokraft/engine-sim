@@ -256,6 +256,8 @@ pub struct WaveguidePipe {
     gamma: f32,
     gas_constant: f32,
     temperature: f32,
+    steepening: f32,
+    forward_prev: f32,
 }
 
 impl WaveguidePipe {
@@ -314,7 +316,23 @@ impl WaveguidePipe {
             gamma,
             gas_constant,
             temperature,
+            steepening: 0.0,
+            forward_prev: 0.0,
         }
+    }
+
+    /// Sets the wave steepening factor down the pipe [-].
+    ///
+    /// At large pulse amplitudes (blowdown pressure ratio > 2), pressure crests
+    /// travel faster than troughs ($c(p) \propto p^{(\gamma-1)/2\gamma}$), causing
+    /// the wavefront to steepen toward a shock.
+    pub fn set_steepening(&mut self, factor: f32) {
+        self.steepening = factor.clamp(0.0, 0.5);
+    }
+
+    /// Current wave steepening factor [-].
+    pub fn steepening(&self) -> f32 {
+        self.steepening
     }
 
     /// Retunes propagation delay, acoustic admittance, and wall losses for current gas state.
@@ -451,7 +469,18 @@ impl WaveguidePipe {
         let d_fwd = self.forward_delay_samples.next_value();
         let d_bwd = self.backward_delay_samples.next_value();
         let raw0 = self.backward_line.read(d_bwd);
-        let raw1 = self.forward_line.read(d_fwd);
+        let raw1 = if self.steepening > 1e-6 {
+            let est = self.forward_line.read(d_fwd);
+            // Amplitude-dependent delay shift: crests travel faster, shifting delay earlier.
+            let shift = (self.steepening * est * 2.0).clamp(-2.0, 2.0);
+            let p = self.forward_line.read(d_fwd - shift);
+            let diff = p - self.forward_prev;
+            self.forward_prev = p;
+            // Level-dependent edge steepening: rising wavefront steepens toward a shock.
+            p + self.steepening * p.abs() * diff.tanh()
+        } else {
+            self.forward_line.read(d_fwd)
+        };
         let out0 = self.backward_loss.process(raw0);
         let out1 = self.forward_loss.process(raw1);
         (out0, out1)
@@ -472,6 +501,7 @@ impl WaveguidePipe {
         self.backward_line.reset();
         self.forward_loss.reset();
         self.backward_loss.reset();
+        self.forward_prev = 0.0;
         self.forward_delay_samples
             .snap(self.forward_delay_samples.target());
         self.backward_delay_samples
@@ -1571,7 +1601,7 @@ impl ExhaustNetwork {
             } else {
                 crate::physics::plumbing::PipeSection::from_diameter(0.45, 0.040, 850.0)
             };
-            let prim = WaveguidePipe::new(
+            let mut prim = WaveguidePipe::new(
                 spec.length,
                 spec.area,
                 sample_rate,
@@ -1579,6 +1609,7 @@ impl ExhaustNetwork {
                 r,
                 stations.primary(i),
             );
+            prim.set_steepening(0.20);
             let valve = ValveTermination::new(spec.area);
             primaries.push(prim);
             valves.push(valve);
