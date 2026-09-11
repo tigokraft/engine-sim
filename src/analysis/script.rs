@@ -450,6 +450,34 @@ mod tests {
         }
     }
 
+    /// The calibration sweep never stops moving, which is the whole point of
+    /// it: a held speed would leave its own order lines in a long-term average
+    /// where a resonance should be.
+    #[test]
+    fn the_calibration_sweep_never_holds_a_speed() {
+        for preset in EnginePreset::catalogue() {
+            let script = calibration_sweep(&preset);
+            assert!((script.seconds() - CALIBRATION_SECONDS).abs() < 1e-9);
+            assert!((script.start_rpm() - preset.idle).abs() < 1e-9);
+
+            let steps = 800;
+            let mut slowest_climb = f64::INFINITY;
+            for step in 0..steps {
+                let t = script.seconds() * step as f64 / steps as f64;
+                let next = script.seconds() * (step + 1) as f64 / steps as f64;
+                slowest_climb = slowest_climb.min(script.at(next).0 - script.at(t).0);
+            }
+            assert!(
+                slowest_climb > 0.0,
+                "{} stopped climbing somewhere in the sweep",
+                preset.name
+            );
+            let (top, controls) = script.at(script.seconds());
+            assert!((top - preset.redline).abs() < 1.0);
+            assert!((controls.throttle - 1.0).abs() < 1e-9);
+        }
+    }
+
     /// Past its end a script holds, rather than falling to a stalled engine.
     #[test]
     fn a_script_holds_past_its_end() {
