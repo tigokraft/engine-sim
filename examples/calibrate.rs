@@ -5,7 +5,12 @@
 //! cargo run --release --example calibrate -- --preset V12
 //! cargo run --release --example calibrate -- --markdown docs/measurements/calibration.md
 //! cargo run --release --example calibrate -- --reference pull.wav --preset Inline-4 --rpm 1200:6800
+//! cargo run --release --example calibrate -- --fingerprints
 //! ```
+//!
+//! The last of those re-records the timbre regression's baseline in
+//! [`timbre::RECORDED`](rust_engine_sim::analysis::timbre::RECORDED); see that
+//! module for when doing so is legitimate.
 //!
 //! Stage 0 answered *what does it sound like*, as numbers. This answers *is
 //! that right*, against a reference the synth did not produce. Three metrics,
@@ -65,6 +70,7 @@ use rust_engine_sim::analysis::render::{
     read_wav, RenderPlan, OFFLINE_RATE, PHYSICS_HZ, PRIME_STEPS,
 };
 use rust_engine_sim::analysis::script::{self, RenderScript, Segment, CALIBRATION_SECONDS};
+use rust_engine_sim::analysis::timbre;
 use rust_engine_sim::audio::dsp::{EngineSnapshot, SourceRate};
 use rust_engine_sim::audio::filters::{block_resonance_hz, speed_of_sound};
 use rust_engine_sim::audio::intake_voice::{
@@ -1316,6 +1322,7 @@ fn main() -> Result<()> {
     let mut reference: Option<PathBuf> = None;
     let mut rpm: Option<String> = None;
     let mut markdown_path: Option<PathBuf> = None;
+    let mut fingerprints = false;
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -1324,10 +1331,11 @@ fn main() -> Result<()> {
             "--reference" => reference = args.next().map(PathBuf::from),
             "--rpm" => rpm = args.next(),
             "--markdown" => markdown_path = args.next().map(PathBuf::from),
+            "--fingerprints" => fingerprints = true,
             "--help" | "-h" => {
                 println!(
                     "calibrate [--preset NAME] [--reference FILE.wav --rpm FROM:TO] \
-                     [--markdown FILE.md]\n\n\
+                     [--markdown FILE.md] [--fingerprints]\n\n\
                      --rpm takes either FROM:TO for a linear pull or a list of \
                      t=rpm points read off a tachometer."
                 );
@@ -1346,6 +1354,19 @@ fn main() -> Result<()> {
         .collect();
     if presets.is_empty() {
         anyhow::bail!("no engine in the catalogue matches {only:?}");
+    }
+
+    // Re-recording the timbre regression's baseline: the same sweep and the
+    // same analysis, printed as the Rust table the test compares against. Kept
+    // in the example rather than written by the test itself, so that moving a
+    // number is a diff a reviewer reads rather than a file a test rewrites.
+    if fingerprints {
+        println!("pub const RECORDED: &[Fingerprint] = &[");
+        for preset in &presets {
+            print!("{}", timbre::measure(preset).literal());
+        }
+        println!("];");
+        return Ok(());
     }
 
     let recording = match (&reference, &rpm) {
