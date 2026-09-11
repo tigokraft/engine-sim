@@ -493,6 +493,44 @@ mod tests {
         }
     }
 
+    /// A script built to follow a curve goes where the curve goes, and opens
+    /// the throttle where the engine is gaining speed.
+    #[test]
+    fn a_following_script_tracks_the_curve_it_was_built_from() {
+        use crate::analysis::orders::RpmCurve;
+
+        // An idle, a pull, a hold and a lift: the shape of a real recording.
+        let curve = RpmCurve::from_points(
+            &[
+                (0.0, 900.0),
+                (1.0, 900.0),
+                (5.0, 7_000.0),
+                (6.0, 7_000.0),
+                (8.0, 1_200.0),
+            ],
+            1.0 / 240.0,
+        );
+        let script = following("reference", "a recording's own pull", &curve, 64);
+
+        assert!((script.seconds() - curve.seconds()).abs() < 0.01);
+        for step in 0..=80 {
+            let t = curve.seconds() * step as f64 / 80.0;
+            let (rpm, controls) = script.at(t);
+            assert!(
+                (rpm - curve.at(t)).abs() < 120.0,
+                "at {t:.2} s the script was at {rpm:.0} rpm and the curve at {:.0}",
+                curve.at(t)
+            );
+            // Throttle follows the slope: wide open climbing, shut falling.
+            if (2.0..4.0).contains(&t) {
+                assert_eq!(controls.throttle, 1.0, "not on the throttle at {t:.2} s");
+            }
+            if (6.5..7.5).contains(&t) {
+                assert_eq!(controls.throttle, 0.0, "not lifted at {t:.2} s");
+            }
+        }
+    }
+
     /// The calibration sweep never stops moving, which is the whole point of
     /// it: a held speed would leave its own order lines in a long-term average
     /// where a resonance should be.
