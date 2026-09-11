@@ -1099,6 +1099,85 @@ mod tests {
     }
 
     #[test]
+    fn fuel_cut_cannot_backfire_while_spark_cut_does() {
+        use crate::physics::control::{LimiterCut, LimiterMode};
+
+        let mut block = primed(6_000.0);
+        let mut source = SnapshotSource::new(&block);
+        let dt = 1.0 / 240.0;
+        let redline = 6_500.0;
+        block.ecu.redline = redline;
+        block.ecu.limiter_mode = LimiterMode::HardCut;
+
+        // 1. Fuel-cut limiter: run at/above redline.
+        block.ecu.limiter_cut_type = LimiterCut::Fuel;
+        block.update(dt, 6_600.0);
+        let fuel_cut_snap = source.sample(&block, 6_600.0, dt, EngineControls::wide_open());
+
+        assert_eq!(
+            fuel_cut_snap.unburnt_fuel_mass, 0.0,
+            "fuel-cut limiter must leave zero unburnt fuel in the exhaust"
+        );
+        assert!(
+            !fuel_cut_snap.spark_cut,
+            "fuel-cut limiter must not cut spark"
+        );
+
+        // Render audio through EngineSynth and measure peak level
+        let mut fuel_synth = EngineSynth::new(SynthConfig::from_block(&block, 48_000.0));
+        let mut buffer = vec![0.0f32; 200 * 2];
+        let mut fuel_peak = 0.0f32;
+        for _ in 0..(2 * 240) {
+            block.update(dt, 6_600.0);
+            fuel_synth.set_snapshot(&source.sample(
+                &block,
+                6_600.0,
+                dt,
+                EngineControls::wide_open(),
+            ));
+            fuel_synth.render(&mut buffer, 2);
+            fuel_peak = buffer.iter().fold(fuel_peak, |m, s| m.max(s.abs()));
+        }
+
+        // 2. Spark-cut limiter: run at/above redline.
+        block.ecu.limiter_cut_type = LimiterCut::Spark;
+        block.update(dt, 6_600.0);
+        let spark_cut_snap = source.sample(&block, 6_600.0, dt, EngineControls::wide_open());
+
+        assert!(
+            spark_cut_snap.unburnt_fuel_mass > 0.0,
+            "spark-cut limiter must deliver unburnt fuel into the exhaust"
+        );
+        let config = SynthConfig::from_block(&block, 48_000.0);
+        assert!(
+            spark_cut_snap.unburnt_fuel_mass as f64 > config.backfire_fuel_threshold,
+            "spark-cut unburnt fuel ({:.1} mg) must exceed backfire threshold ({:.1} mg)",
+            spark_cut_snap.unburnt_fuel_mass * 1e6,
+            config.backfire_fuel_threshold * 1e6
+        );
+
+        let mut spark_synth = EngineSynth::new(config);
+        let mut spark_peak = 0.0f32;
+        for _ in 0..(2 * 240) {
+            block.update(dt, 6_600.0);
+            spark_synth.set_snapshot(&source.sample(
+                &block,
+                6_600.0,
+                dt,
+                EngineControls::wide_open(),
+            ));
+            spark_synth.render(&mut buffer, 2);
+            spark_peak = buffer.iter().fold(spark_peak, |m, s| m.max(s.abs()));
+        }
+
+        // Spark cut triggers backfires which produce significantly higher acoustic peaks
+        assert!(
+            spark_peak > 1.3 * fuel_peak,
+            "spark cut must produce backfires louder than fuel cut: {spark_peak:.3} vs {fuel_peak:.3}"
+        );
+    }
+
+    #[test]
     fn end_to_end_render_from_live_physics_is_clean() {
         // The whole path, minus the device: physics -> snapshot -> synth.
         let mut block = primed(2_500.0);
