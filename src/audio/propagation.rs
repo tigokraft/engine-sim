@@ -119,6 +119,38 @@ pub fn distance_attenuation(distance: f32) -> f32 {
     REFERENCE_PROPAGATION_DISTANCE / distance.max(0.1)
 }
 
+/// Default pressure reflection coefficient of hard ground (asphalt/road) [-].
+pub const GROUND_REFLECTION_COEFF: f32 = 0.95;
+
+/// Ground bounce path difference between reflected and direct paths [m]:
+///
+/// ```text
+/// delta = sqrt((h_s + h_r)^2 + d^2) - sqrt((h_s - h_r)^2 + d^2)
+/// ```
+#[inline]
+pub fn ground_path_difference(source_pos: [f32; 3], receiver_pos: [f32; 3]) -> f32 {
+    let hs = source_pos[2].max(0.01);
+    let hr = receiver_pos[2].max(0.01);
+    let dx = source_pos[0] - receiver_pos[0];
+    let dy = source_pos[1] - receiver_pos[1];
+    let d2 = dx * dx + dy * dy;
+
+    let r_direct = ((hs - hr) * (hs - hr) + d2).sqrt();
+    let r_reflected = ((hs + hr) * (hs + hr) + d2).sqrt();
+
+    (r_reflected - r_direct).max(0.0)
+}
+
+/// Interference cancellation notch frequency predicted by ground reflection [Hz]:
+///
+/// ```text
+/// f_notch = c / (2 * delta)
+/// ```
+#[inline]
+pub fn ground_notch_hz(delta_r: f32, c: f32) -> f32 {
+    c / (2.0 * delta_r.max(1e-4))
+}
+
 /// An acoustic radiating aperture on the engine / vehicle.
 ///
 /// Every source that couples to the outside air does so through an aperture with
@@ -237,6 +269,9 @@ pub struct AperturePath {
     right_air: OnePole,
     left_directivity: OnePole,
     right_directivity: OnePole,
+    left_ground: DelayLine,
+    right_ground: DelayLine,
+    pub ground_reflection: bool,
 }
 
 impl AperturePath {
@@ -244,6 +279,7 @@ impl AperturePath {
     pub fn new(aperture: Aperture, sample_rate: f32) -> Self {
         let max_samples =
             (MAX_PROPAGATION_DISTANCE / SPEED_OF_SOUND_AIR * sample_rate) as usize + 64;
+        let max_ground_samples = (10.0 / SPEED_OF_SOUND_AIR * sample_rate) as usize + 64;
         Self {
             aperture,
             sample_rate,
@@ -253,10 +289,19 @@ impl AperturePath {
             right_air: OnePole::new(sample_rate, AIR_ABSORPTION_BASE_HZ),
             left_directivity: OnePole::new(sample_rate, 0.45 * sample_rate),
             right_directivity: OnePole::new(sample_rate, 0.45 * sample_rate),
+            left_ground: DelayLine::with_max_delay(max_ground_samples),
+            right_ground: DelayLine::with_max_delay(max_ground_samples),
+            ground_reflection: true,
         }
     }
 
     /// Clears internal delay lines and filters.
+    /// Sets whether ground reflection interference is modelled.
+    pub fn with_ground_reflection(mut self, enabled: bool) -> Self {
+        self.ground_reflection = enabled;
+        self
+    }
+
     pub fn reset(&mut self) {
         self.left_delay.reset();
         self.right_delay.reset();
@@ -264,6 +309,8 @@ impl AperturePath {
         self.right_air.reset();
         self.left_directivity.reset();
         self.right_directivity.reset();
+        self.left_ground.reset();
+        self.right_ground.reset();
     }
 
     /// Delays one input sample by the physical path length to each ear.
@@ -286,7 +333,7 @@ impl AperturePath {
         (self.left_delay.read(d_left), self.right_delay.read(d_right))
     }
 
-    /// Propagates sample through mouth directivity, path delay, air absorption, and 1/r distance attenuation.
+    /// Propagates sample through ground reflection, path delay, directivity, air absorption, and distance attenuation.
     #[inline]
     pub fn step_propagated(&mut self, sample: f32, listener: &Listener) -> (f32, f32) {
         let (left_ear, right_ear) = listener.ears();
@@ -295,7 +342,39 @@ impl AperturePath {
         let angle_left = self.aperture.angle_to(left_ear);
         let angle_right = self.aperture.angle_to(right_ear);
 
-        let (del_left, del_right) = self.step_delay(sample, listener);
+        let (ground_left, ground_right) =
+            if self.ground_reflection && self.aperture.position[2] > 0.0 && left_ear[2] > 0.0 {
+                let delta_r_left = ground_path_difference(self.aperture.position, left_ear);
+                let delta_r_right = ground_path_difference(self.aperture.position, right_ear);
+
+                let d_ground_left = (1.0
+                    + path_delay_samples(delta_r_left, SPEED_OF_SOUND_AIR, self.sample_rate))
+                .clamp(1.0, self.left_ground.max_delay());
+                let d_ground_right = (1.0
+                    + path_delay_samples(delta_r_right, SPEED_OF_SOUND_AIR, self.sample_rate))
+                .clamp(1.0, self.right_ground.max_delay());
+
+                self.left_ground.push(sample);
+                self.right_ground.push(sample);
+
+                (
+                    sample + GROUND_REFLECTION_COEFF * self.left_ground.read(d_ground_left),
+                    sample + GROUND_REFLECTION_COEFF * self.right_ground.read(d_ground_right),
+                )
+            } else {
+                (sample, sample)
+            };
+
+        let d_left = (1.0 + path_delay_samples(r_left, SPEED_OF_SOUND_AIR, self.sample_rate))
+            .clamp(1.0, self.left_delay.max_delay());
+        let d_right = (1.0 + path_delay_samples(r_right, SPEED_OF_SOUND_AIR, self.sample_rate))
+            .clamp(1.0, self.right_delay.max_delay());
+
+        self.left_delay.push(ground_left);
+        self.right_delay.push(ground_right);
+
+        let del_left = self.left_delay.read(d_left);
+        let del_right = self.right_delay.read(d_right);
 
         let fc = self.aperture.corner_hz(SPEED_OF_SOUND_AIR);
         self.left_directivity.set_cutoff(
@@ -374,7 +453,7 @@ mod tests {
             position: [0.0, -dist, 1.0],
             ear_spacing: 0.0, // Monoaural for exact sample count assertion
         };
-        let mut path = AperturePath::new(aperture, sample_rate);
+        let mut path = AperturePath::new(aperture, sample_rate).with_ground_reflection(false);
 
         let expected_samples = (dist / c * sample_rate).round() as usize; // 480 samples
         let mut peak_sample = 0;
@@ -453,7 +532,7 @@ mod tests {
                 position: [0.0, -dist, 1.0],
                 ear_spacing: 0.0,
             };
-            let mut path = AperturePath::new(aperture, sample_rate);
+            let mut path = AperturePath::new(aperture, sample_rate).with_ground_reflection(false);
             let mut max_val = 0.0f32;
             for n in 0..3000 {
                 let t = n as f32 / sample_rate;
@@ -508,7 +587,7 @@ mod tests {
         };
 
         let measure_response = |freq: f32| -> f32 {
-            let mut path = AperturePath::new(aperture, sample_rate);
+            let mut path = AperturePath::new(aperture, sample_rate).with_ground_reflection(false);
             let mut max_val = 0.0f32;
             for n in 0..4000 {
                 let t = n as f32 / sample_rate;
@@ -555,7 +634,7 @@ mod tests {
         };
 
         let measure_gain = |listener: &Listener, freq: f32| -> f32 {
-            let mut path = AperturePath::new(tailpipe, sample_rate);
+            let mut path = AperturePath::new(tailpipe, sample_rate).with_ground_reflection(false);
             let mut max_val = 0.0f32;
             for n in 0..4000 {
                 let t = n as f32 / sample_rate;
@@ -587,5 +666,29 @@ mod tests {
             high_behind,
             high_on_axis
         );
+    }
+
+    #[test]
+    fn ground_path_difference_formula_analytic_check() {
+        // Source height hs = 0.35 m, receiver height hr = 1.2 m, horizontal dist d = 5.0 m
+        let source = [0.0, 0.0, 0.35];
+        let receiver = [3.0, 4.0, 1.2]; // d^2 = 3^2 + 4^2 = 25
+        let delta = ground_path_difference(source, receiver);
+
+        // Analytic:
+        // r_direct = sqrt((0.35 - 1.2)^2 + 25) = sqrt((-0.85)^2 + 25) = sqrt(0.7225 + 25) = sqrt(25.7225)
+        // r_reflect = sqrt((0.35 + 1.2)^2 + 25) = sqrt((1.55)^2 + 25) = sqrt(2.4025 + 25) = sqrt(27.4025)
+        let expected_direct = (0.85f32 * 0.85 + 25.0).sqrt();
+        let expected_reflected = (1.55f32 * 1.55 + 25.0).sqrt();
+        let expected_delta = expected_reflected - expected_direct;
+
+        assert!(
+            (delta - expected_delta).abs() < 1e-5,
+            "Path difference must match sqrt((hs+hr)^2+d^2) - sqrt((hs-hr)^2+d^2)"
+        );
+
+        let f_notch = ground_notch_hz(delta, SPEED_OF_SOUND_AIR);
+        let expected_f_notch = SPEED_OF_SOUND_AIR / (2.0 * expected_delta);
+        assert!((f_notch - expected_f_notch).abs() < 1e-3);
     }
 }
