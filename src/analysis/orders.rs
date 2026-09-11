@@ -117,6 +117,58 @@ impl RpmCurve {
         Self::new(vec![rpm], 1.0)
     }
 
+    /// A linear sweep from `from` to `to` over `seconds`.
+    ///
+    /// Two points and no grid: linear interpolation between the endpoints *is*
+    /// a linear sweep, exactly, so sampling it finer would only add rounding.
+    /// This is the curve a reference recording gets when all that is known
+    /// about it is where the pull started and where it ended.
+    pub fn sweep(from: f64, to: f64, seconds: f64) -> Self {
+        Self::new(vec![from, to], seconds.max(f64::MIN_POSITIVE))
+    }
+
+    /// A curve logged as `(time [s], speed [rev/min])` points, resampled onto a
+    /// uniform grid of spacing `dt`.
+    ///
+    /// The honest shape for a real recording: a driver's pull is not linear, and
+    /// a tachometer read off the video of one arrives as a handful of points at
+    /// whatever instants they could be read at. Points need not be sorted, and
+    /// anything before the first or after the last holds that endpoint — the
+    /// same clamping [`Self::at`] does, for the same reason.
+    pub fn from_points(points: &[(f64, f64)], dt: f64) -> Self {
+        let dt = dt.max(f64::MIN_POSITIVE);
+        let mut points: Vec<(f64, f64)> = points.to_vec();
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let Some(&(first, _)) = points.first() else {
+            return Self::constant(0.0);
+        };
+        let last = points.last().map_or(first, |p| p.0);
+
+        let steps = ((last - first).max(0.0) / dt).round() as usize;
+        let speeds = (0..=steps)
+            .map(|i| {
+                let t = first + i as f64 * dt;
+                // The pair the instant falls between, or the nearer endpoint.
+                let after = points.iter().position(|&(u, _)| u >= t);
+                match after {
+                    None => points[points.len() - 1].1,
+                    Some(0) => points[0].1,
+                    Some(j) => {
+                        let (t0, r0) = points[j - 1];
+                        let (t1, r1) = points[j];
+                        let span = t1 - t0;
+                        if span > 0.0 {
+                            r0 + (r1 - r0) * (t - t0) / span
+                        } else {
+                            r1
+                        }
+                    }
+                }
+            })
+            .collect();
+        Self::new(speeds, dt)
+    }
+
     /// Length of the curve [s].
     pub fn seconds(&self) -> f64 {
         self.speeds.len().saturating_sub(1) as f64 * self.dt
