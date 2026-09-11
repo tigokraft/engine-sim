@@ -1136,6 +1136,66 @@ pub fn place(predicted_hz: f64, peaks: &[Peak], window_pct: f64) -> Placement {
 }
 
 // ---------------------------------------------------------------------------
+// A measured reference
+// ---------------------------------------------------------------------------
+
+/// Everything a calibration reads out of one buffer of audio.
+///
+/// The point of the type is that both sides of a comparison go through it: a
+/// reference recording of a real engine and an offline render of the synth are
+/// order-tracked by the same transform, averaged by the same Welch method and
+/// peak-picked by the same prominence test. A difference between the two is
+/// then a difference between the engines and not between two analyses.
+///
+/// A recording brings its own sample rate and its own speed curve. The rate is
+/// whatever it was recorded at, and the curve has to be supplied from outside —
+/// nothing in the audio says how fast the engine was turning, and a curve
+/// guessed from the audio would make the order table a restatement of the guess.
+/// [`RpmCurve::sweep`] takes the two ends of a pull, [`RpmCurve::from_points`] a
+/// tachometer read off it.
+pub struct Reference {
+    /// The level of every order asked for.
+    pub orders: OrderTable,
+    /// The long-term average, for resonance placement and the floor's tilt.
+    pub spectrum: AverageSpectrum,
+    /// Rate the audio was analysed at [Hz].
+    pub sample_rate: f64,
+    /// Length of the audio [s].
+    pub seconds: f64,
+    /// The slowest and fastest the engine turned over it [rev/min].
+    pub speed: (f64, f64),
+}
+
+impl Reference {
+    /// Order-tracks and averages one buffer against a supplied speed curve.
+    pub fn extract(samples: &[f32], sample_rate: f64, rpm: &RpmCurve, orders: &[f64]) -> Self {
+        let seconds = samples.len() as f64 / sample_rate.max(f64::MIN_POSITIVE);
+        Self {
+            orders: track(samples, sample_rate, rpm, orders),
+            spectrum: AverageSpectrum::of(samples, sample_rate),
+            sample_rate,
+            seconds,
+            speed: rpm.range(0.0, seconds),
+        }
+    }
+
+    /// The order balance, against the order given — the firing order, normally.
+    pub fn balance(&self, reference_order: f64) -> Balance {
+        self.orders.balance(reference_order)
+    }
+
+    /// The `count` most prominent resonances, in frequency order.
+    pub fn peaks(&self, count: usize) -> Vec<Peak> {
+        self.spectrum.peaks(count, MIN_PROMINENCE_DB)
+    }
+
+    /// Slope of the noise floor between two frequencies [dB/octave].
+    pub fn tilt_db_per_octave(&self, lo_hz: f64, hi_hz: f64) -> Option<f64> {
+        self.spectrum.tilt_db_per_octave(lo_hz, hi_hz)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The reference the crank provides on its own
 // ---------------------------------------------------------------------------
 
