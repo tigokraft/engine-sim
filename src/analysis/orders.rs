@@ -746,6 +746,14 @@ impl Comparison {
         self.deltas.iter().map(|d| d.delta_db).sum::<f64>() / self.deltas.len() as f64
     }
 
+    /// The disagreement on one order [dB], if it was compared at all.
+    pub fn at(&self, order: f64) -> Option<f64> {
+        self.deltas
+            .iter()
+            .find(|d| (d.order - order).abs() < 1e-9)
+            .map(|d| d.delta_db)
+    }
+
     /// The order that disagrees most.
     pub fn worst(&self) -> Option<&OrderDelta> {
         self.deltas
