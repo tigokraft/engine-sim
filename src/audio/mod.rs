@@ -610,6 +610,119 @@ mod tests {
         block
     }
 
+    /// A V8 that differs from the shipped one in its exhaust cam *duration* and
+    /// in nothing else.
+    ///
+    /// The opening angle is left alone deliberately: EVO is what the audio side
+    /// builds its firing table from, so holding it fixed means the two engines
+    /// hand the synth identical configurations and every difference in what
+    /// comes out has to have arrived through the snapshot.
+    fn v8_with_exhaust_duration(duration_deg: f64, rpm: f64) -> EngineBlock {
+        use crate::physics::cylinder::deg;
+        use crate::physics::thermodynamics::ValveEvent;
+
+        let mut block = v8();
+        let stock = block.model.valves.exhaust;
+        block.model.valves.exhaust = ValveEvent::new(
+            stock.open_angle,
+            deg(duration_deg),
+            stock.max_lift,
+            stock.diameter,
+            stock.discharge_coefficient,
+        );
+        for _ in 0..600 {
+            block.update(1.0 / 240.0, rpm);
+        }
+        assert!(block.ring.is_primed(), "ring never filled");
+        block
+    }
+
+    #[test]
+    fn valve_timing_changes_the_pulse_spectrum() {
+        use crate::analysis::orders::AverageSpectrum;
+
+        // A long-duration race cam and a short road one, on the same block,
+        // through the same pipes, at the same speed.
+        const RPM: f64 = 4_000.0;
+        let long = v8_with_exhaust_duration(300.0, RPM);
+        let short = v8_with_exhaust_duration(190.0, RPM);
+
+        let long_config = SynthConfig::from_block(&long, 48_000.0);
+        let short_config = SynthConfig::from_block(&short, 48_000.0);
+        // The claim of the whole stage, in one assertion: the audio side is
+        // *identical* for the two engines — same taps, same pipes, same levels,
+        // no constant anywhere that says which cam is fitted. Whatever the
+        // difference in timbre turns out to be, it arrived through the snapshot.
+        assert_eq!(
+            long_config, short_config,
+            "the two engines were voiced differently, so the comparison proves nothing"
+        );
+
+        /// Energy at the harmonics of the master cycle inside a band [dB].
+        ///
+        /// Summed over the harmonics rather than sampled at round frequencies,
+        /// because the spectrum of a running engine is a comb: the gaps between
+        /// its lines are 60 dB down and reading one says nothing about anything.
+        fn band_db(spectrum: &AverageSpectrum, cycle_hz: f64, lo: f64, hi: f64) -> f64 {
+            let mut power = 0.0;
+            let mut harmonic = 1;
+            loop {
+                let hz = harmonic as f64 * cycle_hz;
+                if hz > hi {
+                    break;
+                }
+                if hz >= lo {
+                    if let Some(db) = spectrum.db_at(hz) {
+                        power += 10f64.powf(db / 10.0);
+                    }
+                }
+                harmonic += 1;
+            }
+            10.0 * power.max(1e-30).log10()
+        }
+
+        // Mid-band energy against the fundamentals, which is level-independent:
+        // the two cams trap different masses and radiate at different levels,
+        // and that is not what is being asserted.
+        let tilt_of = |block: &EngineBlock| {
+            let snapshot = SnapshotSource::new(block).sample(
+                block,
+                RPM,
+                1.0 / 240.0,
+                EngineControls::wide_open(),
+            );
+            let mut config = long_config.clone();
+            // Leave only the exhaust: the pulse is what is being measured.
+            config.intake_level = 0.0;
+            config.mechanical_level = 0.0;
+            let mut synth = EngineSynth::new(config);
+            synth.set_snapshot(&snapshot);
+            let mut buffer = vec![0.0f32; 2 * 48_000];
+            synth.render(&mut buffer, 2); // settle the pipes
+            synth.render(&mut buffer, 2);
+            let mono: Vec<f32> = buffer.chunks(2).map(|f| 0.5 * (f[0] + f[1])).collect();
+            let spectrum = AverageSpectrum::of(&mono, 48_000.0);
+            let cycle_hz = RPM / 120.0;
+            band_db(&spectrum, cycle_hz, 600.0, 1_500.0)
+                - band_db(&spectrum, cycle_hz, 150.0, 600.0)
+        };
+
+        let long_tilt = tilt_of(&long);
+        let short_tilt = tilt_of(&short);
+
+        // The 300-degree cam is still off its seat when the intake opens and the
+        // pipe turns the flow around on it, so it radiates a second and much
+        // faster event every cycle — the reversal — on top of the blowdown. The
+        // 190-degree cam has shut by then and radiates one. Nothing in the synth
+        // was told either of those things; the difference is the port flow curve
+        // and the pressure trace, and it is more than ten dB.
+        assert!(
+            long_tilt - short_tilt > 6.0,
+            "cam duration barely moved the pulse spectrum: {long_tilt:.1} dB of mid-band \
+             tilt on the long cam against {short_tilt:.1} dB on the short one"
+        );
+    }
+
     #[test]
     fn config_matches_the_blocks_firing_order() {
         let block = v8();
