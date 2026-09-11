@@ -634,6 +634,16 @@ impl EngineThermal {
             .integrate(dt, port_temperature, cylinder_mass_flow, cylinders_per_bank);
     }
 
+    /// Temperature of the oil the bearings are shearing [K].
+    ///
+    /// The block's, because they are the same body here. The sump does run a
+    /// little behind the coolant on a warm-up and a little ahead of it under
+    /// load, but a second lumped mass to carry that difference would move the
+    /// friction by a couple of percent for a minute and be inaudible.
+    pub fn oil_temperature(&self) -> f64 {
+        self.block.temperature
+    }
+
     /// Block metal temperature [K].
     pub fn block_temperature(&self) -> f64 {
         self.block.temperature

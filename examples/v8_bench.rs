@@ -148,10 +148,11 @@ fn summary(
     println!("  BMEP              {:>10.2} bar", out.bmep / 1e5);
     println!(
         "  friction (FMEP)   {:>10.2} bar",
-        block
-            .friction
-            .fmep(out.peak_pressure, block.geometry().mean_piston_speed(RPM))
-            / 1e5
+        block.friction.fmep(
+            out.peak_pressure,
+            block.geometry().mean_piston_speed(RPM),
+            block.thermal.oil_temperature(),
+        ) / 1e5
     );
     println!("  mean brake torque {:>10.1} N m", mean_brake);
     println!(
@@ -291,6 +292,7 @@ fn torque_profile(block: &EngineBlock) {
         block.ring.peak_pressure(),
         block.geometry().mean_piston_speed(RPM),
         block.total_displacement(),
+        block.thermal.oil_temperature(),
     );
     println!(
         "\n  mean indicated {:.1} N m  -  friction {:.1} N m  =  brake {:.1} N m",

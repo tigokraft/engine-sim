@@ -494,6 +494,7 @@ impl SnapshotSource {
         let friction_mep = block.friction.fmep(
             peak_pressure,
             block.model.geometry.mean_piston_speed(rpm.abs()),
+            block.thermal.oil_temperature(),
         );
 
         // An atmospheric engine reports a dead shaft, which is what silences

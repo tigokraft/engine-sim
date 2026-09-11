@@ -32,7 +32,7 @@ use std::f64::consts::PI;
 use crate::environment::Environment;
 use crate::physics::cylinder::{wrap_cycle, CylinderGeometry, GasProperties, CYCLE_ANGLE};
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
-use crate::physics::thermal::EngineThermal;
+use crate::physics::thermal::{EngineThermal, OilViscosity};
 use crate::physics::thermodynamics::{
     CycleLatch, CylinderModel, PortConditions, Rk4Solver, StepReport, ThermoState,
 };
@@ -513,6 +513,13 @@ impl FiringOrder {
 /// and bearing load that scales with peak cylinder pressure, `C * S_p` is
 /// hydrodynamic shear in the bearings, and `D * S_p^2` is the windage and
 /// pumping that grows with the square of piston speed.
+///
+/// The coefficients are quoted for an engine at operating temperature, which is
+/// the only condition anybody measures them at and is why a simulator built on
+/// them alone has no cold engine. The two piston-speed terms are the shear ones:
+/// they are the ones the oil's viscosity is in, so they are the ones
+/// [`OilViscosity`] scales. `A` is accessories and seal rub and `B * P_max` is
+/// ring load, and neither is shearing a full film.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChenFlynn {
     /// Constant term `A` [bar].
@@ -523,6 +530,8 @@ pub struct ChenFlynn {
     pub piston_speed_factor: f64,
     /// Squared-piston-speed coefficient `D` [bar s^2/m^2].
     pub piston_speed_squared_factor: f64,
+    /// The oil the shear terms are shearing.
+    pub oil: OilViscosity,
 }
 
 impl Default for ChenFlynn {
@@ -533,19 +542,21 @@ impl Default for ChenFlynn {
             peak_pressure_factor: 0.005,
             piston_speed_factor: 0.09,
             piston_speed_squared_factor: 0.0009,
+            oil: OilViscosity::default(),
         }
     }
 }
 
 impl ChenFlynn {
-    /// Friction mean effective pressure [Pa].
-    pub fn fmep(&self, peak_pressure: f64, mean_piston_speed: f64) -> f64 {
+    /// Friction mean effective pressure at an oil temperature [Pa].
+    pub fn fmep(&self, peak_pressure: f64, mean_piston_speed: f64, oil_temperature: f64) -> f64 {
         let p_max_bar = (peak_pressure / 1e5).max(0.0);
         let sp = mean_piston_speed.abs();
+        let viscous = self.oil.friction_multiplier(oil_temperature);
         let bar = self.constant
             + self.peak_pressure_factor * p_max_bar
-            + self.piston_speed_factor * sp
-            + self.piston_speed_squared_factor * sp * sp;
+            + viscous
+                * (self.piston_speed_factor * sp + self.piston_speed_squared_factor * sp * sp);
         bar.max(0.0) * 1e5
     }
 
@@ -558,8 +569,10 @@ impl ChenFlynn {
         peak_pressure: f64,
         mean_piston_speed: f64,
         total_displacement: f64,
+        oil_temperature: f64,
     ) -> f64 {
-        self.fmep(peak_pressure, mean_piston_speed) * total_displacement / CYCLE_ANGLE
+        self.fmep(peak_pressure, mean_piston_speed, oil_temperature) * total_displacement
+            / CYCLE_ANGLE
     }
 }
 
@@ -1345,6 +1358,7 @@ impl EngineBlock {
                 self.ring.peak_pressure(),
                 self.model.geometry.mean_piston_speed(rpm.abs()),
                 self.total_displacement(),
+                self.thermal.oil_temperature(),
             ) * self.omega.abs()
         } else {
             0.0
@@ -1477,9 +1491,12 @@ impl EngineBlock {
         let peak_pressure = self.ring.peak_pressure();
         let mean_piston_speed = self.model.geometry.mean_piston_speed(rpm.abs());
         let displacement = self.total_displacement();
-        let friction_torque = self
-            .friction
-            .torque(peak_pressure, mean_piston_speed, displacement);
+        let friction_torque = self.friction.torque(
+            peak_pressure,
+            mean_piston_speed,
+            displacement,
+            self.thermal.oil_temperature(),
+        );
         let brake_torque = indicated_torque - friction_torque;
 
         // Cycle-averaged quantities come from the ring, not the instant.
@@ -1518,6 +1535,7 @@ impl EngineBlock {
                 self.ring.peak_pressure(),
                 self.model.geometry.mean_piston_speed(rpm.abs()),
                 self.total_displacement(),
+                self.thermal.oil_temperature(),
             )
     }
 
@@ -1799,16 +1817,22 @@ mod tests {
 
     // -- friction -----------------------------------------------------------
 
+    /// The temperature the Chen-Flynn coefficients were measured at [K].
+    fn warm_oil() -> f64 {
+        OilViscosity::default().reference_temperature
+    }
+
     #[test]
     fn chen_flynn_grows_with_load_and_speed() {
         let cf = ChenFlynn::default();
-        let idle = cf.fmep(20e5, 3.0);
-        let loaded = cf.fmep(80e5, 3.0);
-        let fast = cf.fmep(20e5, 15.0);
+        let t = warm_oil();
+        let idle = cf.fmep(20e5, 3.0, t);
+        let loaded = cf.fmep(80e5, 3.0, t);
+        let fast = cf.fmep(20e5, 15.0, t);
         assert!(loaded > idle, "peak pressure must raise FMEP");
         assert!(fast > idle, "piston speed must raise FMEP");
         // A warm V8 at 3000 rpm should land in the usual 0.5-2.5 bar band.
-        let cruise = cf.fmep(60e5, 8.6);
+        let cruise = cf.fmep(60e5, 8.6, t);
         assert!(
             (0.5e5..2.5e5).contains(&cruise),
             "FMEP {cruise} Pa is outside the plausible band"
@@ -1816,12 +1840,32 @@ mod tests {
     }
 
     #[test]
+    fn cold_oil_raises_fmep_and_warm_oil_leaves_it_alone() {
+        let cf = ChenFlynn::default();
+        let warm = cf.fmep(20e5, 3.0, warm_oil());
+        let cold = cf.fmep(20e5, 3.0, 293.15);
+        assert!(
+            cold > warm,
+            "thick oil must cost more: {cold} Pa cold against {warm} Pa warm"
+        );
+        // The shear terms roughly double; the constant and the ring load do not
+        // move at all, so the whole FMEP goes up by something under a half.
+        let rise = cold / warm - 1.0;
+        assert!(
+            (0.15..0.60).contains(&rise),
+            "a cold idle's FMEP rose by {:.0} %, which is not what a cold engine does",
+            rise * 100.0
+        );
+    }
+
+    #[test]
     fn friction_torque_matches_the_fmep_definition() {
         let cf = ChenFlynn::default();
         let displacement = 4.0e-3; // 4.0 litre
-        let fmep = cf.fmep(60e5, 8.6);
+        let t = warm_oil();
+        let fmep = cf.fmep(60e5, 8.6, t);
         approx(
-            cf.torque(60e5, 8.6, displacement),
+            cf.torque(60e5, 8.6, displacement, t),
             fmep * displacement / (4.0 * PI),
             1e-9,
         );
