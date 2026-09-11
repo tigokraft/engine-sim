@@ -2018,6 +2018,29 @@ mod tests {
         }
     }
 
+    /// One peak cannot be three modes: the nearest prediction claims it and the
+    /// others are reported as not found.
+    #[test]
+    fn one_peak_is_claimed_by_one_prediction() {
+        // A spectrum with a single mode in it, at 410 Hz.
+        let peaks = resonances(&tone(410.0, 0.5, 2.0), RATE, 8);
+
+        // Three predictions inside the window of it: an intake runner, an
+        // exhaust primary and a silencer, as a sparse spectrum really does
+        // offer.
+        let placements = place_all(&[367.0, 400.0, 470.0], &peaks, PLACEMENT_WINDOW_PCT);
+        let found: Vec<Option<f64>> = placements.iter().map(|p| p.measured_hz).collect();
+        assert_eq!(
+            found.iter().filter(|hz| hz.is_some()).count(),
+            1,
+            "three predictions claimed {found:?} between them"
+        );
+        // And it is the closest one that has it: 400 Hz is 2.4 % away, against
+        // 11.7 % and 12.8 %.
+        assert!(placements[1].measured_hz.is_some());
+        assert!(placements[1].within(3.0));
+    }
+
     /// A render shorter than one window has nothing to average.
     #[test]
     fn a_render_under_one_window_reports_no_frames() {
