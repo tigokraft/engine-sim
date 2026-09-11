@@ -1093,6 +1093,7 @@ impl Driveline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physics::engine_block::PHASE_CELLS;
 
     /// Runs a preset at a fixed speed until its phase ring has filled.
     fn primed(preset: &EnginePreset, rpm: f64) -> EngineBlock {
@@ -1776,6 +1777,106 @@ mod tests {
              which is not the difference between a thumper and a twelve",
             single * 100.0,
             twelve * 100.0
+        );
+    }
+
+    /// The solved cylinder pressure of one preset, cell by crank degree, with
+    /// the motored isentrope of the same cycle taken off it.
+    ///
+    /// What is left is the pressure combustion put there and nothing else: no
+    /// compression ramp, no expansion. Its slope is what hammers the block.
+    fn combustion_overpressure(preset: &EnginePreset, rpm: f64) -> (Vec<f64>, f64) {
+        let block = primed(preset, rpm);
+        let latch = block.master.latch;
+        let ignition = latch
+            .autoignition
+            .expect("a compression-ignition preset must have lit")
+            .angle
+            .to_degrees();
+        let trace = (0..PHASE_CELLS)
+            .map(|cell| {
+                let theta = deg(cell as f64 + 0.5);
+                block.ring.cell(cell).pressure
+                    - latch.motored_pressure(preset.model.geometry.safe_volume(theta))
+            })
+            .collect();
+        (trace, ignition)
+    }
+
+    #[test]
+    fn the_diesel_pressure_trace_spikes_before_it_humps() {
+        // The shape a two-stage release puts on a real solved cycle, as
+        // distinct from the shape the profile has on its own. Everything here
+        // comes out of the RK4 solver's own phase ring; nothing samples the
+        // Wiebe.
+        let rpm = 1_800.0;
+        let preset = EnginePreset::turbo_diesel_four();
+        let (trace, ignition) = combustion_overpressure(&preset, rpm);
+        let slope = |k: usize| trace[k] - trace[k - 1];
+
+        // The spike: the steepest pressure rise of the whole cycle lands within
+        // a few degrees of the angle the Arrhenius integral picked, not at the
+        // injector opening and not at top dead centre by coincidence.
+        let (spike_at, spike_rate) =
+            (1..PHASE_CELLS)
+                .map(|k| (k as f64, slope(k)))
+                .fold(
+                    (0.0, f64::MIN),
+                    |best, now| if now.1 > best.1 { now } else { best },
+                );
+        assert!(
+            (spike_at - ignition).abs() < 5.0,
+            "the steepest rise is at {spike_at:.0} degrees but the charge lit at \
+             {ignition:.1}"
+        );
+
+        // The hump: long after the spike has died back to a twentieth of
+        // itself, the diffusion burn is still adding pressure, and the
+        // overpressure does not reach its own maximum until well past it.
+        let spike_over = (spike_at as usize..PHASE_CELLS)
+            .find(|&k| slope(k) < 0.05 * spike_rate)
+            .expect("the spike must end");
+        let (hump_at, _) = (spike_over..spike_over + 60)
+            .map(|k| (k as f64, trace[k]))
+            .fold(
+                (0.0, f64::MIN),
+                |best, now| if now.1 > best.1 { now } else { best },
+            );
+        assert!(
+            hump_at > spike_at + 8.0,
+            "nothing burned after the spike: the overpressure peaked at \
+             {hump_at:.0} degrees against a spike at {spike_at:.0}"
+        );
+        assert!(
+            trace[hump_at as usize] > trace[spike_over],
+            "the diffusion burn added no pressure at all"
+        );
+
+        // And the spike is the premixed stage's doing. Collapsing the two
+        // stages into one — same fuel, same ignition angle, same everything
+        // else — takes most of the rate out of the cycle while leaving the
+        // burn itself intact, which is the whole claim of a two-stage model.
+        let mut single_stage = EnginePreset::turbo_diesel_four();
+        let diesel = *preset
+            .model
+            .combustion
+            .compression()
+            .expect("the diesel preset must be compression-ignition");
+        single_stage.model.combustion = HeatRelease::Compression(DieselCombustion {
+            premixed_duration: diesel.diffusion_duration,
+            premixed_form_factor: diesel.diffusion_form_factor,
+            ..diesel
+        });
+        let (flat, _) = combustion_overpressure(&single_stage, rpm);
+        let flat_rate = (1..PHASE_CELLS)
+            .map(|k| flat[k] - flat[k - 1])
+            .fold(f64::MIN, f64::max);
+        assert!(
+            spike_rate > 2.0 * flat_rate,
+            "the premixed stage is not what makes the rate: {:.2} bar/deg with it \
+             against {:.2} without",
+            spike_rate / 1e5,
+            flat_rate / 1e5
         );
     }
 
