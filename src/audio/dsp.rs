@@ -1933,6 +1933,20 @@ pub const KNOCK_RHO_01: f32 = 3.8317;
 /// Sharpness of the cylinder cavity knock resonances [-].
 pub const KNOCK_Q: f32 = 20.0;
 
+/// Peak cylinder pressure oscillation of a cycle knocking at unit intensity [Pa].
+///
+/// Measured knock runs from under a bar — detectable on a transducer, inaudible
+/// in the car — to twenty at the point where it starts putting holes in pistons.
+/// The envelope this multiplies is `0.8 * knock_intensity` clamped at two, so a
+/// light knock lands at a couple of bar and a heavy one at the top of the range,
+/// which is where the audible band of the phenomenon is.
+///
+/// What matters structurally is that it is a *pressure with a frequency*: the
+/// wall is driven by the product of the two, so the same oscillation ringing at
+/// 6 kHz in a small bore hammers the block harder than at 4 kHz in a large one.
+/// That is why a small engine's knock sounds so much sharper than a big one's.
+pub const KNOCK_PRESSURE_AMPLITUDE: f32 = 1.5e6;
+
 /// Resonances of burned gas ringing inside the cylinder bore cavity.
 ///
 /// Knock is auto-ignition of the unburnt end-gas ahead of the flame front:
@@ -1941,10 +1955,12 @@ pub const KNOCK_Q: f32 = 20.0;
 /// (rho_10 = 1.8412), second circumferential (rho_20 = 3.0542), and first
 /// radial (rho_01 = 3.8317).
 ///
-/// The voice is excited on cylinder firing events by a noise burst whose amplitude
-/// scales with how far past 1.0 the Livengood-Wu knock integral went, decaying
-/// in 2-5 ms. It is routed into the structural path through the block resonator,
-/// because knock is heard ringing through the engine block, not out the exhaust.
+/// The voice is excited on cylinder firing events by a noise burst whose
+/// amplitude scales with how far past 1.0 the Livengood-Wu knock integral went,
+/// decaying in 2-5 ms. Its output is a normalised pressure oscillation inside
+/// the bore, and it reaches the listener only through
+/// [`crate::audio::structure`] — knock is a sound heard *through the block*, and
+/// none of it goes out of the exhaust port, which is shut when it happens.
 #[derive(Debug, Clone)]
 pub struct KnockVoice {
     sample_rate: f32,
@@ -2137,6 +2153,11 @@ pub struct EngineSynth {
     block: BlockResonator,
     /// The block as a radiating body: modes of the casting, pan and bore walls.
     structure: StructuralPath,
+    /// Structural drive per unit of knock voice output [-].
+    ///
+    /// Recomputed at the control rate because it follows the knock mode
+    /// frequency, which follows bore and charge temperature.
+    knock_scale: f32,
     /// `drive = scale * dP/dt`, with the bore area folded in [s/Pa].
     ///
     /// Fixed geometry, so the area ratio and both references are collapsed into
@@ -2225,6 +2246,7 @@ impl EngineSynth {
                 config.block_resonance_db as f32,
             ),
             structure: StructuralPath::new(fs, &config.structure.modes()),
+            knock_scale: 0.0,
             combustion_scale: combustion_drive(1.0, config.structure.bore as f32),
             fade_in: Smoothed::new(0.0, fs, 0.015),
             config,
@@ -2443,6 +2465,13 @@ impl EngineSynth {
         self.intake_network.set_throttle(throttle);
         self.knock
             .tune(self.snapshot.bore, gamma, gas_constant, temperature);
+        // What the bore wall feels is the rate of the knock oscillation, so the
+        // voice's normalised output becomes a structural drive by way of its own
+        // frequency and the amplitude a knocking cycle actually reaches.
+        self.knock_scale = combustion_drive(
+            TAU * self.knock.mode_frequencies()[0] * KNOCK_PRESSURE_AMPLITUDE,
+            self.config.structure.bore as f32,
+        );
         // Nothing to tune on an atmospheric engine: the voice is left cold and
         // never asked for a sample, rather than run at a level of zero.
         if let Some(voicing) = self.config.turbo {
@@ -2704,14 +2733,16 @@ impl EngineSynth {
         // Combustion and the mechanical rig arrive at the block as one force,
         // because the block cannot tell them apart: a lifter landing on a valve
         // and a flame front arriving at the piston crown are both metal being
-        // hit, and both reach the listener only by shaking the casing. Summing
-        // them before the bank rather than after is not an optimisation — it is
-        // the statement that there is one structure, not two.
+        // hit, and both reach the listener only by shaking the casing. Knock
+        // joins them: end-gas going off is the chamber ringing against its own
+        // walls, and the walls are part of the same casting. Summing all three
+        // before the bank rather than after is not an optimisation — it is the
+        // statement that there is one structure, not three.
         let drive = rise * self.combustion_scale
-            + self.mechanical.process(&mut self.noise) * self.config.mechanical_level as f32;
+            + self.mechanical.process(&mut self.noise) * self.config.mechanical_level as f32
+            + self.knock.process(&mut self.noise) * self.knock_scale;
         let centre = intake_rad * self.config.intake_level as f32
             + turbo
-            + self.knock.process(&mut self.noise)
             + self.structure.process(drive) * self.config.structure_level as f32;
         left += centre;
         right += centre;
