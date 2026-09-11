@@ -881,6 +881,14 @@ impl PulsePool {
 struct CycleTables {
     /// Exhaust excitation shape over the cycle from EVO, peak one [-].
     exhaust: [f32; CYCLE_TABLE],
+    /// Induction mass flow through one cylinder's intake port [kg/s].
+    ///
+    /// Kept in its own units rather than normalised, because the intake layer's
+    /// level law is a function of port *velocity* and therefore of the flow
+    /// itself — see [`REFERENCE_INTAKE_FLOW`]. Summing this over the cylinders
+    /// at their own phases is the induction gulp train, which is what makes an
+    /// intake pitched rather than merely noisy.
+    intake: [f32; CYCLE_TABLE],
 }
 
 impl Default for CycleTables {
@@ -888,6 +896,7 @@ impl Default for CycleTables {
     fn default() -> Self {
         Self {
             exhaust: [0.0; CYCLE_TABLE],
+            intake: [0.0; CYCLE_TABLE],
         }
     }
 }
@@ -921,7 +930,10 @@ impl CycleTables {
                 }
             }
         }
-        Self { exhaust }
+        Self {
+            exhaust,
+            intake: snapshot.intake_port_flow,
+        }
     }
 
     /// Reads a table at a cycle phase, `0..1` from EVO.
@@ -945,6 +957,12 @@ impl CycleTables {
     #[inline(always)]
     fn exhaust_at(&self, phase: f32) -> f32 {
         Self::read(&self.exhaust, phase)
+    }
+
+    /// Intake port mass flow at a cycle phase measured from EVO [kg/s].
+    #[inline(always)]
+    fn intake_at(&self, phase: f32) -> f32 {
+        Self::read(&self.intake, phase)
     }
 }
 
@@ -1096,11 +1114,19 @@ impl ExhaustBank {
 /// why an engine's intake gets not just louder but *brighter* as it breathes
 /// harder — and why a closed throttle at high rpm goes quiet rather than merely
 /// soft.
+///
+/// The *level* is driven sample by sample from the solver's own port flow curve
+/// played back at crank rate, so the layer is a train of gulps rather than a
+/// steady hiss: an engine draws air in discrete events, and at four cylinders
+/// and 1500 rpm there are gaps between them a listener can hear. Only the filter
+/// tuning is left at the control rate, because that is where the transcendental
+/// functions are.
 #[derive(Debug, Clone)]
 struct IntakeVoice {
     band: Biquad,
     body: Biquad,
-    gain: Smoothed,
+    /// Throttle-plate term of the level law, set at the control rate [-].
+    throttle_gain: f32,
     sample_rate: f32,
 }
 
@@ -1109,12 +1135,12 @@ impl IntakeVoice {
         Self {
             band: Biquad::new(BiquadCoeffs::bandpass(sample_rate, 400.0, 0.7)),
             body: Biquad::new(BiquadCoeffs::lowpass(sample_rate, 2_000.0, 0.7)),
-            gain: Smoothed::new(0.0, sample_rate, 0.020),
+            throttle_gain: 0.0,
             sample_rate,
         }
     }
 
-    /// Retunes from mass flow [kg/s] and throttle position.
+    /// Retunes from cycle-mean mass flow [kg/s] and throttle position.
     fn tune(&mut self, mass_flow: f32, throttle: f32) {
         let flow = (mass_flow / REFERENCE_INTAKE_FLOW).clamp(0.0, 1.6);
 
@@ -1129,17 +1155,19 @@ impl IntakeVoice {
             0.7,
         ));
 
-        // Radiated power grows faster than flow does; the 3/2 exponent keeps
-        // idle from being buried while still opening up under load. The throttle
-        // term is the plate itself: a shut throttle muffles the runner mouth
-        // even while the engine is still pumping.
-        let level = flow.powf(1.5) * (0.25 + 0.75 * throttle);
-        self.gain.set_target(level.min(1.5));
+        // The throttle plate itself: a shut throttle muffles the runner mouth
+        // even while the engine is still pumping. The flow term of the level law
+        // is applied per sample in `process`, from the port flow curve.
+        self.throttle_gain = 0.25 + 0.75 * throttle;
     }
 
+    /// One sample, at the instantaneous induction flow the cylinders are drawing.
     #[inline(always)]
-    fn process(&mut self, noise: &mut Noise) -> f32 {
-        let g = self.gain.next_value();
+    fn process(&mut self, noise: &mut Noise, mass_flow: f32) -> f32 {
+        // Radiated power grows faster than flow does; the 3/2 exponent keeps
+        // idle from being buried while still opening up under load.
+        let flow = (mass_flow / REFERENCE_INTAKE_FLOW).clamp(0.0, 1.6);
+        let g = (flow * flow.sqrt() * self.throttle_gain).min(1.5);
         if g < 1e-6 {
             // Still run the filters so their state stays in step; only the
             // multiply is skipped. Bypassing them entirely would leave stale
@@ -2441,11 +2469,16 @@ impl EngineSynth {
     /// Every cylinder plays the same curve, displaced by where its EVO sits in
     /// the master cycle — which is the audio-side statement of the same thing
     /// the phase ring does on the physics side.
+    ///
+    /// Returns the induction flow the whole engine is drawing this sample: the
+    /// port flow curve summed over the cylinders at their own phases, which is
+    /// the same *sum of instants* [`REFERENCE_INTAKE_FLOW`] is measured against
+    /// — now at the sample rate instead of once a physics frame.
     #[inline(always)]
-    fn fill_excitations(&mut self, turning: bool) {
+    fn fill_excitations(&mut self, turning: bool) -> f32 {
         if !turning {
             self.excitations.fill(0.0);
-            return;
+            return 0.0;
         }
         // Combustion lags the valve event by a real and variable number of crank
         // degrees, common to every cylinder; only the variation around it is
@@ -2457,6 +2490,7 @@ impl EngineSynth {
             0.0
         };
         let phase = self.cycle_phase;
+        let mut induction = 0.0;
         for index in 0..self.config.cylinders.len() {
             let tap = self.config.cylinders[index];
             let variation = self.variation[index];
@@ -2464,9 +2498,18 @@ impl EngineSynth {
             // model; the curve it multiplies is normalised to a peak of one.
             let amplitude = (self.blowdown_pa[index].value() / REFERENCE_BLOWDOWN).min(2.0)
                 * variation.amplitude_scale;
-            let local = phase - tap.evo_phase - retard - variation.phase_offset;
-            self.excitations[index] = amplitude * self.cycle.exhaust_at(local);
+            let cylinder = phase - tap.evo_phase;
+            self.excitations[index] = amplitude
+                * self
+                    .cycle
+                    .exhaust_at(cylinder - retard - variation.phase_offset);
+            // Induction is read at the bare cylinder phase. The retard and the
+            // jitter are properties of *combustion* — how long the flame takes
+            // to develop, and how much that varies — and a valve opening on the
+            // intake side does not wait for a flame.
+            induction += self.cycle.intake_at(cylinder);
         }
+        induction
     }
 
     /// Produces one stereo frame.
@@ -2474,7 +2517,7 @@ impl EngineSynth {
     fn tick(&mut self) -> (f32, f32) {
         let cycle_hz = self.cycle_hz.next_value();
         let turning = self.advance_crank(cycle_hz);
-        self.fill_excitations(turning);
+        let induction = self.fill_excitations(turning);
 
         let exhaust_level = self.exhaust_level.next_value();
         for (excitation, pool) in self
@@ -2507,7 +2550,8 @@ impl EngineSynth {
             Some(voicing) => self.turbo.process(&mut self.noise) * voicing.level as f32,
             None => 0.0,
         };
-        let centre = self.intake.process(&mut self.noise) * self.config.intake_level as f32
+        let centre = self.intake.process(&mut self.noise, induction)
+            * self.config.intake_level as f32
             + turbo
             + self.mechanical.process(&mut self.noise) * self.config.mechanical_level as f32
             + self.knock.process(&mut self.noise);
@@ -2678,6 +2722,19 @@ mod tests {
     }
 
     /// Largest step between consecutive samples — the thing a "pop" actually is.
+    /// Amplitude of one frequency in an interleaved stereo buffer.
+    fn magnitude_at(samples: &[f32], hz: f32, sample_rate: f32) -> f32 {
+        let mono: Vec<f32> = samples.chunks(2).map(|f| 0.5 * (f[0] + f[1])).collect();
+        let w = TAU * hz / sample_rate;
+        let (mut re, mut im) = (0.0f32, 0.0f32);
+        for (n, &x) in mono.iter().enumerate() {
+            let phase = w * n as f32;
+            re += x * phase.cos();
+            im += x * phase.sin();
+        }
+        2.0 * (re * re + im * im).sqrt() / mono.len() as f32
+    }
+
     fn max_slew(samples: &[f32], channels: usize) -> f32 {
         samples
             .chunks(channels)
@@ -2739,10 +2796,13 @@ mod tests {
             // one.
             let mut config = SynthConfig::cross_plane_v8(FS);
             config.mechanical_level = 0.0;
+            // The intake plays the cycle's own port flow now, so zeroing the
+            // snapshot's mass flow no longer silences it; the level is what
+            // takes it out of the mix.
+            config.intake_level = 0.0;
             let mut synth = EngineSynth::new(config);
             let mut snapshot = loaded_snapshot();
             snapshot.blowdown_delta = [delta; MAX_CYLINDERS];
-            snapshot.intake_mass_flow = 0.0;
             snapshot.turbo_rpm = 0.0;
             synth.set_snapshot(&snapshot);
             render(&mut synth, 24_000); // settle
@@ -2755,6 +2815,33 @@ mod tests {
         assert!(
             (1.85..2.15).contains(&ratio),
             "amplitude is not linear in dP: ratio {ratio}"
+        );
+    }
+
+    #[test]
+    fn induction_is_a_train_of_gulps_at_the_firing_order() {
+        // The intake layer used to be noise whose loudness moved with a scalar,
+        // which has no rate in it at all. Reading the port flow curve at each
+        // cylinder's own phase gives the layer the engine's firing order for
+        // free — the gulps *are* the modulation.
+        let mut config = SynthConfig::cross_plane_v8(FS);
+        config.exhaust_level = 0.0;
+        config.mechanical_level = 0.0;
+        let mut synth = EngineSynth::new(config);
+        synth.exhaust_level.snap(0.0);
+        synth.set_snapshot(&loaded_snapshot());
+        render(&mut synth, 24_000);
+        let out = render(&mut synth, 48_000);
+
+        // A V8 at 3000 rpm draws 200 times a second.
+        let firing = 3_000.0 / 120.0 * 8.0;
+        let at_firing = magnitude_at(&out, firing, FS);
+        // Two frequencies either side that are not orders of anything.
+        let off =
+            0.5 * (magnitude_at(&out, firing * 0.63, FS) + magnitude_at(&out, firing * 1.47, FS));
+        assert!(
+            at_firing > 4.0 * off,
+            "induction is not pitched: {at_firing:.2e} at the firing order against {off:.2e} beside it"
         );
     }
 
