@@ -1216,6 +1216,79 @@ mod tests {
         assert!((fast - 7_000.0).abs() < 1e-9);
     }
 
+    /// A balance is the same whatever the gain, which is the whole reason it
+    /// exists: two renders twenty decibels apart in level have to compare as
+    /// identical, or a disagreement could be closed by turning a knob.
+    #[test]
+    fn a_balance_is_invariant_to_gain() {
+        let loud: Vec<f32> = tone(200.0, 0.5, 2.0)
+            .iter()
+            .zip(tone(400.0, 0.125, 2.0))
+            .map(|(a, b)| a + b)
+            .collect();
+        let quiet: Vec<f32> = loud.iter().map(|s| s * 0.1).collect();
+
+        let rpm = RpmCurve::constant(3_000.0);
+        let wanted = [2.0, 4.0, 8.0];
+        let a = track(&loud, RATE, &rpm, &wanted).balance(4.0);
+        let b = track(&quiet, RATE, &rpm, &wanted).balance(4.0);
+
+        // Twenty decibels apart in absolute level.
+        assert!(
+            (a.reference_db - b.reference_db - 20.0).abs() < 0.1,
+            "the two renders were {:.1} dB apart, not 20",
+            a.reference_db - b.reference_db
+        );
+        // Order 8 is the 400 Hz tone: a quarter of the amplitude of the one on
+        // order 4, so 12 dB down, in both.
+        assert!(
+            (a.at(8.0).unwrap() - (-12.04)).abs() < 0.2,
+            "{:?}",
+            a.at(8.0)
+        );
+        let comparison = b.against(&a);
+        assert!(
+            comparison.max_abs_db() < 0.05,
+            "a gain change moved the balance by {:.3} dB",
+            comparison.max_abs_db()
+        );
+        assert_eq!(comparison.deltas.len(), 3);
+    }
+
+    /// A comparison reports where two balances part company, and by how much.
+    #[test]
+    fn a_comparison_finds_the_order_that_disagrees() {
+        let reference = Balance::from_levels(
+            4.0,
+            &[
+                (2.0, Some(-30.0)),
+                (4.0, Some(-20.0)),
+                (6.0, Some(-40.0)),
+                (8.0, None),
+            ],
+        );
+        let measured = Balance::from_levels(
+            4.0,
+            &[
+                (2.0, Some(-24.0)),
+                (4.0, Some(-14.0)),
+                (6.0, Some(-28.0)),
+                (8.0, Some(-50.0)),
+            ],
+        );
+
+        // Six decibels of gain between them, which the balance divides out, and
+        // six decibels of real disagreement on order 6, which it keeps.
+        let comparison = measured.against(&reference);
+        assert_eq!(comparison.deltas.len(), 3);
+        assert_eq!(comparison.missing, 1, "order 8 should not be compared");
+        assert!((comparison.at(2.0).unwrap() - 0.0).abs() < 1e-9);
+        assert!((comparison.at(6.0).unwrap() - 6.0).abs() < 1e-9);
+        assert_eq!(comparison.worst().map(|d| d.order), Some(6.0));
+        assert!((comparison.max_abs_db() - 6.0).abs() < 1e-9);
+        assert!(comparison.within(6.5) && !comparison.within(5.5));
+    }
+
     /// The plan's claim for the peak picker: two known tones, both found, both
     /// within one per cent.
     #[test]
