@@ -3321,6 +3321,69 @@ mod tests {
     }
 
     #[test]
+    fn a_dead_cylinder_lopes_at_the_cycle_rate() {
+        use crate::audio::{EngineControls, SnapshotSource};
+        use crate::environment::Environment;
+        use crate::physics::control::CylinderHealth;
+        use crate::physics::engine_block::EngineBlock;
+
+        let rpm = 2_400.0;
+        let dt = 1.0 / 240.0;
+        let f_cycle = (rpm / 120.0) as f32; // 20.0 Hz (order 0.5)
+
+        // 1. Healthy engine
+        let mut healthy_block = EngineBlock::cross_plane_v8(Environment::default());
+        for _ in 0..400 {
+            healthy_block.update(dt, rpm);
+        }
+        let mut healthy_source = SnapshotSource::new(&healthy_block);
+        let mut healthy_synth = EngineSynth::new(SynthConfig::from_block(&healthy_block, FS));
+        let frames = (FS * 2.0) as usize; // 2 seconds of audio
+        let mut healthy_buf = vec![0.0f32; frames * 2];
+        let chunk = 200;
+        for c in 0..(frames / chunk) {
+            healthy_block.update(dt, rpm);
+            let snap = healthy_source.sample(&healthy_block, rpm, dt, EngineControls::wide_open());
+            healthy_synth.set_snapshot(&snap);
+            healthy_synth.render(&mut healthy_buf[c * chunk * 2..(c + 1) * chunk * 2], 2);
+        }
+
+        // 2. Engine with one dead cylinder (dead plug on cylinder 2)
+        let mut dead_block = EngineBlock::cross_plane_v8(Environment::default());
+        for _ in 0..400 {
+            dead_block.update(dt, rpm);
+        }
+        dead_block.set_cylinder_health(2, CylinderHealth::dead_plug());
+        let mut dead_source = SnapshotSource::new(&dead_block);
+        let mut dead_synth = EngineSynth::new(SynthConfig::from_block(&dead_block, FS));
+        let mut dead_buf = vec![0.0f32; frames * 2];
+        for c in 0..(frames / chunk) {
+            dead_block.update(dt, rpm);
+            let snap = dead_source.sample(&dead_block, rpm, dt, EngineControls::wide_open());
+            dead_synth.set_snapshot(&snap);
+            dead_synth.render(&mut dead_buf[c * chunk * 2..(c + 1) * chunk * 2], 2);
+        }
+
+        // Measure energy at the cycle rate (order 0.5) and firing order in the settled half of the buffer
+        let healthy_cycle_energy = magnitude_at(&healthy_buf[frames..], f_cycle, FS);
+        let dead_cycle_energy = magnitude_at(&dead_buf[frames..], f_cycle, FS);
+
+        let f_firing = 8.0 * f_cycle; // 160.0 Hz (order 4.0)
+        let healthy_firing = magnitude_at(&healthy_buf[frames..], f_firing, FS);
+        let dead_firing = magnitude_at(&dead_buf[frames..], f_firing, FS);
+
+        // A single dead cylinder shows as a missing order component and a lope at the cycle rate
+        assert!(
+            dead_firing < healthy_firing,
+            "dead cylinder must show missing firing order component: dead {dead_firing:.4} < healthy {healthy_firing:.4}"
+        );
+        assert!(
+            dead_cycle_energy > 3.0 * healthy_cycle_energy,
+            "dead cylinder must lope at the cycle rate: dead {dead_cycle_energy:.4} vs healthy {healthy_cycle_energy:.4}"
+        );
+    }
+
+    #[test]
     fn hotter_exhaust_raises_every_resonance_by_sqrt_of_the_ratio() {
         let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
         let snapshot = loaded_snapshot().with_uniform_exhaust_temperature(400.0);
