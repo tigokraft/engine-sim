@@ -2095,6 +2095,87 @@ mod tests {
     }
 
     #[test]
+    fn fundamental_shifts_with_mach_number() {
+        // Convective mean flow biases forward and backward acoustic wave travel:
+        // waves move downstream at c + u = c(1 + M) and upstream at c - u = c(1 - M).
+        // For a closed-open pipe (quarter-wave resonator), the round trip period is:
+        //   T = 2 * (L / (c + u) + L / (c - u)) = 4L / (c * (1 - M^2))
+        // So the fundamental mode frequency shifts as:
+        //   f_1 = c * (1 - M^2) / (4L)
+        // in both forward (M > 0) and backward (M < 0) directions.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.4;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 300.0;
+        let c = speed_of_sound(GAMMA, R, TEMPERATURE);
+
+        let length = 0.5f64;
+        let radius = 0.025f64;
+        let area = std::f64::consts::PI * radius * radius;
+        let mouth = Mouth::new(FS, radius as f32, false, c);
+        let effective = length + mouth.end_correction() as f64;
+
+        // Test with M = 0.20 and M = -0.20 (in both directions)
+        for mach in [0.20f32, -0.20f32] {
+            let mut pipe = WaveguidePipe::new(effective, area, FS, GAMMA, R, TEMPERATURE);
+            pipe.set_boundary_phase_delay(mouth.phase_delay_samples());
+            pipe.tune(GAMMA, R, TEMPERATURE);
+            pipe.set_mach(mach);
+            pipe.snap_delays();
+            let mut mouth = mouth;
+
+            // Check that forward and backward delays are asymmetric:
+            let tau0 = (effective as f32) / c;
+            let expected_fwd = tau0 / (1.0 + mach);
+            let expected_bwd = tau0 / (1.0 - mach);
+            let actual_fwd = pipe.forward_delay_samples() / FS;
+            let actual_bwd = pipe.backward_delay_samples() / FS;
+            assert!(
+                (actual_fwd - expected_fwd).abs() / expected_fwd < 0.02,
+                "Forward transit delay mismatch: actual {actual_fwd:.5}, expected {expected_fwd:.5}"
+            );
+            assert!(
+                (actual_bwd - expected_bwd).abs() / expected_bwd < 0.02,
+                "Backward transit delay mismatch: actual {actual_bwd:.5}, expected {expected_bwd:.5}"
+            );
+            assert!(
+                (pipe.forward_delay_samples() - pipe.backward_delay_samples()).abs() > 2.0,
+                "Forward and backward delays must be asymmetric under mean flow"
+            );
+
+            // Impulse response measurement
+            let mut radiated = vec![0.0f32; 1 << 16];
+            for (i, out) in radiated.iter_mut().enumerate() {
+                let (p_at_closed, p_at_mouth) = pipe.read_outputs();
+                let (p_reflected, p_rad) = mouth.step(p_at_mouth);
+                let excitation = if i == 0 { 1.0 } else { 0.0 };
+                pipe.push_inputs(excitation + p_at_closed, p_reflected);
+                *out = p_rad;
+            }
+
+            let expected_f1 = c * (1.0 - mach * mach) / (4.0 * effective as f32);
+            let mut best = (0.0f32, 0.0f32);
+            let mut f = expected_f1 * 0.7;
+            while f <= expected_f1 * 1.3 {
+                let m = magnitude_at(&radiated[1..], f, FS);
+                if m > best.1 {
+                    best = (f, m);
+                }
+                f += 0.05;
+            }
+
+            let error = (best.0 - expected_f1).abs() / expected_f1;
+            assert!(
+                error < 0.01,
+                "Mach = {mach}: resonance at {:.2} Hz, expected {:.2} Hz ({:.2} % off)",
+                best.0,
+                expected_f1,
+                error * 100.0
+            );
+        }
+    }
+
+    #[test]
     fn chamber_transmission_loss_matches_theory() {
         // A single-expansion chamber terminated anechoically has a closed-form
         // transmission loss that depends only on the area ratio and how many
