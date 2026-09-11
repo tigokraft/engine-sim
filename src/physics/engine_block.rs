@@ -1347,6 +1347,8 @@ impl EngineBlock {
 
         self.update_manifolds(step.plan.dt, rpm);
         self.update_thermal(step.plan.dt, rpm);
+        let knocked = step.knocked || self.master.knock_integral >= 1.0;
+        self.ecu.update_knock_retard(knocked, step.plan.dt);
         self.assemble_output(rpm, step)
     }
 

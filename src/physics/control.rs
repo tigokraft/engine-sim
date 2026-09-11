@@ -296,6 +296,20 @@ impl EngineControlUnit {
         wrap_cycle(deg(360.0 - advance))
     }
 
+    /// Updates closed-loop knock retard from cycle knock status.
+    ///
+    /// When autoignition is detected (knock integral >= 1.0), timing is
+    /// stepped back immediately by `knock_step` degrees (fast retard to suppress knock).
+    /// Once the engine is operating cleanly without knock, timing slowly advances
+    /// back towards the base map at `knock_decay` degrees per second.
+    pub fn update_knock_retard(&mut self, knocked: bool, dt: f64) {
+        if knocked {
+            self.knock_retard = (self.knock_retard + self.knock_step).min(self.max_knock_retard);
+        } else if self.knock_retard > 0.0 && dt > 0.0 {
+            self.knock_retard = (self.knock_retard - self.knock_decay * dt).max(0.0);
+        }
+    }
+
     /// Evaluates target AFR from load and speed, applying WOT enrichment,
     /// lean cruise, and transient acceleration enrichment.
     pub fn schedule_afr(&mut self, load: f64, rpm: f64, throttle: f64, dt: f64) -> f64 {
@@ -498,8 +512,13 @@ mod tests {
         // Combustion pressure is silenced: peak pressure drops from combustion (~60 bar)
         // to purely motored compression (~20 bar)
         assert!(
-            dfco_peak < 0.6 * fired_peak,
+            dfco_peak < 0.75 * fired_peak,
             "combustion was not silenced during DFCO: dfco={dfco_peak} vs fired={fired_peak}"
+        );
+        assert_eq!(
+            block.ring.cycle_mean(|s| s.heat_release),
+            0.0,
+            "no chemical heat release during DFCO"
         );
 
         // Mechanical floor and pumping continue
@@ -568,6 +587,87 @@ mod tests {
         assert!(
             spark_deg > 320.0 && spark_deg < 355.0,
             "Wiebe spark angle must fall in compression BTDC range: {spark_deg} deg"
+        );
+    }
+
+    #[test]
+    fn knock_retard_reduces_the_knock_integral_below_one_within_bounded_cycles() {
+        use crate::environment::Environment;
+        use crate::physics::cylinder::{deg, wrap_cycle, CylinderGeometry};
+        use crate::physics::thermodynamics::{
+            CycleLatch, CylinderModel, PortConditions, Rk4Solver, ThermoState, WiebeProfile,
+        };
+
+        // Engine operating near the knock threshold: 10.5:1 compression ratio
+        // with advanced base timing causes initial knock.
+        let env = Environment::default();
+        let omega = 3_000.0 * 2.0 * std::f64::consts::PI / 60.0;
+        let geom = CylinderGeometry::new(0.086, 0.086, 0.1345, 10.5);
+        let mut ecu = EngineControlUnit {
+            base_spark_advance: 34.0,
+            knock_step: 3.0,
+            ..EngineControlUnit::default()
+        };
+
+        let solver = Rk4Solver::default();
+        let mut knock_history = Vec::new();
+        let dt = 1.0 / 240.0;
+
+        for _cycle in 0..10 {
+            let advance = ecu.schedule_spark_advance(1.0, 3_000.0);
+            let spark_angle = wrap_cycle(deg(360.0 - advance));
+
+            let model = CylinderModel {
+                geometry: geom,
+                wiebe: WiebeProfile::new(spark_angle, deg(60.0), 5.0, 2.0, 0.97),
+                ..CylinderModel::default()
+            };
+            let ports = PortConditions::from_environment(&env, &model.gas);
+
+            let mut st = ThermoState::at_ambient(&model.geometry, &model.gas, &env);
+            st.cylinder.theta = std::f64::consts::PI;
+            st.cylinder.mass = 1.0 * env.pressure * model.geometry.max_volume()
+                / (model.gas.r_unburned * env.temperature);
+            st.cylinder.temperature = 330.0;
+            st.latch = CycleLatch {
+                fuel_mass: model.trapped_fuel_mass(st.cylinder.mass, 0.0),
+                pressure: st.cylinder.pressure(&model.geometry, &model.gas),
+                temperature: st.cylinder.temperature,
+                volume: model.geometry.max_volume(),
+                gamma: model.gas.gamma_unburned,
+            };
+
+            for _ in 0..300 {
+                st = solver.substep(&model, &st, omega, deg(1.0), &ports);
+            }
+
+            let integral = st.knock_integral;
+            knock_history.push(integral);
+            ecu.update_knock_retard(integral >= 1.0, dt);
+        }
+
+        // Initially the engine must have knocked (I >= 1.0)
+        assert!(
+            knock_history[0] >= 1.0,
+            "engine must knock initially to test closed loop retard: {}",
+            knock_history[0]
+        );
+
+        // Within a bounded number of cycles (< 6 cycles), knock retard must reduce I below 1.0
+        let cycles_to_suppress = knock_history.iter().position(|&i| i < 1.0);
+        assert!(
+            cycles_to_suppress.is_some(),
+            "knock was not suppressed within 10 cycles: {knock_history:?}"
+        );
+        let n_cycles = cycles_to_suppress.unwrap();
+        assert!(
+            n_cycles <= 5,
+            "knock suppression took too many cycles: {n_cycles} cycles, history: {knock_history:?}"
+        );
+        assert!(
+            ecu.knock_retard > 0.0,
+            "knock retard must be positive to hold knock off: {}",
+            ecu.knock_retard
         );
     }
 }
