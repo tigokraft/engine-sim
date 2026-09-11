@@ -41,6 +41,24 @@
 //! plateau is the reference every source level in the synth is already measured
 //! against and the modes are a departure from it.
 //!
+//! # The shape the bank stands for, and why it is bandpasses
+//!
+//! What a listener hears is surface *acceleration*, and the acceleration a
+//! single mode gives up per unit of applied force rises as `omega^2` below its
+//! resonance, where the structure is a spring, and flattens above it, where the
+//! structure is a mass. A constant-peak-gain bandpass is `omega` below its
+//! centre and `1/omega` above it, so a bandpass fed the *rate* of a force
+//! delivers exactly that shape: `omega * omega` on the way up and `omega / omega`
+//! on the way down. That is why combustion enters as `dP/dtheta` and not as `P`,
+//! and it is the same reason a block does not radiate the mean cylinder
+//! pressure it spends its whole life holding.
+//!
+//! The other two sources arrive as forces rather than as rates — a lifter
+//! landing is an impulse, not the derivative of one — so for them the flat
+//! residual *is* the mass-controlled plateau, with the modes standing on top of
+//! it. Each source is normalised against its own physical reference, which is
+//! what makes three different quantities addable at the bank's input.
+//!
 //! # Where the mass law lives
 //!
 //! An alloy block and an iron one of the same displacement differ far more in
