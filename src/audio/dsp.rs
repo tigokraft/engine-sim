@@ -1090,10 +1090,12 @@ impl CyclePlayer {
 struct CycleVariation {
     /// Multiplier on this cylinder's next blowdown amplitude [-].
     amplitude_scale: f32,
-    /// Offset on this firing's retard, in cycle fraction [-].
+    /// Signed offset on the phase this cylinder reads the cycle at [-].
     ///
-    /// Zero-mean, and added to [`CCV_MEAN_RETARD_FRACTION`] to give the delay
-    /// the pulse is actually scheduled with.
+    /// Zero-mean, in cycle fraction. A slower burn peaks later and is still at
+    /// higher pressure when the valve cracks, so the acoustic event has moved in
+    /// crank angle; shifting the read phase is that, and nothing else is left of
+    /// the timing model now that the shape comes from the solver.
     phase_offset: f32,
 }
 
