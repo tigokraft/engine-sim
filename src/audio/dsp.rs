@@ -290,6 +290,25 @@ pub struct EngineSnapshot {
     /// [`Self::cylinder_pressure`], so index zero is EVO and the intake event
     /// sits where the cam timing puts it relative to that.
     pub intake_valve_area: [f32; CYCLE_TABLE],
+    /// Volume enclosed above the piston over the cycle [m^3].
+    ///
+    /// The other half of the valve's boundary condition, and the half that
+    /// decides what a wave arriving at an *open* valve does. A valve off its
+    /// seat does not open onto free space: it opens into a closed box bounded
+    /// by the piston, and a box that is short against the wavelength is a
+    /// compliance. A wave long enough not to see the box compresses it and
+    /// comes straight back out, so the head of the runner stays very nearly
+    /// rigid at the bottom of the band however far the valve is lifted, while
+    /// the gap's own inertance and this compliance ring together somewhere in
+    /// the midrange and swallow what lands on them there.
+    ///
+    /// Taking the area alone and calling the rest of the wave transmitted is
+    /// what costs an exhaust its low end: it is an anechoic termination on a
+    /// pipe that in fact ends in a closed cylinder. Same phase convention as
+    /// [`Self::cylinder_pressure`], so index zero is EVO — which is very nearly
+    /// BDC, where the box is at its largest, and it shrinks from there as the
+    /// piston comes up the bore under the open valve.
+    pub cylinder_volume: [f32; CYCLE_TABLE],
     /// Mean exhaust manifold pressure across the banks [Pa].
     ///
     /// What [`Self::cylinder_pressure`] is measured against: the pipe is driven
@@ -334,6 +353,7 @@ impl Default for EngineSnapshot {
             intake_port_flow: [0.0; CYCLE_TABLE],
             exhaust_valve_area: [0.0; CYCLE_TABLE],
             intake_valve_area: [0.0; CYCLE_TABLE],
+            cylinder_volume: [1e-4; CYCLE_TABLE],
             exhaust_manifold_pressure: 101_325.0,
             exhaust_cutout: false,
             anti_lag: false,
@@ -438,6 +458,18 @@ impl EngineSnapshot {
                 *a = 0.0;
             }
             *a = a.clamp(0.0, 0.5);
+        }
+        // A cylinder always encloses something — it is bounded below by a
+        // piston that never reaches the head. Zero here would divide into an
+        // infinite stiffness at the valve and put a rigid end on a pipe that
+        // has an open one. One cubic centimetre is smaller than any clearance
+        // volume in the catalogue, and a hundred litres is larger than any
+        // swept one.
+        for v in self.cylinder_volume.iter_mut() {
+            if !v.is_finite() {
+                *v = 1e-4;
+            }
+            *v = v.clamp(1e-6, 0.1);
         }
         self
     }

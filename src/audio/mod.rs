@@ -785,6 +785,15 @@ impl SnapshotSource {
             self.evo_angle,
             |theta| valves.intake.effective_area(theta),
         );
+        // What is behind those valves when they open. Also a pure function of
+        // crank angle, cut and averaged the same way, because a boundary
+        // condition made of two tables that disagree about where the cycle
+        // starts is worse than either of them alone.
+        let geometry = block.model.geometry;
+        let cylinder_volume = crate::physics::engine_block::PhaseRing::downsample_angles_from(
+            self.evo_angle,
+            |theta| geometry.safe_volume(theta),
+        );
 
         // The exhaust section by section. Each primary is at the temperature its
         // own wall has let its gas reach, so an engine whose header is still
@@ -826,6 +835,7 @@ impl SnapshotSource {
             intake_port_flow,
             exhaust_valve_area,
             intake_valve_area,
+            cylinder_volume,
             exhaust_manifold_pressure: manifold_pressure as f32,
             exhaust_cutout: controls.exhaust_cutout,
             anti_lag: anti_lag_active,
