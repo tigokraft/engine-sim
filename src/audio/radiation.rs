@@ -54,6 +54,64 @@ pub const FLANGED_END_CORRECTION: f64 = 0.8216;
 /// sounds like.
 pub const DUCT_CUT_ON: f32 = 1.8412;
 
+/// Fraction of a reflection that survives vortex shedding at a jet-forming
+/// open end, for mean-flow Mach number `M` [-]:
+///
+/// ```text
+/// |R| / |R_0| = (1 - M) / (1 + M)
+/// ```
+///
+/// A pipe with gas *leaving* it does not reflect the way the same pipe at rest
+/// does. The flow separates at the lip, and a wave arriving there does work on
+/// the shear layer: it perturbs the point at which the jet sheds, the
+/// perturbation rolls up into vorticity, and the vortex is convected away down
+/// the jet and never comes back. The energy is gone from the acoustic field
+/// without being radiated — Bechert's result, and the low-frequency limit of
+/// Munt's solution for the jet-forming pipe.
+///
+/// The size of it is the whole reason an exhaust system does not ring. At rest
+/// an open pipe reflects essentially everything below its radiation corner,
+/// $|R| \to 1$, and a loop closed on two such ends is very nearly lossless: the
+/// 0.008 dB a 60 mm mouth takes out of a 200 Hz wave leaves a ringdown measured
+/// in seconds. At $M = 0.2$, which is what a tailpipe carries at full throttle,
+/// the same bounce costs 3.5 dB. That is a ringdown of tens of milliseconds,
+/// which is what a running engine actually sounds like, and it is why a pipe
+/// with no flow through it sounds like a drainpipe and the same pipe with an
+/// engine behind it does not.
+///
+/// The asymmetry is real and it is one-sided: it is *outflow* that sheds. Air
+/// drawn *into* a bellmouth arrives without a shear layer to perturb, and an
+/// intake keeps its reflection — which is why an induction system stays a
+/// resonator at every throttle opening while the exhaust behind it does not.
+#[inline]
+pub fn vortex_reflection_factor(mach: f32) -> f32 {
+    let m = mach.clamp(0.0, 1.0);
+    (1.0 - m) / (1.0 + m)
+}
+
+/// Frequency above which vortex shedding stops absorbing [Hz]:
+///
+/// ```text
+/// f_s = u / (2 pi a) = M c / (2 pi a) = M f_c
+/// ```
+///
+/// The jet absorbs a wave by moving its separation point, and it can only do
+/// that while the wave is slow against the time a disturbance takes to travel
+/// the lip — Strouhal number $\omega a / u \lesssim 1$. Above that the shear
+/// layer cannot follow, the shedding stops being coherent with the sound, and
+/// the end goes back to reflecting the way a quiescent one does.
+///
+/// Written out, the corner is the mouth's own radiation corner
+/// [`corner_hz`] scaled by the Mach number, because both are the same length
+/// over the same radius — which is why this needs no constant of its own. It
+/// also says the right thing about load: an engine on the throttle damps its
+/// exhaust up into the midrange, and the same engine at idle damps only the
+/// bottom of it and keeps some of the hollowness a pipe has at rest.
+#[inline]
+pub fn shear_corner_hz(mach: f32, corner_hz: f32) -> f32 {
+    (mach.clamp(0.0, 1.0) * corner_hz).max(1.0)
+}
+
 /// Mouth radius the radiated level is expressed against [m].
 ///
 /// A 60 mm tailpipe. The synth carries pressure normalised to
@@ -223,6 +281,12 @@ pub struct Mouth {
     gain: f32,
     reflection: OnePole,
     plane_wave: OnePole,
+    /// Mean-flow Mach number of gas leaving the mouth [-].
+    mach: f32,
+    /// Reflection surviving vortex shedding below the shear corner [-].
+    vortex: f32,
+    /// Shelf state putting the shedding loss below the shear corner and not above.
+    shear: OnePole,
 }
 
 impl Mouth {
@@ -242,6 +306,9 @@ impl Mouth {
             gain: radiation_gain(radius, REFERENCE_DISTANCE),
             reflection: OnePole::new(sample_rate, corner),
             plane_wave: OnePole::new(sample_rate, DUCT_CUT_ON * corner),
+            mach: 0.0,
+            vortex: 1.0,
+            shear: OnePole::new(sample_rate, shear_corner_hz(0.0, corner)),
         }
     }
 
@@ -262,6 +329,35 @@ impl Mouth {
         self.reflection.set_cutoff(self.sample_rate, self.corner_hz);
         self.plane_wave
             .set_cutoff(self.sample_rate, DUCT_CUT_ON * self.corner_hz);
+        self.shear
+            .set_cutoff(self.sample_rate, shear_corner_hz(self.mach, self.corner_hz));
+    }
+
+    /// Sets the mean-flow Mach number of the gas leaving the mouth [-].
+    ///
+    /// Only outflow sheds, so a negative Mach — an intake drawing in — is
+    /// clamped away and leaves the reflection where it found it. See
+    /// [`vortex_reflection_factor`].
+    pub fn set_mach(&mut self, mach: f32) {
+        self.mach = mach.clamp(0.0, 1.0);
+        self.vortex = vortex_reflection_factor(self.mach);
+        self.shear
+            .set_cutoff(self.sample_rate, shear_corner_hz(self.mach, self.corner_hz));
+    }
+
+    /// Mean-flow Mach number currently leaving the mouth [-].
+    pub fn mach(&self) -> f32 {
+        self.mach
+    }
+
+    /// Reflection magnitude surviving vortex shedding, below the shear corner [-].
+    pub fn vortex_factor(&self) -> f32 {
+        self.vortex
+    }
+
+    /// Frequency above which the shedding loss has fallen away [Hz].
+    pub fn shear_corner_hz(&self) -> f32 {
+        shear_corner_hz(self.mach, self.corner_hz)
     }
 
     /// Mouth radius [m].
@@ -317,7 +413,25 @@ impl Mouth {
     /// arriving at the mouth.
     #[inline(always)]
     pub fn reflect(&mut self, incident: f32) -> f32 {
+        let acoustic = self.radiation_reflect(incident);
+        self.shed(acoustic)
+    }
+
+    /// The reflection the radiation impedance alone would give, before the jet
+    /// takes its share.
+    #[inline(always)]
+    fn radiation_reflect(&mut self, incident: f32) -> f32 {
         -self.reflection.process(incident)
+    }
+
+    /// Takes the vortex's share out of a reflection, below the shear corner.
+    ///
+    /// A shelf rather than a gain: `1 + (v - 1) H_lp(s)` is `v` at DC and unity
+    /// well above the corner, which is the frequency dependence the Strouhal
+    /// argument at [`shear_corner_hz`] demands.
+    #[inline(always)]
+    fn shed(&mut self, reflected: f32) -> f32 {
+        reflected + (self.vortex - 1.0) * self.shear.process(reflected)
     }
 
     /// Both sides of the mouth at once, given the wave arriving at it.
@@ -329,15 +443,23 @@ impl Mouth {
     /// reason given at [`DUCT_CUT_ON`].
     #[inline(always)]
     pub fn step(&mut self, incident: f32) -> (f32, f32) {
-        let reflected = self.reflect(incident);
-        let transmitted = (incident + reflected) * self.gain;
-        (reflected, self.plane_wave.process(transmitted))
+        // The transmission is taken from the radiation reflection alone. What
+        // the jet absorbs turns into vorticity and then into heat somewhere
+        // downstream; it does not leave as sound, so it has no business in the
+        // radiated term. Keeping it out is also what keeps `1 + R` the exact
+        // highpass the monopole tilt is built on — fold the shedding loss in
+        // and it stops being zero at DC, and the mouth starts radiating a
+        // rumble that no open end produces.
+        let acoustic = self.radiation_reflect(incident);
+        let transmitted = (incident + acoustic) * self.gain;
+        (self.shed(acoustic), self.plane_wave.process(transmitted))
     }
 
     /// Clears the filter state.
     pub fn reset(&mut self) {
         self.reflection.reset();
         self.plane_wave.reset();
+        self.shear.reset();
     }
 }
 
@@ -516,6 +638,70 @@ mod tests {
             magnitude_at(hz, 4_000, 8_000, |x| mouth.step(x).1)
         };
         approx(db(level(wide)) - db(level(narrow)), 12.04, 1.0);
+    }
+
+    #[test]
+    fn outflow_sheds_the_reflection_by_one_minus_m_over_one_plus_m() {
+        // Bechert's result at the jet-forming end: a wave arriving where the
+        // flow separates does work on the shear layer and gets (1-M)/(1+M) of
+        // itself back. Measured well below the shear corner, where the
+        // absorption is fully in effect.
+        let radius = 0.030;
+        for mach in [0.0f32, 0.05, 0.1, 0.2, 0.4] {
+            let mut quiescent = Mouth::new(FS, radius, false, C);
+            let mut flowing = Mouth::new(FS, radius, false, C);
+            flowing.set_mach(mach);
+            // A tenth of the shear corner, or of the radiation corner when the
+            // flow is stopped and there is no shear corner to speak of.
+            let hz = (0.1 * flowing.shear_corner_hz()).max(5.0);
+            let still = magnitude_at(hz, 24_000, 24_000, |x| quiescent.reflect(x));
+            let shed = magnitude_at(hz, 24_000, 24_000, |x| flowing.reflect(x));
+            let expected = vortex_reflection_factor(mach);
+            approx(shed / still, expected, 0.03);
+        }
+    }
+
+    #[test]
+    fn the_shedding_stops_above_the_shear_corner() {
+        // The jet can only absorb while the wave is slow against the time a
+        // disturbance takes to cross the lip. Two octaves above `u / 2 pi a`
+        // the end reflects the way a quiescent one does.
+        let mut mouth = Mouth::new(FS, 0.030, false, C);
+        mouth.set_mach(0.2);
+        let corner = mouth.shear_corner_hz();
+        let mut quiescent = Mouth::new(FS, 0.030, false, C);
+
+        let ratio_at = |hz: f32, flowing: &mut Mouth, still: &mut Mouth| {
+            let a = magnitude_at(hz, 24_000, 24_000, |x| flowing.reflect(x));
+            let b = magnitude_at(hz, 24_000, 24_000, |x| still.reflect(x));
+            a / b
+        };
+        let low = ratio_at(corner / 8.0, &mut mouth, &mut quiescent);
+        let high = ratio_at(corner * 8.0, &mut mouth, &mut quiescent);
+        assert!(
+            (low - vortex_reflection_factor(0.2)).abs() < 0.03,
+            "below the corner the jet should take its full share: {low:.3}"
+        );
+        assert!(
+            high > 0.9,
+            "above the corner the jet is still absorbing: {high:.3}"
+        );
+    }
+
+    #[test]
+    fn what_the_jet_absorbs_does_not_leave_as_sound() {
+        // The shedding loss is heat, not radiation. It belongs on the wave that
+        // goes back down the pipe and nowhere else — put it on the transmitted
+        // side as well and `1 + R` stops being zero at DC, and the mouth starts
+        // radiating a rumble no open end produces.
+        let radiated = |mach: f32| {
+            let mut mouth = Mouth::new(FS, 0.030, false, C);
+            mouth.set_mach(mach);
+            magnitude_at(20.0, 24_000, 24_000, |x| mouth.step(x).1)
+        };
+        let still = radiated(0.0);
+        let flowing = radiated(0.4);
+        approx(flowing / still, 1.0, 1e-3);
     }
 
     fn approx(value: f32, expected: f32, tolerance: f32) {
