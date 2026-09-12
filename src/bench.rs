@@ -951,6 +951,95 @@ impl EnginePreset {
 }
 
 // ---------------------------------------------------------------------------
+// Dyno modes and run tracking
+// ---------------------------------------------------------------------------
+
+/// How the engine is loaded on the dyno bench.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DynoMode {
+    /// Natural free-revving against flywheel inertia and drag load.
+    FreeRev,
+    /// Isochronous speed hold: absorber balances engine torque to maintain target speed.
+    RpmHold { target_rpm: f64 },
+    /// Automated wide-open-throttle sweep from start to redline at controlled acceleration.
+    SweepPull { start_rpm: f64, rate_rpm_s: f64 },
+    /// Electric motoring: dyno spins engine with ignition cut to measure friction and pumping.
+    Motoring { target_rpm: f64 },
+}
+
+/// One measured sample on a dyno pull.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DynoPoint {
+    /// Engine speed [rev/min].
+    pub rpm: f64,
+    /// Brake torque [N m].
+    pub torque: f64,
+    /// Brake power [kW].
+    pub power_kw: f64,
+}
+
+/// A recorded dyno pull trace with peak values and atmospheric correction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DynoRun {
+    /// Recorded points in speed order.
+    pub points: Vec<DynoPoint>,
+    /// Peak brake torque measured during the pull.
+    pub peak_torque: Option<DynoPoint>,
+    /// Peak brake power measured during the pull.
+    pub peak_power: Option<DynoPoint>,
+    /// SAE J1349 atmospheric power correction factor [-].
+    pub sae_correction: f64,
+}
+
+impl Default for DynoRun {
+    fn default() -> Self {
+        Self::new(1.0)
+    }
+}
+
+impl DynoRun {
+    /// Builds a new empty run with a given SAE correction factor.
+    pub fn new(sae_correction: f64) -> Self {
+        Self {
+            points: Vec::new(),
+            peak_torque: None,
+            peak_power: None,
+            sae_correction,
+        }
+    }
+
+    /// Records a measurement sample.
+    pub fn record(&mut self, rpm: f64, torque: f64) {
+        if !rpm.is_finite() || !torque.is_finite() || rpm <= 0.0 {
+            return;
+        }
+        let power_kw = torque * rpm * PI / 30.0 / 1_000.0;
+        let point = DynoPoint {
+            rpm,
+            torque,
+            power_kw,
+        };
+        if self.peak_torque.is_none_or(|p| torque > p.torque) {
+            self.peak_torque = Some(point);
+        }
+        if self.peak_power.is_none_or(|p| power_kw > p.power_kw) {
+            self.peak_power = Some(point);
+        }
+        self.points.push(point);
+    }
+}
+
+/// Computes the SAE J1349 net power atmospheric correction factor.
+///
+/// Standard reference conditions: 25 °C (298.15 K), 99.0 kPa dry air pressure.
+/// Formula: CF = 1.18 * (99.0 / P_dry_kpa) * sqrt(T_amb_k / 298.15) - 0.18
+pub fn sae_j1349_correction(ambient_pa: f64, ambient_k: f64) -> f64 {
+    let p_dry_kpa = (ambient_pa / 1_000.0).max(50.0);
+    let t_k = ambient_k.max(200.0);
+    (1.18 * (99.0 / p_dry_kpa) * (t_k / 298.15).sqrt() - 0.18).clamp(0.80, 1.30)
+}
+
+// ---------------------------------------------------------------------------
 // Driveline
 // ---------------------------------------------------------------------------
 
@@ -997,6 +1086,16 @@ pub struct Driveline {
     pub exhaust_cutout: bool,
     /// Whether anti-lag is enabled on lift.
     pub anti_lag: bool,
+    /// Active dyno loading mode.
+    pub dyno_mode: DynoMode,
+    /// Opposing torque applied by the dyno absorber [N m].
+    pub dyno_absorber_torque: f64,
+    /// Speed error integral for the isochronous governor [rad].
+    pub dyno_hold_integral: f64,
+    /// Active dyno pull being recorded, if any.
+    pub active_pull: Option<DynoRun>,
+    /// Completed dyno pull held for display and comparison.
+    pub last_pull: Option<DynoRun>,
 }
 
 impl Driveline {
@@ -1016,6 +1115,11 @@ impl Driveline {
             torque: 0.0,
             exhaust_cutout: preset.exhaust.cutout,
             anti_lag: preset.anti_lag,
+            dyno_mode: DynoMode::FreeRev,
+            dyno_absorber_torque: 0.0,
+            dyno_hold_integral: 0.0,
+            active_pull: None,
+            last_pull: None,
         }
     }
 
