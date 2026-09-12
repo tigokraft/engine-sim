@@ -159,6 +159,126 @@ fn restore_terminal() -> io::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Test cell layout and view panes
+// ---------------------------------------------------------------------------
+
+/// Screen layout arrangement for the terminal test cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayoutMode {
+    /// Classic full-screen single pane view.
+    Single,
+    /// Dual column side-by-side vertical split.
+    #[default]
+    SplitVertical,
+    /// Dual row top-and-bottom horizontal split.
+    SplitHorizontal,
+    /// Dominant primary pane on the left with two stacked auxiliary panes on the right.
+    TripleWide,
+    /// Four-pane 2x2 grid.
+    QuadGrid,
+}
+
+impl LayoutMode {
+    /// Number of active view panes displayed in this layout.
+    pub fn pane_count(&self) -> usize {
+        match self {
+            Self::Single => 1,
+            Self::SplitVertical | Self::SplitHorizontal => 2,
+            Self::TripleWide => 3,
+            Self::QuadGrid => 4,
+        }
+    }
+
+    /// Short human-readable mode label for the header badge.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Single => "SINGLE",
+            Self::SplitVertical => "SPLIT-V",
+            Self::SplitHorizontal => "SPLIT-H",
+            Self::TripleWide => "TRIPLE",
+            Self::QuadGrid => "QUAD-GRID",
+        }
+    }
+
+    /// Partitions a rectangular area into pane viewports for this layout.
+    pub fn split(&self, area: Rect) -> Vec<Rect> {
+        match self {
+            Self::Single => vec![area],
+            Self::SplitVertical => {
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(area)
+                    .to_vec()
+            }
+            Self::SplitHorizontal => {
+                Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(area)
+                    .to_vec()
+            }
+            Self::TripleWide => {
+                let cols =
+                    Layout::horizontal([Constraint::Percentage(56), Constraint::Percentage(44)])
+                        .split(area);
+                let rows =
+                    Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                        .split(cols[1]);
+                vec![cols[0], rows[0], rows[1]]
+            }
+            Self::QuadGrid => {
+                let rows =
+                    Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                        .split(area);
+                let top_cols =
+                    Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                        .split(rows[0]);
+                let bot_cols =
+                    Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                        .split(rows[1]);
+                vec![top_cols[0], top_cols[1], bot_cols[0], bot_cols[1]]
+            }
+        }
+    }
+}
+
+/// The diagnostic and monitoring views available in the dyno test cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewPane {
+    /// Full dyno test cell console: tacho, vacuum/boost, dyno controls, WOT torque/power curve.
+    DynoCell,
+    /// Combustion analysis: P-V loop, LPP (location of peak pressure), IMEP, BMEP, BSFC, VE.
+    CombustionLab,
+    /// Live ECU tuning console: spark trim, AFR trim, limiter mode/cut, cylinder health.
+    EcuTuning,
+    /// Thermal circuits and fluids: coolant, oil, head temps, dynamic oil pressure gauge.
+    ThermalFluids,
+    /// NVH and spectral acoustics: FFT spectrum analyzer, order tracking, manifold modes.
+    NvhOrders,
+}
+
+impl ViewPane {
+    /// Title of the view.
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::DynoCell => "DYNO TEST CELL",
+            Self::CombustionLab => "COMBUSTION & INDICATOR LAB",
+            Self::EcuTuning => "ECU CALIBRATION BENCH",
+            Self::ThermalFluids => "THERMAL & FLUID CIRCUITS",
+            Self::NvhOrders => "NVH & SPECTRAL ACOUSTICS",
+        }
+    }
+
+    /// Function key shortcut identifier.
+    pub fn f_key(&self) -> &'static str {
+        match self {
+            Self::DynoCell => "F1",
+            Self::CombustionLab => "F2",
+            Self::EcuTuning => "F3",
+            Self::ThermalFluids => "F4",
+            Self::NvhOrders => "F5",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
 
@@ -1762,5 +1882,23 @@ mod tests {
         let dashboard = Dashboard::new();
         let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
         terminal.draw(|frame| dashboard.draw(frame)).unwrap();
+    }
+
+    #[test]
+    fn layout_mode_pane_counts_and_splits() {
+        let area = Rect::new(0, 0, 100, 60);
+        for mode in [
+            LayoutMode::Single,
+            LayoutMode::SplitVertical,
+            LayoutMode::SplitHorizontal,
+            LayoutMode::TripleWide,
+            LayoutMode::QuadGrid,
+        ] {
+            let rects = mode.split(area);
+            assert_eq!(rects.len(), mode.pane_count());
+            for r in rects {
+                assert!(r.width > 0 && r.height > 0);
+            }
+        }
     }
 }
