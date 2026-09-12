@@ -19,6 +19,8 @@
 use std::sync::{Arc, Mutex};
 
 use crate::audio::{AudioScope, StreamInfo};
+use crate::bench::{DynoMode, DynoRun};
+use crate::physics::control::{CylinderHealth, LimiterCut, LimiterMode};
 use crate::physics::engine_block::ManifoldMode;
 
 /// Shared handle to the published telemetry.
@@ -319,6 +321,50 @@ pub struct Telemetry {
 
     /// Audio path health.
     pub audio: AudioHealth,
+
+    // --- Dyno loading & test cell ------------------------------------------
+    /// Current dyno absorber operating mode.
+    pub dyno_mode: DynoMode,
+    /// Torque exerted by the dyno brake absorber [N m].
+    pub dyno_absorber_torque: f64,
+    /// Completed dyno sweep pull run, if any.
+    pub last_pull: Option<DynoRun>,
+
+    // --- Combustion diagnostics & efficiency ------------------------------
+    /// Location of peak cylinder pressure [deg ATDC].
+    pub lpp_deg_atdc: f64,
+    /// Volumetric efficiency of cylinder charging [-].
+    pub volumetric_efficiency: f64,
+    /// Brake specific fuel consumption [g / (kW h)].
+    pub bsfc_g_kwh: f64,
+
+    // --- Thermal & fluid circuits ------------------------------------------
+    /// Coolant bulk temperature [K].
+    pub coolant_k: f64,
+    /// Oil gallery temperature [K].
+    pub oil_k: f64,
+    /// Cylinder head metal temperature [K].
+    pub head_k: f64,
+    /// Oil pressure [bar].
+    pub oil_pressure_bar: f64,
+
+    // --- Calibration & ECU trims -------------------------------------------
+    /// Base ignition advance before trims [deg BTDC].
+    pub spark_advance_deg: f64,
+    /// Knock closed-loop retard applied [deg].
+    pub knock_retard_deg: f64,
+    /// Manual spark calibration trim [deg].
+    pub spark_trim: f64,
+    /// Manual AFR calibration trim [-].
+    pub afr_trim: f64,
+    /// Commanded / actual air-fuel ratio [-].
+    pub actual_afr: f64,
+    /// Active rev limiter strategy.
+    pub limiter_mode: LimiterMode,
+    /// Active rev limiter cut mechanism.
+    pub limiter_cut: LimiterCut,
+    /// Per-cylinder operating health status.
+    pub cylinder_health: Vec<CylinderHealth>,
 }
 
 impl Default for Telemetry {
@@ -363,6 +409,24 @@ impl Default for Telemetry {
             ring_primed: false,
             realtime: false,
             audio: AudioHealth::default(),
+            dyno_mode: DynoMode::FreeRev,
+            dyno_absorber_torque: 0.0,
+            last_pull: None,
+            lpp_deg_atdc: 0.0,
+            volumetric_efficiency: 0.0,
+            bsfc_g_kwh: 0.0,
+            coolant_k: 293.15,
+            oil_k: 293.15,
+            head_k: 293.15,
+            oil_pressure_bar: 0.0,
+            spark_advance_deg: 0.0,
+            knock_retard_deg: 0.0,
+            spark_trim: 0.0,
+            afr_trim: 0.0,
+            actual_afr: 14.7,
+            limiter_mode: LimiterMode::HardCut,
+            limiter_cut: LimiterCut::None,
+            cylinder_health: Vec::new(),
         }
     }
 }
@@ -391,6 +455,26 @@ impl Telemetry {
     /// Whether ignition is cut, from either cause.
     pub fn cutting(&self) -> bool {
         self.manual_cut || self.limiter
+    }
+
+    /// Coolant bulk temperature [°C].
+    pub fn coolant_c(&self) -> f64 {
+        self.coolant_k - 273.15
+    }
+
+    /// Oil gallery temperature [°C].
+    pub fn oil_c(&self) -> f64 {
+        self.oil_k - 273.15
+    }
+
+    /// Cylinder head metal temperature [°C].
+    pub fn head_c(&self) -> f64 {
+        self.head_k - 273.15
+    }
+
+    /// Oil gallery pressure [psi].
+    pub fn oil_pressure_psi(&self) -> f64 {
+        self.oil_pressure_bar * 14.503_773_773
     }
 }
 
@@ -464,5 +548,20 @@ mod tests {
         telemetry.map_pa = 101_325.0 + 68_947.57; // exactly 10 psi up
         assert!((telemetry.boost_psi() - 10.0).abs() < 1e-6);
         assert_eq!(telemetry.vacuum_inhg(), 0.0);
+    }
+
+    #[test]
+    fn telemetry_temperature_and_pressure_conversions_match_physics() {
+        let t = Telemetry {
+            coolant_k: 363.15, // 90 °C
+            oil_k: 373.15,     // 100 °C
+            head_k: 383.15,    // 110 °C
+            oil_pressure_bar: 4.0,
+            ..Telemetry::default()
+        };
+        assert!((t.coolant_c() - 90.0).abs() < 1e-6);
+        assert!((t.oil_c() - 100.0).abs() < 1e-6);
+        assert!((t.head_c() - 110.0).abs() < 1e-6);
+        assert!((t.oil_pressure_psi() - 4.0 * 14.503_773_773).abs() < 1e-6);
     }
 }
