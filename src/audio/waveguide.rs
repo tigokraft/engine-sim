@@ -2766,6 +2766,34 @@ mod tests {
     }
 
     #[test]
+    fn a_hot_tailpipe_attenuates_the_way_a_measured_one_does() {
+        // The calibration [`BOUNDARY_LAYER_TURBULENCE_FACTOR`] answers to.
+        // A 60 mm automotive tailpipe running hot loses something like 0.2 to
+        // 0.6 dB of a 250 Hz to 1 kHz wave per metre. That band and that pipe
+        // are where an exhaust note is decided, and a constant that puts the
+        // loss outside it takes the note's harmonics with it — which is what
+        // sixteen did, at three to four times the top of the range.
+        let (radius, length, gamma, gas_constant, temperature) = (0.030, 1.5, 1.33, 287.0, 800.0);
+        let c = speed_of_sound(gamma, gas_constant, temperature);
+        let loss = ViscothermalLoss::new(
+            radius,
+            length,
+            c,
+            gamma,
+            gas_constant,
+            temperature,
+            48_000.0,
+        );
+        for hz in [250.0, 500.0, 1_000.0] {
+            let db_per_m = loss.attenuation_db(hz) / length;
+            assert!(
+                (0.2..=0.6).contains(&db_per_m),
+                "a hot tailpipe took {db_per_m:.3} dB/m out of {hz:.0} Hz; measurement says 0.2 to 0.6"
+            );
+        }
+    }
+
+    #[test]
     fn a_smooth_wall_loses_half_of_what_a_rough_one_does() {
         // The enhancement multiplies the viscosity, so it is worth its square
         // root in attenuation: an intake tract that declares itself smooth is
