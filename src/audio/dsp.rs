@@ -56,8 +56,10 @@
 //! - A fixed firing table produces an impulse train periodic to the sample,
 //!   which no machine is. [`CycleVariation`] jitters amplitude and phase.
 //! - A lossless waveguide excited a handful of times a second flanges rather
-//!   than resonates. [`crate::audio::filters::waveguide_damping`] closes it
-//!   down when the pulses are far apart.
+//!   than resonates. Nothing closes it down by schedule any more: the wall loss
+//!   follows `alpha(f)`, the mouth sheds vorticity into its own jet, and the
+//!   valve at the head of each runner opens once a cycle, so the comb is neither
+//!   lossless nor standing still.
 //! - Combustion at idle is a series of widely spaced events, and an engine
 //!   built from combustion alone has audible *gaps*. [`MechanicalVoice`] fills
 //!   them with the noise floor a real engine never stops making — radiating,
@@ -86,8 +88,7 @@
 use std::f32::consts::TAU;
 
 use crate::audio::filters::{
-    firing_interval_seconds, waveguide_damping, Biquad, BiquadCoeffs, DcBlocker, ModalBank, Noise,
-    OnePole, OversampledClipper, Smoothed,
+    Biquad, BiquadCoeffs, DcBlocker, ModalBank, Noise, OnePole, OversampledClipper, Smoothed,
 };
 use crate::audio::intake_voice::IntakeNetwork;
 use crate::audio::propagation::{Aperture, AperturePositions, Listener, PropagationModel};
@@ -270,6 +271,25 @@ pub struct EngineSnapshot {
     /// Positive *in*, which is the direction that empties the runner and makes
     /// induction noise. Same phase convention as [`Self::cylinder_pressure`].
     pub intake_port_flow: [f32; CYCLE_TABLE],
+    /// Effective flow area of the exhaust valve over the cycle [m^2].
+    ///
+    /// `C_d` times the curtain area, capped at the seat — the solver's own
+    /// [`ValveEvent::effective_area`](crate::physics::thermodynamics::ValveEvent::effective_area),
+    /// sampled at the same phases as everything else here.
+    ///
+    /// This is the boundary condition at the head of every primary runner, and
+    /// without it a runner is a pipe with a rigid plug in the end of it for the
+    /// whole cycle. A rigid end reflects everything, which is most of the
+    /// reason a header rings: the valve is the only thing that ever lets a
+    /// wave out of the top of a primary, and it does so once a cycle.
+    pub exhaust_valve_area: [f32; CYCLE_TABLE],
+    /// Effective flow area of the intake valve over the cycle [m^2].
+    ///
+    /// Same quantity at the other end of the engine, and the boundary condition
+    /// at the head of every intake runner. Same phase convention as
+    /// [`Self::cylinder_pressure`], so index zero is EVO and the intake event
+    /// sits where the cam timing puts it relative to that.
+    pub intake_valve_area: [f32; CYCLE_TABLE],
     /// Mean exhaust manifold pressure across the banks [Pa].
     ///
     /// What [`Self::cylinder_pressure`] is measured against: the pipe is driven
@@ -312,6 +332,8 @@ impl Default for EngineSnapshot {
             cylinder_pressure: [0.0; CYCLE_TABLE],
             exhaust_port_flow: [0.0; CYCLE_TABLE],
             intake_port_flow: [0.0; CYCLE_TABLE],
+            exhaust_valve_area: [0.0; CYCLE_TABLE],
+            intake_valve_area: [0.0; CYCLE_TABLE],
             exhaust_manifold_pressure: 101_325.0,
             exhaust_cutout: false,
             anti_lag: false,
@@ -403,6 +425,19 @@ impl EngineSnapshot {
                 *f = 0.0;
             }
             *f = f.clamp(0.0, 50.0);
+        }
+        // A valve cannot flow through a negative area, and half a square metre
+        // is larger than any bore in the catalogue. A NaN here would go
+        // straight into a reflection coefficient and stay in a delay line.
+        for a in self
+            .exhaust_valve_area
+            .iter_mut()
+            .chain(self.intake_valve_area.iter_mut())
+        {
+            if !a.is_finite() {
+                *a = 0.0;
+            }
+            *a = a.clamp(0.0, 0.5);
         }
         self
     }
@@ -768,11 +803,6 @@ pub struct SynthConfig {
     /// Speed at which cycle-to-cycle variation reaches
     /// `combustion_variation_max` [rev/min].
     pub combustion_variation_idle_rpm: f64,
-    /// How much of the Transit-Time Decision Rule's damping to apply, `0..=1` [-].
-    ///
-    /// One is the physical schedule; zero restores the undamped waveguide, which
-    /// is useful for hearing what the rule is actually removing.
-    pub waveguide_damping: f64,
     /// Level of each layer in the final mix [-].
     ///
     /// `backfire_level` is above the others on purpose: a pop is an unmetered
@@ -874,7 +904,6 @@ impl SynthConfig {
             combustion_variation_min: 0.03,
             combustion_variation_max: 0.08,
             combustion_variation_idle_rpm: 700.0,
-            waveguide_damping: 1.0,
             exhaust_level: 1.0,
             intake_level: 0.35,
             backfire_level: 0.4,
@@ -1152,6 +1181,28 @@ struct CycleTables {
     /// puts its energy where a stiff lump of iron will answer, while the same
     /// force arriving slowly does not. Combustion noise is this table.
     pressure_slope: [f32; CYCLE_TABLE],
+    /// Rate of change of intake port flow per unit of cycle [kg/s].
+    ///
+    /// `dmdot/dtheta` in the cycle's own units, the exact counterpart of
+    /// [`Self::pressure_slope`] and for the same reason: the water hammer at
+    /// valve closing is driven by how fast the column is stopped, and taking
+    /// that rate by differencing the *interpolated* flow sample to sample
+    /// differentiates a piecewise-linear signal. The result is a staircase —
+    /// constant between table points and stepping at every one of them — and a
+    /// staircase is a train of discontinuities at `CYCLE_TABLE` times the cycle
+    /// rate, which is 3.2 kHz at 3000 rpm and lands most of its energy in the
+    /// band the induction note is supposed to occupy. Differencing the table
+    /// and interpolating *that* keeps the derivative inside the bandwidth the
+    /// table actually carries.
+    intake_slope: [f32; CYCLE_TABLE],
+    /// Effective exhaust valve flow area over the cycle [m^2].
+    ///
+    /// Not an excitation: a boundary condition. This is what the head of a
+    /// primary runner is terminated into, and it is the only thing that ever
+    /// opens that end of the pipe.
+    exhaust_valve_area: [f32; CYCLE_TABLE],
+    /// Effective intake valve flow area over the cycle [m^2].
+    intake_valve_area: [f32; CYCLE_TABLE],
 }
 
 impl Default for CycleTables {
@@ -1161,6 +1212,9 @@ impl Default for CycleTables {
             exhaust: [0.0; CYCLE_TABLE],
             intake: [0.0; CYCLE_TABLE],
             pressure_slope: [0.0; CYCLE_TABLE],
+            intake_slope: [0.0; CYCLE_TABLE],
+            exhaust_valve_area: [0.0; CYCLE_TABLE],
+            intake_valve_area: [0.0; CYCLE_TABLE],
         }
     }
 }
@@ -1204,10 +1258,21 @@ impl CycleTables {
             *slope = 0.5 * (next - previous) * CYCLE_TABLE as f32;
         }
 
+        // Central difference on the induction trace, wrapping like the cycle.
+        let mut intake_slope = [0.0f32; CYCLE_TABLE];
+        for (k, slope) in intake_slope.iter_mut().enumerate() {
+            let next = snapshot.intake_port_flow[(k + 1) % CYCLE_TABLE];
+            let previous = snapshot.intake_port_flow[(k + CYCLE_TABLE - 1) % CYCLE_TABLE];
+            *slope = 0.5 * (next - previous) * CYCLE_TABLE as f32;
+        }
+
         Self {
             exhaust,
             intake: snapshot.intake_port_flow,
             pressure_slope,
+            intake_slope,
+            exhaust_valve_area: snapshot.exhaust_valve_area,
+            intake_valve_area: snapshot.intake_valve_area,
         }
     }
 
@@ -1244,6 +1309,24 @@ impl CycleTables {
     #[inline(always)]
     fn pressure_slope_at(&self, phase: f32) -> f32 {
         Self::read(&self.pressure_slope, phase)
+    }
+
+    /// Intake port flow slope at a cycle phase measured from EVO [kg/s/cycle].
+    #[inline(always)]
+    fn intake_slope_at(&self, phase: f32) -> f32 {
+        Self::read(&self.intake_slope, phase)
+    }
+
+    /// Effective exhaust valve area at a cycle phase measured from EVO [m^2].
+    #[inline(always)]
+    fn exhaust_valve_area_at(&self, phase: f32) -> f32 {
+        Self::read(&self.exhaust_valve_area, phase)
+    }
+
+    /// Effective intake valve area at a cycle phase measured from EVO [m^2].
+    #[inline(always)]
+    fn intake_valve_area_at(&self, phase: f32) -> f32 {
+        Self::read(&self.intake_valve_area, phase)
     }
 }
 
@@ -1328,6 +1411,30 @@ impl CyclePlayer {
     fn pressure_slope_at(&self, phase: f32, blend: f32) -> f32 {
         let a = self.previous.pressure_slope_at(phase);
         let b = self.current.pressure_slope_at(phase);
+        a + (b - a) * blend
+    }
+
+    /// Intake port flow slope at a cycle phase measured from EVO [kg/s/cycle].
+    #[inline(always)]
+    fn intake_slope_at(&self, phase: f32, blend: f32) -> f32 {
+        let a = self.previous.intake_slope_at(phase);
+        let b = self.current.intake_slope_at(phase);
+        a + (b - a) * blend
+    }
+
+    /// Effective exhaust valve area at a cycle phase measured from EVO [m^2].
+    #[inline(always)]
+    fn exhaust_valve_area_at(&self, phase: f32, blend: f32) -> f32 {
+        let a = self.previous.exhaust_valve_area_at(phase);
+        let b = self.current.exhaust_valve_area_at(phase);
+        a + (b - a) * blend
+    }
+
+    /// Effective intake valve area at a cycle phase measured from EVO [m^2].
+    #[inline(always)]
+    fn intake_valve_area_at(&self, phase: f32, blend: f32) -> f32 {
+        let a = self.previous.intake_valve_area_at(phase);
+        let b = self.current.intake_valve_area_at(phase);
         a + (b - a) * blend
     }
 
@@ -1417,33 +1524,6 @@ const CCV_MAX_PHASE_FRACTION: f32 = 0.3;
 
 /// Widest amplitude excursion allowed, as a fraction of nominal [-].
 const CCV_MAX_AMPLITUDE_EXCURSION: f32 = 0.75;
-
-// ---------------------------------------------------------------------------
-// Exhaust bank
-// ---------------------------------------------------------------------------
-
-/// One bank's cylinder count feeding the exhaust network.
-#[derive(Debug, Clone, Copy)]
-struct ExhaustBank {
-    /// How many cylinders exhaust into this bank.
-    ///
-    /// Held here because it is the denominator of the Transit-Time Decision
-    /// Rule's `tau_interval`: a bank's pulse train is what its pipes see, and
-    /// on a cross-plane V8 the two banks do not even receive evenly spaced ones.
-    cylinder_count: usize,
-}
-
-impl ExhaustBank {
-    fn new(config: &SynthConfig, index: usize) -> Self {
-        Self {
-            cylinder_count: config
-                .cylinders
-                .iter()
-                .filter(|tap| tap.bank == index)
-                .count(),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Mechanical noise floor
@@ -2516,7 +2596,6 @@ impl KnockVoice {
 #[derive(Debug, Clone)]
 pub struct EngineSynth {
     config: SynthConfig,
-    banks: Vec<ExhaustBank>,
     /// The pipes themselves: one primary per cylinder, a collector per bank,
     /// the crossover, the silencer chain, the tailpipes and their mouths.
     network: ExhaustNetwork,
@@ -2538,7 +2617,14 @@ pub struct EngineSynth {
     radiated: Vec<f32>,
     intake_network: IntakeNetwork,
     intake_excitations: Vec<f32>,
-    prev_cylinder_intake_flow: Vec<f32>,
+    /// Effective valve flow area presented to each network this control block.
+    ///
+    /// Two scratch buffers rather than one because the two valves are open at
+    /// different times, and one per cylinder because the whole point is that
+    /// they are open at different times *from each other*. Allocated at
+    /// construction; nothing here touches the heap on the callback.
+    exhaust_valve_areas: Vec<f64>,
+    intake_valve_areas: Vec<f64>,
     turbo: TurboVoice,
     roots: RootsVoice,
     centrifugal: CentrifugalVoice,
@@ -2644,9 +2730,6 @@ impl EngineSynth {
         }
 
         let snapshot = EngineSnapshot::default();
-        let banks: Vec<ExhaustBank> = (0..config.bank_count)
-            .map(|i| ExhaustBank::new(&config, i))
-            .collect();
         let network = ExhaustNetwork::new(
             &config.exhaust,
             &config.cylinders,
@@ -2734,7 +2817,6 @@ impl EngineSynth {
         );
 
         let mut synth = Self {
-            banks,
             network,
             cycle: CyclePlayer::new(fs),
             excitations: vec![0.0; n_cyl],
@@ -2743,7 +2825,8 @@ impl EngineSynth {
             radiated: vec![0.0; config.bank_count],
             intake_network: IntakeNetwork::new(&config.intake, config.cylinders.len(), fs),
             intake_excitations: vec![0.0; n_cyl],
-            prev_cylinder_intake_flow: vec![0.0; n_cyl],
+            exhaust_valve_areas: vec![0.0; n_cyl],
+            intake_valve_areas: vec![0.0; n_cyl],
             turbo: TurboVoice::new(fs),
             roots: RootsVoice::new(fs),
             centrifugal: CentrifugalVoice::new(fs),
@@ -2906,7 +2989,6 @@ impl EngineSynth {
         self.cycle.reset();
         self.excitations.fill(0.0);
         self.intake_excitations.fill(0.0);
-        self.prev_cylinder_intake_flow.fill(0.0);
         self.bank_excitations.fill(0.0);
         self.radiated.fill(0.0);
         for smoother in self.blowdown_pa.iter_mut() {
@@ -3016,18 +3098,6 @@ impl EngineSynth {
         self.network.tune(gamma, gas_constant, &self.stations);
         self.network
             .set_mean_flow(self.snapshot.intake_mass_flow, gamma, gas_constant);
-        // The Transit-Time Decision Rule, applied where the reflection it is
-        // talking about actually happens: the closed valve at the head of each
-        // primary. Every cylinder has its own primary now, so each one gets the
-        // rule computed against the pulse train its own bank receives.
-        let damping_strength = self.config.waveguide_damping as f32;
-        for (cylinder, tap) in self.config.cylinders.iter().enumerate() {
-            let tau_interval = firing_interval_seconds(rpm, self.banks[tap.bank].cylinder_count);
-            let tau_pulse = self.network.primary_round_trip_seconds(cylinder);
-            let damping =
-                waveguide_damping(tau_interval, tau_pulse) * damping_strength.clamp(0.0, 1.0);
-            self.network.set_valve_damping(cylinder, damping);
-        }
         self.variation_depth = self.variation_depth_at(rpm);
         self.mechanical
             .tune(&self.snapshot, cycle_hz, self.config.cylinders.len());
@@ -3228,13 +3298,17 @@ impl EngineSynth {
     /// which has one primary per cylinder — this is a single scalar, and the
     /// firing order is in it by construction.
     #[inline(always)]
-    fn fill_excitations(&mut self, turning: bool) -> f32 {
+    fn fill_excitations(&mut self, turning: bool, cycle_hz: f32) -> f32 {
         // Advanced whether or not the crank is, so a fade cannot be left
         // half-finished by a stopped engine and resume when it restarts.
         let blend = self.cycle.advance();
         if !turning {
             self.excitations.fill(0.0);
             self.intake_excitations.fill(0.0);
+            // A stopped engine has its valves wherever the crank left them, and
+            // leaving the last frame's areas in place is as good an answer as
+            // any; what matters is that they stop moving with nothing driving
+            // them.
             return 0.0;
         }
         let phase = self.cycle_phase();
@@ -3265,15 +3339,33 @@ impl EngineSynth {
             if alive {
                 rise += self.cycle.pressure_slope_at(combustion, blend) * variation.amplitude_scale;
             }
+            // The valve at the head of this cylinder's two runners.
+            //
+            // A runner's far end is a junction and its near end is the valve,
+            // so until this ran the near end was a rigid plug for the whole
+            // cycle and every runner in the engine was a lossless quarter-wave
+            // resonator with nowhere for its energy to go.
+            //
+            // Read per sample, not per control block. A reflection coefficient
+            // is a gain inside a feedback loop, and stepping it sixteen samples
+            // at a time puts a staircase in that loop whose edges land at
+            // exactly `sample_rate / CONTROL_BLOCK` — 3 kHz at 48 kHz, with a
+            // harmonic at 6, both of them standing still while the engine
+            // sweeps past. Two divides a sample buys a coefficient that moves
+            // as smoothly as the cam does.
+            self.exhaust_valve_areas[index] =
+                self.cycle.exhaust_valve_area_at(cylinder, blend) as f64;
+            self.intake_valve_areas[index] =
+                self.cycle.intake_valve_area_at(cylinder, blend) as f64;
+
             // Induction is read at the bare cylinder phase. The retard and the
             // jitter are properties of *combustion* — how long the flame takes
             // to develop, and how much that varies — and a valve opening on the
             // intake side does not wait for a flame.
             let flow = self.cycle.intake_at(cylinder, blend);
 
-            let prev_flow = self.prev_cylinder_intake_flow[index];
-            let d_flow_dt = (flow - prev_flow) * self.config.sample_rate;
-            self.prev_cylinder_intake_flow[index] = flow;
+            // Per cycle from the table, times cycles per second: `dmdot/dt`.
+            let d_flow_dt = self.cycle.intake_slope_at(cylinder, blend) * cycle_hz;
 
             let (runner_len, runner_area) = if !self.config.intake.runners.is_empty() {
                 let r = &self.config.intake.runners[index % self.config.intake.runners.len()];
@@ -3305,7 +3397,10 @@ impl EngineSynth {
         // dP/dtheta in cycles, times cycles per second, is dP/dt — so the same
         // pressure curve drives the block harder at speed, which is why
         // combustion noise climbs with rpm on every engine ever measured.
-        let rise = self.fill_excitations(turning) * cycle_hz;
+        let rise = self.fill_excitations(turning, cycle_hz) * cycle_hz;
+        self.network.set_valve_areas(&self.exhaust_valve_areas);
+        self.intake_network
+            .set_valve_areas(&self.intake_valve_areas);
 
         let exhaust_level = self.exhaust_level.next_value();
         for (excitation, pool) in self
@@ -3472,9 +3567,25 @@ mod tests {
         (pressure, exhaust, intake)
     }
 
+    /// A valve event on the same synthetic cycle: open over `span` of the
+    /// cycle from `open`, raised-cosine lift, peaking at `peak_area` [m^2].
+    fn synthetic_valve(open: f32, span: f32, peak_area: f32) -> [f32; CYCLE_TABLE] {
+        let mut area = [0.0f32; CYCLE_TABLE];
+        for (k, a) in area.iter_mut().enumerate() {
+            let phi = (k as f32 / CYCLE_TABLE as f32 - open).rem_euclid(1.0);
+            if phi < span {
+                *a = peak_area * 0.5 * (1.0 - (TAU * phi / span).cos());
+            }
+        }
+        area
+    }
+
     fn loaded_snapshot() -> EngineSnapshot {
         let (cylinder_pressure, exhaust_port_flow, intake_port_flow) =
             synthetic_cycle(4.0e5, 240.0 / 720.0);
+        // Matching the windows `synthetic_cycle` opens its ports over.
+        let exhaust_valve_area = synthetic_valve(0.0, 240.0 / 720.0, 4.5e-4);
+        let intake_valve_area = synthetic_valve(200.0 / 720.0, 260.0 / 720.0, 7.0e-4);
         EngineSnapshot {
             rpm: 3_000.0,
             blowdown_delta: [4.0e5; MAX_CYLINDERS],
@@ -3501,6 +3612,8 @@ mod tests {
             cylinder_pressure,
             exhaust_port_flow,
             intake_port_flow,
+            exhaust_valve_area,
+            intake_valve_area,
             exhaust_manifold_pressure: TEST_MANIFOLD_PA,
             exhaust_cutout: false,
             anti_lag: false,
@@ -4150,6 +4263,60 @@ mod tests {
     }
 
     #[test]
+    fn the_induction_derivative_is_not_a_staircase() {
+        // The water hammer at valve closing is driven by `dmdot/dt`. Taking
+        // that by differencing the *interpolated* flow sample to sample
+        // differentiates a piecewise-linear signal, and the result is constant
+        // between table points and steps at every one of them. A staircase is a
+        // train of discontinuities at `CYCLE_TABLE` times the cycle rate — 3.2
+        // kHz at 3000 rpm — and it lands most of its energy in the band the
+        // induction note occupies.
+        //
+        // Differencing the table and interpolating that instead keeps the
+        // derivative inside the bandwidth the table carries, which is what this
+        // measures: the excitation's energy above the table's own Nyquist,
+        // against its energy below.
+        let snapshot = loaded_snapshot();
+        let tables = CycleTables::from_snapshot(&snapshot);
+        let cycle_hz = snapshot.rpm / 120.0;
+        let table_nyquist = 0.5 * CYCLE_TABLE as f32 * cycle_hz;
+
+        // Play the slope back the way the synth does, for one whole cycle.
+        let samples = (FS / cycle_hz) as usize;
+        let slope: Vec<f32> = (0..samples)
+            .map(|i| tables.intake_slope_at(i as f32 / samples as f32) * cycle_hz)
+            .collect();
+
+        let band = |lo: f32, hi: f32| {
+            let mut total = 0.0f64;
+            let mut hz = lo;
+            while hz < hi {
+                let m = {
+                    let (mut re, mut im) = (0.0f64, 0.0f64);
+                    for (n, &x) in slope.iter().enumerate() {
+                        let phase = TAU * hz * n as f32 / FS;
+                        re += x as f64 * phase.cos() as f64;
+                        im -= x as f64 * phase.sin() as f64;
+                    }
+                    (re * re + im * im).sqrt() / slope.len() as f64
+                };
+                total += m * m;
+                hz += cycle_hz;
+            }
+            total.sqrt()
+        };
+
+        let inside = band(cycle_hz, table_nyquist);
+        let outside = band(table_nyquist, 4.0 * table_nyquist);
+        let leak_db = 20.0 * (outside / inside.max(1e-30)).log10();
+        assert!(
+            leak_db < -20.0,
+            "the induction derivative put {leak_db:.1} dB above the table's own \
+             Nyquist, which is a staircase and not a rate"
+        );
+    }
+
+    #[test]
     fn snapshot_stays_copy_and_free_of_indirection() {
         fn assert_copy<T: Copy>() {}
         assert_copy::<EngineSnapshot>();
@@ -4160,10 +4327,11 @@ mod tests {
         // not allowed to do.
         assert!(!std::mem::needs_drop::<EngineSnapshot>());
 
-        // Three cycle tables, the per-cylinder blowdown, intake flow and primary
+        // Five cycle tables — pressure, the two port flows and the two valve
+        // areas — the per-cylinder blowdown, intake flow and primary
         // temperature arrays, eighteen scalars and one padded bool. Every byte
         // accounted for is a byte that is not a pointer.
-        let expected = 3 * CYCLE_TABLE * 4 + 3 * MAX_CYLINDERS * 4 + 18 * 4 + 4;
+        let expected = 5 * CYCLE_TABLE * 4 + 3 * MAX_CYLINDERS * 4 + 18 * 4 + 4;
         assert_eq!(std::mem::size_of::<EngineSnapshot>(), expected);
     }
 
@@ -4195,6 +4363,8 @@ mod tests {
             cylinder_pressure: [f32::NAN; CYCLE_TABLE],
             exhaust_port_flow: [f32::NEG_INFINITY; CYCLE_TABLE],
             intake_port_flow: [f32::NAN; CYCLE_TABLE],
+            exhaust_valve_area: [f32::NAN; CYCLE_TABLE],
+            intake_valve_area: [f32::NEG_INFINITY; CYCLE_TABLE],
             exhaust_manifold_pressure: f32::NAN,
             exhaust_cutout: false,
             anti_lag: false,
@@ -4894,8 +5064,16 @@ mod tests {
         let mut fast = loaded_snapshot();
         fast.rpm = 6_000.0;
         let quick = share_at(&fast);
+        // The margin used to be a factor of three and is now under two. The
+        // block did not change: the mix it is a share *of* did. An exhaust
+        // whose wall loss was a fiftieth of `alpha` rang its way to a level it
+        // has no business at, and it did so hardest at speed, where the orders
+        // sit in the pipe's own modes. Taking that inflation out lifts the
+        // block's share everywhere and lifts it most where the exhaust fell
+        // furthest. Recorded here rather than smoothed over, because the
+        // number is evidence about the exhaust and not about the block.
         assert!(
-            idle > 3.0 * quick,
+            idle > 1.5 * quick,
             "the block is no quieter at speed: {idle:.5} of the mix at idle \
              against {quick:.5} at 6000 rpm"
         );
@@ -5118,98 +5296,57 @@ mod tests {
         }
     }
 
-    // -- waveguide damping ---------------------------------------------------
+    // -- the valve boundary --------------------------------------------------
 
     #[test]
-    fn waveguide_is_damped_at_idle_and_open_at_speed() {
-        let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
-        synth.set_snapshot(&idle_snapshot());
-        render(&mut synth, 2 * 48_000);
-        let idle_damping = synth.network.valve_damping(0);
-        let idle_reflection = synth.network.valve_reflection(0);
+    fn the_valve_opens_the_head_of_the_runner_once_a_cycle() {
+        // The claim the Transit-Time Decision Rule used to stand in for, made
+        // directly: the head of a primary is a rigid end while the valve is on
+        // its seat and a real area step while it is off it, and the reflection
+        // there is the two-pipe result for the areas involved,
+        //
+        //     r = (A_pipe - A_valve) / (A_pipe + A_valve)
+        //
+        // A rule that scaled that reflection on a speed schedule was hiding the
+        // absence of the lift curve; with the curve in the snapshot there is
+        // nothing left for it to hide.
+        let config = SynthConfig::cross_plane_v8(FS);
+        let pipe_area = config.exhaust.primaries[0].area as f32;
+        let mut synth = EngineSynth::new(config);
+        synth.set_snapshot(&loaded_snapshot());
+        render(&mut synth, 48_000);
 
-        let mut fast = loaded_snapshot();
-        fast.rpm = 7_000.0;
-        synth.set_snapshot(&fast);
-        render(&mut synth, 4 * 48_000);
-        let fast_damping = synth.network.valve_damping(0);
-        let fast_reflection = synth.network.valve_reflection(0);
-
-        assert!(idle_damping > 0.85, "idle left undamped: {idle_damping}");
-        assert!(fast_damping < 0.15, "top end over-damped: {fast_damping}");
-        assert!(
-            idle_reflection < 0.6 * fast_reflection,
-            "reflection did not follow the rule: {idle_reflection} vs {fast_reflection}"
-        );
-    }
-
-    #[test]
-    fn the_rule_flattens_the_comb_at_idle_and_leaves_it_at_speed() {
-        // The end-to-end claim. Settle the synth at a speed, take the network it
-        // has actually arrived at, and measure the ripple in the magnitude
-        // response from one cylinder's port to its own mouth — a comb filter
-        // *is* deep regular ripple, and how deep it is is how audible the
-        // flange is.
-        let ripple_db = |rpm: f32, strength: f64| {
-            let mut config = SynthConfig::cross_plane_v8(FS);
-            config.waveguide_damping = strength;
-            let mut synth = EngineSynth::new(config);
-            let mut snapshot = idle_snapshot();
-            snapshot.rpm = rpm;
-            synth.set_snapshot(&snapshot);
-            render(&mut synth, 4 * 48_000);
-
-            let n_cyl = synth.config().cylinder_count();
-            let n_banks = synth.config().bank_count;
-            let (mut lo, mut hi) = (f32::MAX, 0.0f32);
-            let mut f = 200.0f32;
-            while f <= 2_000.0 {
-                let mut network = synth.network.clone();
-                let mut excitations = vec![0.0f32; n_cyl];
-                let bank_excitations = vec![0.0f32; n_banks];
-                let mut radiated = vec![0.0f32; n_banks];
-                let (mut re, mut im) = (0.0f64, 0.0f64);
-                for i in 0..12_000 {
-                    let phase = TAU * f * i as f32 / FS;
-                    excitations[0] = phase.sin();
-                    network.step(&excitations, &bank_excitations, &mut radiated);
-                    if i >= 6_000 {
-                        re += radiated[0] as f64 * phase.sin() as f64;
-                        im += radiated[0] as f64 * phase.cos() as f64;
-                    }
-                }
-                let m = (2.0 * (re * re + im * im).sqrt() / 6_000.0) as f32;
-                lo = lo.min(m);
-                hi = hi.max(m);
-                f += 20.0;
+        // Follow cylinder zero's valve through one whole cycle at 3000 rpm.
+        let cycle_samples = (FS / (3_000.0 / 120.0)) as usize;
+        let (mut shut, mut widest) = (0usize, 1.0f32);
+        let mut buffer = [0.0f32; 2];
+        for _ in 0..cycle_samples {
+            synth.render(&mut buffer, 2);
+            let r = synth.network.valve_reflection(0);
+            if r > 0.999 {
+                shut += 1;
             }
-            20.0 * (hi / lo.max(1e-9)).log10()
-        };
+            widest = widest.min(r);
+        }
 
-        let idle = ripple_db(800.0, 1.0);
-        let fast = ripple_db(7_000.0, 1.0);
-        let idle_unruled = ripple_db(800.0, 0.0);
-        let fast_unruled = ripple_db(7_000.0, 0.0);
+        // A four-stroke exhaust valve is off its seat for something like a
+        // third of the cycle and shut for the rest.
+        let open_fraction = 1.0 - shut as f32 / cycle_samples as f32;
+        assert!(
+            (0.15..0.55).contains(&open_fraction),
+            "the valve was open for {open_fraction:.2} of the cycle"
+        );
 
-        // Measured on the network: 38.5 dB of idle ripple unruled, 27.7 dB with
-        // the rule, and 38.6 dB at 7000 rpm either way. The rule is still doing
-        // its job, but it can no longer flatten the response by half, and it
-        // should not: most of what is left is the chamber, the tailpipe and the
-        // mouth, which are the exhaust rather than an artefact of lumping it.
-        // Until the solver's valve lift reaches the snapshot the head of every
-        // primary is a permanently rigid end, and that is what the rule is
-        // standing in for.
+        // And at full lift the reflection is the area ratio, not a schedule.
+        let peak_area = loaded_snapshot()
+            .exhaust_valve_area
+            .iter()
+            .cloned()
+            .fold(0.0f32, f32::max);
+        let expected = (pipe_area - peak_area) / (pipe_area + peak_area);
         assert!(
-            idle_unruled - idle > 8.0,
-            "the rule left the idle comb standing: {idle:.1} dB vs {idle_unruled:.1} dB unruled"
-        );
-        assert!(
-            (fast - fast_unruled).abs() < 1.0,
-            "the rule took the pipe away at speed: {fast:.1} dB vs {fast_unruled:.1} dB unruled"
-        );
-        assert!(
-            fast > 1.2 * idle,
-            "the rule damped the top end too: {fast:.1} dB at 7000 vs {idle:.1} dB at idle"
+            (widest - expected).abs() < 0.05,
+            "widest reflection {widest:.3}, area ratio says {expected:.3}"
         );
     }
 
@@ -5495,8 +5632,13 @@ mod tests {
 
         let bare = gap_floor(0.0);
         let filled = gap_floor(SynthConfig::default().mechanical_level);
+        // The margin was a factor of 1.5 and is now nearer 1.25, because the
+        // gaps are no longer as empty as they were. The Transit-Time Decision
+        // Rule used to knock the valve-end reflection down hardest at exactly
+        // this speed, which emptied them; with the rule gone the pipe rings
+        // down between firings on its own wall loss, the way a pipe does.
         assert!(
-            filled > 1.5 * bare,
+            filled > 1.25 * bare,
             "the floor did not fill the gaps: {filled:.6} vs {bare:.6}"
         );
     }

@@ -36,21 +36,68 @@ pub const COLDEST_EXHAUST_TEMPERATURE_K: f32 = 250.0;
 /// Reference atmospheric pressure for gas density estimation [Pa].
 pub const REFERENCE_PRESSURE_PA: f32 = 101_325.0;
 
-/// Typical kinematic viscosity of exhaust gas at reference conditions [m^2 / s].
-pub const EXHAUST_KINEMATIC_VISCOSITY: f32 = 8.4e-5;
+/// Sutherland's reference dynamic viscosity for air, at [`SUTHERLAND_T0`] [Pa s].
+pub const SUTHERLAND_MU0: f32 = 1.716e-5;
+
+/// Sutherland's reference temperature [K].
+pub const SUTHERLAND_T0: f32 = 273.15;
+
+/// Sutherland's constant for air [K].
+pub const SUTHERLAND_S: f32 = 110.4;
+
+/// Kinematic viscosity of the gas in a duct at `temperature` [m^2 / s].
+///
+/// $$\nu = \frac{\mu(T)}{\rho(T)}, \qquad
+///   \mu(T) = \mu_0 \left(\frac{T}{T_0}\right)^{3/2} \frac{T_0 + S}{T + S},
+///   \qquad \rho = \frac{p}{R T}$$
+///
+/// Sutherland's law over the ideal gas. It is a strong function of temperature
+/// and the reason this cannot be one number for the whole synth: hot exhaust
+/// runs near `1.0e-4` and the cold air in an intake runner near `1.6e-5`, a
+/// factor of six, and the boundary layer that sets the wall loss goes as its
+/// square root. A single exhaust figure applied to an intake damps a cold
+/// runner two and a half times too hard and drags its resonances flat with it —
+/// which showed up, once the loss filter started attenuating the right amount,
+/// as a plenum whose Helmholtz mode sat 8 % under the frequency its own
+/// geometry predicts.
+///
+/// Sutherland is quoted for air and the burnt gas in an exhaust is not air, but
+/// it is mostly nitrogen either way and the difference is small against the six
+/// the temperature is worth.
+#[inline]
+pub fn kinematic_viscosity(temperature: f32, gas_constant: f32) -> f32 {
+    let t = temperature.clamp(150.0, 2_500.0);
+    let mu = SUTHERLAND_MU0 * (t / SUTHERLAND_T0).powf(1.5) * (SUTHERLAND_T0 + SUTHERLAND_S)
+        / (t + SUTHERLAND_S);
+    let rho = REFERENCE_PRESSURE_PA / (gas_constant.max(1.0) * t);
+    mu / rho
+}
 
 /// Prandtl number of air and lean combustion gas [-].
 pub const EXHAUST_PRANDTL_NUMBER: f32 = 0.71;
 
 /// Effective turbulent boundary layer enhancement factor in corrugated/hot exhaust pipe.
-const BOUNDARY_LAYER_TURBULENCE_FACTOR: f32 = 16.0;
-
-/// Fraction of the valve-end reflection that survives full damping [-].
 ///
-/// Not zero: even wide open, a port is a real area change and does send
-/// something back. It is small enough that the primary's ringdown falls below
-/// one firing interval, which is what stops a comb from forming.
-pub const VALVE_DAMPED_REFLECTION: f32 = 0.35;
+/// A multiplier on the kinematic viscosity, so it is worth its square root in
+/// attenuation: four times the dissipation of a smooth-walled tube carrying
+/// quiescent gas. What it stands for is everything a header is that a
+/// laboratory tube is not — weld beads, mandrel bends, flex joints, a
+/// perforated silencer core, and a strongly pulsating turbulent flow that never
+/// lets a laminar boundary layer form.
+///
+/// It has no derivation, which by the rule in the plan makes it a finding
+/// rather than a setting. It stays at the value the module has always carried;
+/// what has changed is that it now means something, because
+/// [`ViscothermalLoss`] finally attenuates by the amount `alpha` asks for
+/// instead of by a fiftieth of it.
+pub const BOUNDARY_LAYER_TURBULENCE_FACTOR: f32 = 16.0;
+
+/// Wall enhancement of a duct that is smooth, cold and not full of exhaust [-].
+///
+/// The classical viscothermal result, with nothing added to it. An intake tract
+/// is cast or moulded, runs at ambient, and draws a steady column rather than
+/// venting a jet, so it gets the textbook boundary layer and not the exhaust's.
+pub const SMOOTH_WALL: f32 = 1.0;
 
 // ---------------------------------------------------------------------------
 // Viscothermal wall loss
@@ -73,88 +120,263 @@ pub fn viscothermal_alpha(
     (1.0 / (radius.max(1e-4) * speed_of_sound.max(1.0))) * num * thermal
 }
 
-/// Derives the one-pole lowpass loss cutoff [Hz] for a pipe segment of length $L$ and radius $a$.
+/// Attenuation of a pipe segment per pass, in decibels per root hertz [dB/Hz^0.5].
 ///
-/// Equating the total boundary layer attenuation $\alpha(f_c) L$ to the filter's
-/// $-3\text{ dB}$ point ($\ln\sqrt{2} \approx 0.3466$) yields a cutoff scaling as:
+/// The whole of $\alpha(f) L$ with the frequency taken out of it, so that the
+/// loss across one pass is simply
 ///
-/// $$f_c \propto \frac{a^2 c^2}{L^2}$$
+/// $$A(f) = \texttt{loss\_slope} \cdot \sqrt{f} \quad [\text{dB}]$$
 ///
-/// Under this scaling, a 38 mm primary runner has its loss cutoff two octaves
-/// below an equivalent 76 mm pipe, making the narrow pipe substantially duller.
+/// Quoting it this way is what makes the curve fittable: the shape never
+/// changes, only the height, so one filter design serves every pipe in the
+/// network and a pipe's own geometry enters as a single number.
 #[inline]
-pub fn viscothermal_loss_cutoff_hz(
+pub fn loss_slope_db(
     radius: f32,
     length: f32,
     speed_of_sound: f32,
     gamma: f32,
+    gas_constant: f32,
+    temperature: f32,
+    wall_enhancement: f32,
 ) -> f32 {
-    let nu_eff = EXHAUST_KINEMATIC_VISCOSITY * BOUNDARY_LAYER_TURBULENCE_FACTOR;
+    let nu_eff = kinematic_viscosity(temperature, gas_constant) * wall_enhancement.max(1.0);
     let thermal = 1.0 + (gamma - 1.0) / EXHAUST_PRANDTL_NUMBER.sqrt();
-    let denom = length.max(0.02) * (std::f32::consts::PI * nu_eff).sqrt() * thermal;
-    let sqrt_fc = (0.3466 * radius.max(1e-4) * speed_of_sound) / denom.max(1e-6);
-    let fc = sqrt_fc * sqrt_fc;
-    fc.clamp(150.0, 18_000.0)
+    let alpha_per_root_hz = (1.0 / (radius.max(1e-4) * speed_of_sound.max(1.0)))
+        * (std::f32::consts::PI * nu_eff).sqrt()
+        * thermal;
+    // Nepers to decibels: 20 / ln(10).
+    alpha_per_root_hz * length.max(0.001) * 8.685_889
 }
 
-/// Viscothermal boundary layer loss filter.
+/// Frequencies the loss curve is matched at [Hz].
 ///
-/// Implemented as a one-pole lowpass filter inside each waveguide directional path.
+/// Not corners chosen for how they sound: they are the grid the analytic
+/// $\sqrt{f}$ law is sampled on, spaced about a decade apart so that three
+/// first-order sections between them cover 20 Hz to 20 kHz evenly. The gain of
+/// each section is read off [`loss_slope_db`] at the geometric centre of the
+/// band it owns, so every number the filter ends up holding came from the
+/// pipe's radius, length and gas.
+pub const LOSS_MATCH_HZ: [f32; 3] = [125.0, 1_000.0, 8_000.0];
+
+/// Top of the band the highest section is matched over [Hz].
+///
+/// Above it the plane-wave model has already run out — a 60 mm duct cuts its
+/// first cross mode on near 5 kHz — so there is nothing to be gained by fitting
+/// further up, and a great deal to be lost by letting the last section's
+/// asymptote set the level of everything between 16 kHz and Nyquist.
+pub const LOSS_MATCH_TOP_HZ: f32 = 64_000.0;
+
+/// First-order shelf: unity at DC, `gain` above its corner.
+///
+/// `y = g x + (1 - g) \operatorname{lp}(x)`. One multiply more than the lowpass
+/// it is built from, and unlike a lowpass it can sit at a value other than zero
+/// or one in the middle of the band — which is the entire reason three of them
+/// can trace a curve a single lowpass cannot.
+#[derive(Debug, Clone, Copy, Default)]
+struct LossShelf {
+    lowpass: OnePole,
+    gain: f32,
+}
+
+impl LossShelf {
+    fn new(sample_rate: f32, corner_hz: f32, gain: f32) -> Self {
+        Self {
+            lowpass: OnePole::new(sample_rate, corner_hz),
+            gain: gain.clamp(0.0, 1.0),
+        }
+    }
+
+    fn tune(&mut self, sample_rate: f32, corner_hz: f32, gain: f32) {
+        self.lowpass.set_cutoff(sample_rate, corner_hz);
+        self.gain = gain.clamp(0.0, 1.0);
+    }
+
+    #[inline(always)]
+    fn process(&mut self, x: f32) -> f32 {
+        self.gain * x + (1.0 - self.gain) * self.lowpass.process(x)
+    }
+
+    /// Delay the shelf adds to a wave at normalised frequency `omega` [samples].
+    ///
+    /// *Phase* delay, `-phi(w) / w`, and not the group delay taken at DC that a
+    /// one-pole is usually asked for. The two agree only well below a filter's
+    /// corner, and these corners sit inside the band on purpose — the whole
+    /// point of the cascade is that the curve bends where the engine is. What
+    /// sets where a pipe resonates is the phase its loop comes back with at the
+    /// frequency in question, so that is the number to hand the delay line; a
+    /// shelf at 125 Hz lags a 170 Hz wave by 1.6 samples and its DC group delay
+    /// says 4.3, and a pipe retuned on the second figure plays 5 % sharp.
+    ///
+    /// The shelf is `(b0 + b1 z^-1) / (1 - p z^-1)` with `p = 1 - a`,
+    /// `b0 = g + (1 - g) a` and `b1 = -g p`.
+    fn phase_delay_samples(&self, omega: f32) -> f32 {
+        let a = self.lowpass.coefficient();
+        let pole = 1.0 - a;
+        let g = self.gain;
+        let (b0, b1) = (g + (1.0 - g) * a, -g * pole);
+        let (sin_w, cos_w) = omega.sin_cos();
+        let num = (-b1 * sin_w).atan2(b0 + b1 * cos_w);
+        let den = (pole * sin_w).atan2(1.0 - pole * cos_w);
+        (den - num) / omega.max(1e-6)
+    }
+
+    fn reset(&mut self) {
+        self.lowpass.reset();
+    }
+}
+
+/// Viscothermal boundary layer loss down one pass of a pipe.
+///
+/// # Why this is not one lowpass
+///
+/// The loss a wall puts on a wave grows as the square root of frequency, which
+/// in decibels is `A(f) = k sqrt(f)`: gentle, unbounded, and never flat. A
+/// first-order lowpass is the opposite shape — flat to its corner and then 6 dB
+/// per octave forever — and fitting one to the curve at its own $-3$ dB point,
+/// which is what this used to do, puts the corner somewhere near 8 kHz and
+/// leaves the whole audible band below it attenuated by essentially nothing. A
+/// 1.5 m tailpipe should take 1.8 dB out of a 500 Hz wave on each pass; the
+/// lowpass took 0.6. Twenty round trips later that is a 25 dB error, and it is
+/// audible as exactly what it is — a pipe that will not stop ringing, over a
+/// top end that the same filter's 6 dB/octave has meanwhile buried.
+///
+/// Three first-order shelves matched on the grid at [`LOSS_MATCH_HZ`] hold the
+/// curve to a fifth of a decibel on a primary and to about one on a tailpipe,
+/// across 30 Hz to 16 kHz, for three multiplies and three adds.
 #[derive(Debug, Clone, Copy)]
 pub struct ViscothermalLoss {
-    filter: OnePole,
-    cutoff_hz: f32,
+    shelves: [LossShelf; LOSS_MATCH_HZ.len()],
+    slope_db: f32,
+    /// Multiplier on the gas viscosity for what the wall is actually like [-].
+    wall_enhancement: f32,
 }
 
 impl ViscothermalLoss {
-    /// Creates a new loss filter for a pipe of given radius $a$ and length $L$.
+    /// Creates a loss filter for a pipe of radius $a$ and length $L$.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         radius: f32,
         length: f32,
         speed_of_sound: f32,
         gamma: f32,
+        gas_constant: f32,
+        temperature: f32,
         sample_rate: f32,
     ) -> Self {
-        let cutoff_hz = viscothermal_loss_cutoff_hz(radius, length, speed_of_sound, gamma);
-        Self {
-            filter: OnePole::new(sample_rate, cutoff_hz),
-            cutoff_hz,
+        let mut loss = Self {
+            shelves: [LossShelf::default(); LOSS_MATCH_HZ.len()],
+            slope_db: 0.0,
+            wall_enhancement: BOUNDARY_LAYER_TURBULENCE_FACTOR,
+        };
+        for (k, &corner) in LOSS_MATCH_HZ.iter().enumerate() {
+            loss.shelves[k] = LossShelf::new(sample_rate, corner, 1.0);
         }
+        loss.tune(
+            radius,
+            length,
+            speed_of_sound,
+            gamma,
+            gas_constant,
+            temperature,
+            sample_rate,
+        );
+        loss
     }
 
-    /// Retunes the loss cutoff for current sound speed and specific heat ratio.
+    /// Retunes the whole cascade for current sound speed and specific heat ratio.
+    ///
+    /// Each shelf is handed whatever is left of the target once the shelves
+    /// below it have taken their share, evaluated at the geometric centre of
+    /// the band it owns. That makes the cascade exact at three points by
+    /// construction and close everywhere between them.
+    #[allow(clippy::too_many_arguments)]
     pub fn tune(
         &mut self,
         radius: f32,
         length: f32,
         speed_of_sound: f32,
         gamma: f32,
+        gas_constant: f32,
+        temperature: f32,
         sample_rate: f32,
     ) {
-        let cutoff_hz = viscothermal_loss_cutoff_hz(radius, length, speed_of_sound, gamma);
-        self.cutoff_hz = cutoff_hz;
-        self.filter.set_cutoff(sample_rate, cutoff_hz);
+        self.slope_db = loss_slope_db(
+            radius,
+            length,
+            speed_of_sound,
+            gamma,
+            gas_constant,
+            temperature,
+            self.wall_enhancement,
+        );
+        let mut placed_db = 0.0f32;
+        for (k, (&corner, shelf)) in LOSS_MATCH_HZ
+            .iter()
+            .zip(self.shelves.iter_mut())
+            .enumerate()
+        {
+            let upper = LOSS_MATCH_HZ
+                .get(k + 1)
+                .copied()
+                .unwrap_or(LOSS_MATCH_TOP_HZ);
+            let centre = (corner * upper).sqrt();
+            let want_db = -self.slope_db * centre.sqrt();
+            let gain = 10f32.powf(((want_db - placed_db) / 20.0).max(-6.0));
+            placed_db += 20.0 * gain.log10();
+            shelf.tune(sample_rate, corner, gain);
+        }
+    }
+
+    /// Attenuation this pass puts on a wave of frequency `f` [dB].
+    ///
+    /// The analytic target the cascade is fitted to, not a readback of the
+    /// filter: the thing a test compares the filter against.
+    pub fn attenuation_db(&self, frequency: f32) -> f32 {
+        self.slope_db * frequency.max(0.0).sqrt()
+    }
+
+    /// Attenuation per root hertz [dB/Hz^0.5].
+    pub fn slope_db(&self) -> f32 {
+        self.slope_db
+    }
+
+    /// Declares what the wall is like, as a multiplier on the gas viscosity.
+    ///
+    /// Defaults to [`BOUNDARY_LAYER_TURBULENCE_FACTOR`], the exhaust's. Retune
+    /// afterwards for it to take effect.
+    pub fn set_wall_enhancement(&mut self, factor: f32) {
+        self.wall_enhancement = factor.max(1.0);
     }
 
     /// Filters one travelling sample.
     #[inline(always)]
     pub fn process(&mut self, x: f32) -> f32 {
-        self.filter.process(x)
+        let mut y = x;
+        for shelf in &mut self.shelves {
+            y = shelf.process(y);
+        }
+        y
     }
 
-    /// Current filter cutoff frequency [Hz].
-    pub fn cutoff_hz(&self) -> f32 {
-        self.cutoff_hz
-    }
-
-    /// Delay the loss filter adds to a wave passing through it [samples].
-    pub fn phase_delay_samples(&self) -> f32 {
-        self.filter.phase_delay_samples()
+    /// Delay the loss cascade adds to a wave of frequency `f` [samples].
+    ///
+    /// Ask for it at the frequency that matters — a pipe's own fundamental —
+    /// and not at DC; see [`LossShelf::phase_delay_samples`].
+    pub fn phase_delay_samples(&self, frequency_hz: f32, sample_rate: f32) -> f32 {
+        let omega =
+            (std::f32::consts::TAU * frequency_hz.max(0.1) / sample_rate.max(1.0)).clamp(1e-5, 3.0);
+        self.shelves
+            .iter()
+            .map(|shelf| shelf.phase_delay_samples(omega))
+            .sum()
     }
 
     /// Clears internal state.
     pub fn reset(&mut self) {
-        self.filter.reset();
+        for shelf in &mut self.shelves {
+            shelf.reset();
+        }
     }
 }
 
@@ -179,7 +401,6 @@ impl ViscothermalLoss {
 pub struct ValveTermination {
     pipe_area: f32,
     reflection: f32,
-    damping: f32,
 }
 
 impl ValveTermination {
@@ -188,7 +409,6 @@ impl ValveTermination {
         Self {
             pipe_area: pipe_area.max(1e-7) as f32,
             reflection: 1.0,
-            damping: 0.0,
         }
     }
 
@@ -205,17 +425,7 @@ impl ValveTermination {
 
     /// Reflection coefficient currently in effect [-].
     pub fn reflection(&self) -> f32 {
-        self.reflection * (1.0 - self.damping * (1.0 - VALVE_DAMPED_REFLECTION))
-    }
-
-    /// Softens the reflection, `0` for the bare boundary and `1` fully damped.
-    pub fn set_damping(&mut self, damping: f32) {
-        self.damping = damping.clamp(0.0, 1.0);
-    }
-
-    /// Damping currently applied, `0..=1` [-].
-    pub fn damping(&self) -> f32 {
-        self.damping
+        self.reflection
     }
 
     /// Computes the forward-travelling wave entering the runner:
@@ -291,10 +501,28 @@ impl WaveguidePipe {
         let rho = REFERENCE_PRESSURE_PA / (gas_constant * temperature.max(1.0));
         let admittance = area_f32 / (rho * c).max(1e-4);
 
-        let forward_loss = ViscothermalLoss::new(radius_f32, length_f32, c, gamma, sample_rate);
-        let backward_loss = ViscothermalLoss::new(radius_f32, length_f32, c, gamma, sample_rate);
-        let initial_delay_samples =
-            (initial_delay_sec * sample_rate - forward_loss.phase_delay_samples()).max(1.0);
+        let forward_loss = ViscothermalLoss::new(
+            radius_f32,
+            length_f32,
+            c,
+            gamma,
+            gas_constant,
+            temperature,
+            sample_rate,
+        );
+        let backward_loss = ViscothermalLoss::new(
+            radius_f32,
+            length_f32,
+            c,
+            gamma,
+            gas_constant,
+            temperature,
+            sample_rate,
+        );
+        let quarter_wave_hz = c / (4.0 * length_f32);
+        let initial_delay_samples = (initial_delay_sec * sample_rate
+            - forward_loss.phase_delay_samples(quarter_wave_hz, sample_rate))
+        .max(1.0);
 
         Self {
             length: length_f32,
@@ -317,6 +545,15 @@ impl WaveguidePipe {
             temperature,
             steepening: 0.0,
         }
+    }
+
+    /// Declares what this pipe's wall is like, as a multiplier on the gas
+    /// viscosity — [`SMOOTH_WALL`] for a cast intake tract,
+    /// [`BOUNDARY_LAYER_TURBULENCE_FACTOR`] (the default) for a header.
+    pub fn set_wall_enhancement(&mut self, factor: f32) {
+        self.forward_loss.set_wall_enhancement(factor);
+        self.backward_loss.set_wall_enhancement(factor);
+        self.tune(self.gamma, self.gas_constant, self.temperature);
     }
 
     /// Sets the wave steepening factor down the pipe [-].
@@ -344,10 +581,24 @@ impl WaveguidePipe {
         self.admittance = self.area / (rho * c).max(1e-4);
 
         let r = self.radius();
-        self.forward_loss
-            .tune(r, self.length, c, gamma, self.sample_rate);
-        self.backward_loss
-            .tune(r, self.length, c, gamma, self.sample_rate);
+        self.forward_loss.tune(
+            r,
+            self.length,
+            c,
+            gamma,
+            gas_constant,
+            temperature,
+            self.sample_rate,
+        );
+        self.backward_loss.tune(
+            r,
+            self.length,
+            c,
+            gamma,
+            gas_constant,
+            temperature,
+            self.sample_rate,
+        );
 
         self.update_delay_targets();
     }
@@ -396,7 +647,21 @@ impl WaveguidePipe {
     /// boundary filter is met once per round trip, so each direction pays half.
     #[inline]
     fn compensation(&self) -> f32 {
-        self.forward_loss.phase_delay_samples() + 0.5 * self.boundary_phase_delay
+        self.forward_loss
+            .phase_delay_samples(self.quarter_wave_hz(), self.sample_rate)
+            + 0.5 * self.boundary_phase_delay
+    }
+
+    /// The pipe's own quarter-wave fundamental, `c / 4L` [Hz].
+    ///
+    /// Where the loss cascade's phase delay is read off, because it is the
+    /// resonance a length is heard as and the one every analytic test in this
+    /// module is written against. A section buried mid-chain has no such mode
+    /// of its own, but it is short, its cascade is nearly transparent, and the
+    /// few tenths of a sample the choice moves it by are below what a
+    /// fractional delay resolves.
+    fn quarter_wave_hz(&self) -> f32 {
+        speed_of_sound(self.gamma, self.gas_constant, self.temperature) / (4.0 * self.length)
     }
 
     /// Declares the delay that filters at this pipe's boundaries add, per round
@@ -454,9 +719,9 @@ impl WaveguidePipe {
         self.delay_samples() / self.sample_rate
     }
 
-    /// Wall loss filter cutoff [Hz].
-    pub fn loss_cutoff_hz(&self) -> f32 {
-        self.forward_loss.cutoff_hz()
+    /// Wall loss one pass down the pipe puts on a wave of frequency `f` [dB].
+    pub fn wall_loss_db(&self, frequency: f32) -> f32 {
+        self.forward_loss.attenuation_db(frequency)
     }
 
     /// Reads waves arriving at the boundaries from inside the pipe with viscothermal wall loss applied:
@@ -1861,9 +2126,15 @@ impl ExhaustNetwork {
             p.set_mach(mach);
         }
         let bank_flow = mass_flow.max(0.0) / self.bank_count.max(1) as f32;
-        for tp in &mut self.tailpipes {
+        for (tp, mouth) in self.tailpipes.iter_mut().zip(self.mouths.iter_mut()) {
             let mach = mean_flow_mach(bank_flow, tp.area(), gamma, gas_constant, tp.temperature);
             tp.set_mach(mach);
+            // The same gas leaves through the mouth, which is what decides how
+            // much of the reflection the jet takes: see
+            // [`vortex_reflection_factor`](crate::audio::radiation::vortex_reflection_factor).
+            // Without this the network is very nearly lossless below the
+            // radiation corner and a single blowdown rings for seconds.
+            mouth.set_mach(mach * tp.area() / mouth.area());
         }
     }
 
@@ -1907,11 +2178,6 @@ impl ExhaustNetwork {
         self.tailpipes[bank.min(self.tailpipes.len() - 1)].delay_samples()
     }
 
-    /// Damping currently applied to a cylinder's valve end, `0..=1` [-].
-    pub fn valve_damping(&self, cylinder: usize) -> f32 {
-        self.valves[cylinder.min(self.valves.len() - 1)].damping()
-    }
-
     /// Mean acoustic round-trip time of a bank's primaries [s].
     ///
     /// A bank no longer has *a* runner — it has one primary per cylinder, and on
@@ -1932,22 +2198,6 @@ impl ExhaustNetwork {
     /// Reflection coefficient currently at a cylinder's valve end [-].
     pub fn valve_reflection(&self, cylinder: usize) -> f32 {
         self.valves[cylinder.min(self.valves.len() - 1)].reflection()
-    }
-
-    /// Damps a primary by softening its valve-end reflection, `0` for the bare
-    /// closed valve and `1` for fully damped.
-    ///
-    /// Until the solver's own valve lift reaches the snapshot, a primary's head
-    /// is a rigid closed end at every instant, which is what a real one is for
-    /// most of the cycle but never all of it: for the part of the cycle the
-    /// valve is open, the pipe is looking into the cylinder and the reflection
-    /// is far weaker. Scaling the reflection here stands in for that, and it is
-    /// the same physical quantity a lift curve would set — see
-    /// [`ValveTermination::set_effective_area`].
-    pub fn set_valve_damping(&mut self, cylinder: usize, damping: f32) {
-        if let Some(valve) = self.valves.get_mut(cylinder) {
-            valve.set_damping(damping);
-        }
     }
 
     /// Updates valve effective flow areas for all cylinders.
@@ -2138,6 +2388,124 @@ mod tests {
     }
 
     #[test]
+    fn wall_loss_follows_alpha_across_the_band() {
+        // The claim the cascade exists to keep: one pass down a pipe costs
+        // `alpha(f) L` nepers, and `alpha` goes as the square root of
+        // frequency. A first-order lowpass cannot hold that shape over three
+        // decades — fitted at its own -3 dB point it leaves the whole audible
+        // band below the corner attenuated by almost nothing and buries
+        // everything above it at 6 dB an octave. Three shelves hold it to a
+        // fraction of a decibel.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.33;
+        const R: f32 = 287.0;
+
+        for (radius, length, temperature) in [
+            (0.022f32, 0.55f32, 900.0f32), // a V8 primary
+            (0.030, 1.50, 600.0),          // its tailpipe
+            (0.019, 0.40, 1_100.0),        // a four-cylinder's, hotter and narrower
+        ] {
+            let c = speed_of_sound(GAMMA, R, temperature);
+            let mut loss = ViscothermalLoss::new(radius, length, c, GAMMA, R, temperature, FS);
+
+            // The analytic target, straight from the formula in Appendix A.
+            let nu = kinematic_viscosity(temperature, R) * BOUNDARY_LAYER_TURBULENCE_FACTOR;
+            let analytic_db = |f: f64| {
+                let alpha = viscothermal_alpha(
+                    f,
+                    radius as f64,
+                    c as f64,
+                    nu as f64,
+                    GAMMA as f64,
+                    EXHAUST_PRANDTL_NUMBER as f64,
+                );
+                alpha * length as f64 * 8.685_889_638_065_035
+            };
+
+            // Checked to 8 kHz and no further: a 60 mm duct cuts its first
+            // cross mode on near 5 kHz, above which a one-dimensional
+            // waveguide has nothing to claim and the mouth's own
+            // [`DUCT_CUT_ON`] rolls the band away regardless. The cascade is
+            // 2.5 dB shy of `alpha` at 16 kHz and that is not worth a fourth
+            // shelf to fix.
+            for f in [31.0f32, 125.0, 500.0, 2_000.0, 8_000.0] {
+                // What the filter claims, against the formula.
+                let claimed = loss.attenuation_db(f) as f64;
+                let wanted = analytic_db(f as f64);
+                assert!(
+                    (claimed - wanted).abs() < 1e-3,
+                    "{radius} m x {length} m at {f} Hz: slope says {claimed:.4} dB, \
+                     alpha says {wanted:.4} dB"
+                );
+
+                // And what it actually does, against what it claims.
+                let (mut re, mut im) = (0.0f64, 0.0f64);
+                let (settle, measure) = (24_000usize, 24_000usize);
+                for i in 0..settle + measure {
+                    let phase = std::f32::consts::TAU * f * i as f32 / FS;
+                    let y = loss.process(phase.sin());
+                    if i >= settle {
+                        re += y as f64 * phase.sin() as f64;
+                        im += y as f64 * phase.cos() as f64;
+                    }
+                }
+                let gain = 2.0 * (re * re + im * im).sqrt() / measure as f64;
+                let measured_db = -20.0 * gain.max(1e-12).log10();
+                assert!(
+                    (measured_db - wanted).abs() < 1.5,
+                    "{radius} m x {length} m at {f} Hz: {measured_db:.2} dB measured, \
+                     {wanted:.2} dB from alpha"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cold_air_is_less_viscous_than_hot_exhaust() {
+        // Sutherland over the ideal gas. The number matters because the wall
+        // loss goes as its square root, so one figure for the whole synth damps
+        // a cold intake runner two and a half times too hard.
+        let cold = kinematic_viscosity(300.0, 287.0);
+        let hot = kinematic_viscosity(900.0, 287.0);
+        assert!(
+            (cold - 1.57e-5).abs() < 1.0e-6,
+            "air at 300 K should be near 1.57e-5 m^2/s, got {cold:e}"
+        );
+        assert!(
+            (hot - 9.9e-5).abs() < 5.0e-6,
+            "exhaust at 900 K should be near 9.9e-5 m^2/s, got {hot:e}"
+        );
+        // And the attenuation follows the square root of it.
+        let ratio = (hot / cold).sqrt();
+        let c = 400.0;
+        let slope_cold = loss_slope_db(0.02, 0.5, c, 1.4, 287.0, 300.0, SMOOTH_WALL);
+        let slope_hot = loss_slope_db(0.02, 0.5, c, 1.4, 287.0, 900.0, SMOOTH_WALL);
+        assert!(
+            ((slope_hot / slope_cold) - ratio).abs() < 0.02,
+            "attenuation did not follow sqrt(nu): {:.3} against {ratio:.3}",
+            slope_hot / slope_cold
+        );
+    }
+
+    #[test]
+    fn a_smooth_wall_loses_half_of_what_a_rough_one_does() {
+        // The enhancement multiplies the viscosity, so it is worth its square
+        // root in attenuation: an intake tract that declares itself smooth is
+        // four times less lossy than a header at the same size and gas.
+        let c = 343.0;
+        let mut rough = ViscothermalLoss::new(0.021, 0.25, c, 1.4, 287.0, 300.0, 48_000.0);
+        let mut smooth = ViscothermalLoss::new(0.021, 0.25, c, 1.4, 287.0, 300.0, 48_000.0);
+        smooth.set_wall_enhancement(SMOOTH_WALL);
+        smooth.tune(0.021, 0.25, c, 1.4, 287.0, 300.0, 48_000.0);
+        rough.tune(0.021, 0.25, c, 1.4, 287.0, 300.0, 48_000.0);
+        let ratio = rough.slope_db() / smooth.slope_db();
+        assert!(
+            (ratio - BOUNDARY_LAYER_TURBULENCE_FACTOR.sqrt()).abs() < 0.01,
+            "enhancement bought {ratio:.3} in attenuation, not its own square root"
+        );
+    }
+
+    #[test]
     fn closed_open_pipe_resonates_at_c_over_four_l() {
         // A pipe shut at one end and open at the other is a quarter-wave
         // resonator: the closed end forces a pressure antinode, the open end a
@@ -2164,6 +2532,11 @@ mod tests {
             let mut pipe = WaveguidePipe::new(effective, area, FS, GAMMA, R, TEMPERATURE);
             pipe.set_boundary_phase_delay(mouth.phase_delay_samples());
             pipe.tune(GAMMA, R, TEMPERATURE);
+            // The delay smoother glides over 40 ms and this pipe rings for
+            // about 50, so an impulse fired the instant after a retune measures
+            // the glide as much as the pipe. A running network is always
+            // settled; put the test in the same state.
+            pipe.snap_delays();
             let mut mouth = mouth;
 
             // Impulse in at the closed end, radiated pressure out at the mouth.
@@ -2316,6 +2689,8 @@ mod tests {
         let mut pipe_cold = WaveguidePipe::new(eff_l2, area, FS, GAMMA, R, T_COLD);
         pipe_cold.set_boundary_phase_delay(mouth.phase_delay_samples());
         pipe_cold.tune(GAMMA, R, T_COLD);
+        pipe_hot.snap_delays();
+        pipe_cold.snap_delays();
         let junction = ScatteringJunction::new(&[pipe_hot.admittance(), pipe_cold.admittance()]);
         let mut mouth = mouth;
 
@@ -2460,10 +2835,26 @@ mod tests {
         let corner = packing_corner_hz(thickness, c);
         let pass = 10f64.powf(-loss_db_per_m * length / 20.0) as f32;
 
-        let analytic_loss = |f: f32| {
+        let shelf_loss = |f: f32| {
             let x = f / corner;
             -10.0 * ((1.0 + pass * pass * x * x) / (1.0 + x * x)).log10()
         };
+        // The core is a duct like any other and its wall takes its own
+        // `sqrt(f)` out of whatever passes through. That is not the packing, so
+        // it is predicted separately and charged separately rather than left to
+        // contaminate the shelf it would otherwise be mistaken for.
+        let wall_loss = |f: f32| {
+            loss_slope_db(
+                0.030,
+                length as f32,
+                c,
+                GAMMA,
+                R,
+                TEMPERATURE,
+                BOUNDARY_LAYER_TURBULENCE_FACTOR,
+            ) * f.max(0.0).sqrt()
+        };
+        let analytic_loss = |f: f32| shelf_loss(f) + wall_loss(f);
 
         let measured_loss = |f: f32| {
             let mut silencer = AbsorptiveSilencer::new(
@@ -2498,10 +2889,12 @@ mod tests {
         let low = measured_loss(corner / 8.0);
         let mid = measured_loss(corner);
         let high = measured_loss(4.0 * corner);
+        let packing_only = low - wall_loss(corner / 8.0);
         assert!(
-            low < 0.5,
-            "packing is not transparent below its corner: {low:.2} dB at {:.0} Hz",
-            corner / 8.0
+            packing_only < 0.5,
+            "packing is not transparent below its corner: {packing_only:.2} dB at {:.0} Hz,              beyond the {:.2} dB the core's own wall takes",
+            corner / 8.0,
+            wall_loss(corner / 8.0)
         );
         assert!(
             high > 7.0,
@@ -2513,13 +2906,9 @@ mod tests {
             "absorption did not rise with frequency: {low:.2}, {mid:.2}, {high:.2} dB"
         );
 
-        // And it follows the shelf, not merely the right direction. Checked up
-        // to twice the corner: beyond that the core's own viscothermal wall
-        // loss (which rises as sqrt(f)) and the one-pole's discretisation both
-        // contribute, and by four times the corner they add 1.8 dB between
-        // them. Both take *more* out of the top, so the element stays on the
-        // right side of the claim; they are simply not part of the shelf, and
-        // this assertion is about the shelf.
+        // And it follows the shelf, not merely the right direction. The core's
+        // wall loss is in the prediction now rather than excused from it, so
+        // what is left over is the shelf's own discretisation.
         for f in [corner / 8.0, corner / 2.0, corner, 2.0 * corner] {
             let (measured, expected) = (measured_loss(f), analytic_loss(f));
             assert!(
@@ -2696,12 +3085,42 @@ mod tests {
             high / low.max(1e-9)
         };
 
+        // What the law predicts for the same two pipes: the tilt between the
+        // two probe frequencies is the difference of the attenuations there,
+        // and it doubles when the radius halves.
+        let predicted = |radius: f64| {
+            let alpha = |f: f64| {
+                viscothermal_alpha(
+                    f,
+                    radius,
+                    speed_of_sound(GAMMA, R, TEMPERATURE) as f64,
+                    (kinematic_viscosity(TEMPERATURE, R) * BOUNDARY_LAYER_TURBULENCE_FACTOR) as f64,
+                    GAMMA as f64,
+                    EXHAUST_PRANDTL_NUMBER as f64,
+                )
+            };
+            (-(alpha(6_000.0) - alpha(300.0)) * 0.6).exp() as f32
+        };
+
         let narrow = brightness(0.019);
         let wide = brightness(0.038);
         assert!(
-            wide > 1.5 * narrow,
-            "the narrow pipe was not measurably duller: {narrow:.3} against {wide:.3} wide"
+            wide > narrow,
+            "the narrow pipe was not duller: {narrow:.3} against {wide:.3} wide"
         );
+        // The ordering alone is cheap — a filter that rolls off at 6 dB/octave
+        // instead of as sqrt(f) also gets it right, and gets the size of it
+        // wrong by an octave's worth. So the tilt is held to the analytic
+        // figure, within the tolerance of the three-shelf fit and the delay
+        // line's own interpolation.
+        for (radius, measured) in [(0.019f64, narrow), (0.038, wide)] {
+            let want = predicted(radius);
+            let error_db = 20.0 * (measured / want).log10();
+            assert!(
+                error_db.abs() < 1.5,
+                "a {radius} m pipe tilted {measured:.3} between 300 Hz and 6 kHz,                  against {want:.3} from alpha ({error_db:+.2} dB out)"
+            );
+        }
     }
 
     #[test]

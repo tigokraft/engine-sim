@@ -42,21 +42,6 @@ fn flush(value: f32) -> f32 {
     }
 }
 
-/// Hermite ramp from 0 at `lo` to 1 at `hi`, flat outside.
-///
-/// Used wherever a control law has to hand over between two regimes. A linear
-/// ramp would leave a slope discontinuity at each end, and on a parameter that
-/// is being swept slowly — engine speed crossing a damping threshold, say —
-/// that corner is audible as a moment where the timbre changes direction.
-#[inline]
-fn smoothstep(lo: f32, hi: f32, x: f32) -> f32 {
-    if hi <= lo {
-        return if x < lo { 0.0 } else { 1.0 };
-    }
-    let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
 // ---------------------------------------------------------------------------
 // Biquad
 // ---------------------------------------------------------------------------
@@ -247,6 +232,14 @@ impl OnePole {
     /// Current output without advancing.
     pub fn value(&self) -> f32 {
         self.z
+    }
+
+    /// The smoothing coefficient `a` currently in effect [-].
+    ///
+    /// The pole sits at `1 - a`. Anything building a shelf out of this filter
+    /// needs it to place the shelf's zero.
+    pub fn coefficient(&self) -> f32 {
+        self.a
     }
 
     /// Delay the filter adds to a wave passing through it [samples].
@@ -589,7 +582,7 @@ pub fn runner_delay_seconds(
 ///
 /// This is the period of the pipe's own quarter-wave loop, and the natural
 /// yardstick for asking whether a delay line is behaving as a resonator or as a
-/// comb filter — see [`waveguide_damping`].
+/// comb filter.
 #[inline]
 pub fn round_trip_seconds(
     runner_length: f32,
@@ -617,62 +610,6 @@ pub fn firing_interval_seconds(rpm: f32, cylinders_in_bank: usize) -> f32 {
     }
     let cycle_seconds = 120.0 / rpm;
     cycle_seconds / cylinders_in_bank.max(1) as f32
-}
-
-/// Ratio below which a runner loop is continuously re-excited [-].
-///
-/// Under four round trips per firing interval the next pulse arrives before the
-/// previous one has finished bouncing, and the pipe is a driven resonator.
-pub const WAVEGUIDE_COUPLED_RATIO: f32 = 4.0;
-
-/// Ratio above which a runner loop is fully isolated between firings [-].
-pub const WAVEGUIDE_ISOLATED_RATIO: f32 = 22.0;
-
-/// The Transit-Time Decision Rule: how hard to damp a runner at this speed.
-///
-/// # The artefact this exists to remove
-///
-/// A delay line closed into a reflecting loop is a comb filter. That is the
-/// point of it — the comb *is* the pipe's harmonic series, and when a fresh
-/// blowdown pulse arrives every few round trips, what the listener hears is a
-/// pipe being played: each pulse re-excites the loop before the last has decayed
-/// and the comb reads as the note's own resonance.
-///
-/// At idle the arithmetic changes. A V8 bank at 800 rpm fires every 37 ms, and a
-/// 0.45 m runner on hot gas round-trips in about 1.5 ms — twenty-four bounces
-/// between excitations. The loop spends almost all of its time with no pulse in
-/// it, ringing down on whatever broadband noise is present, and a static comb
-/// filter sitting on a noise floor is exactly the recipe for flanging. It is the
-/// single most recognisable "synthetic" artefact in a procedural engine: a
-/// metallic, hollow, faintly pitched sheen under an idle that should be dry.
-///
-/// A real runner does not do this, because a real runner is much lossier than a
-/// lossless delay: at idle the gas is slow, cool and barely moving, the boundary
-/// layer is thick relative to the bore, and the collector is a poor reflector
-/// for a wave that arrives with almost no amplitude behind it.
-///
-/// # The rule
-///
-/// ```text
-/// ratio   = tau_interval / tau_pulse
-/// damping = smoothstep(WAVEGUIDE_COUPLED_RATIO, WAVEGUIDE_ISOLATED_RATIO, ratio)
-/// ```
-///
-/// where `tau_interval` is [`firing_interval_seconds`] and `tau_pulse` is the
-/// [`round_trip_seconds`] of the runner. Because `tau_interval` falls with
-/// engine speed while `tau_pulse` depends only on length and gas temperature,
-/// the ratio is large at idle and small at the limiter — so damping comes on
-/// where the artefact lives and gets out of the way where the resonance is
-/// wanted. Returns `0` (no extra damping) to `1` (fully damped).
-#[inline]
-pub fn waveguide_damping(tau_interval: f32, tau_pulse: f32) -> f32 {
-    // A degenerate or non-finite pipe gets full damping: whatever it is doing,
-    // it is not modelling a resonance, and the safe failure is a quiet one.
-    if !tau_pulse.is_finite() || tau_pulse <= 0.0 || !tau_interval.is_finite() {
-        return 1.0;
-    }
-    let ratio = tau_interval / tau_pulse;
-    smoothstep(WAVEGUIDE_COUPLED_RATIO, WAVEGUIDE_ISOLATED_RATIO, ratio)
 }
 
 /// Helmholtz resonance of a muffler cavity [Hz].
@@ -964,7 +901,7 @@ impl ExhaustRunner {
     /// Scales the feedback loop down, `0` for the bare pipe and `1` for fully
     /// damped.
     ///
-    /// Drive this from [`waveguide_damping`] at the control rate. Both the
+    /// Drive this at the control rate. Both the
     /// reflection magnitude and the return path's cutoff move together; see
     /// [`RUNNER_DAMPED_REFLECTION`] and [`RUNNER_DAMPED_CUTOFF_HZ`] for why the
     /// second one is not optional.
@@ -1539,48 +1476,6 @@ mod tests {
         approx(firing_interval_seconds(1_600.0, 4), 0.01875, 1e-6);
         // A stopped engine never fires again.
         assert_eq!(firing_interval_seconds(0.0, 4), f32::MAX);
-    }
-
-    #[test]
-    fn transit_time_rule_damps_idle_and_frees_the_top_end() {
-        // A 0.45 m runner on 900 K exhaust: about 1.55 ms round trip.
-        let tau_pulse = round_trip_seconds(0.45, 1.33, 287.0, 900.0);
-        assert!(
-            (0.0012..0.0020).contains(&tau_pulse),
-            "unphysical round trip: {tau_pulse}"
-        );
-
-        let damping_at = |rpm: f32| waveguide_damping(firing_interval_seconds(rpm, 4), tau_pulse);
-
-        // Idle: two dozen round trips between firings, so the loop is isolated
-        // and would otherwise stand up a static comb on the noise floor.
-        assert!(
-            damping_at(800.0) > 0.9,
-            "idle undamped: {}",
-            damping_at(800.0)
-        );
-        // The limiter: pulses arrive faster than the pipe can ring out, which is
-        // the regime the resonance is *wanted* in.
-        assert!(
-            damping_at(7_000.0) < 0.1,
-            "top end over-damped: {}",
-            damping_at(7_000.0)
-        );
-
-        // And it is monotone in between — no speed where damping goes the wrong
-        // way, which would be heard as the note brightening as it slowed.
-        let mut previous = f32::MAX;
-        let mut rpm = 600.0;
-        while rpm <= 8_000.0 {
-            let d = damping_at(rpm);
-            assert!(d <= previous + 1e-6, "damping rose with speed at {rpm} rpm");
-            previous = d;
-            rpm += 50.0;
-        }
-
-        // A stopped engine is fully damped rather than dividing by zero.
-        assert_eq!(waveguide_damping(f32::MAX, tau_pulse), 1.0);
-        assert_eq!(waveguide_damping(0.01, 0.0), 1.0);
     }
 
     #[test]

@@ -764,6 +764,21 @@ impl SnapshotSource {
         let intake_port_flow = block
             .ring
             .downsample_from(self.evo_angle, |s| s.intake_flow.max(0.0));
+        // Valve lift is a pure function of crank angle, so it needs no ring —
+        // but it needs the *same* cut and the same box average as the tables
+        // that do, or the port opens at a different instant from the pulse that
+        // leaves through it. These are the boundary conditions at the head of
+        // every runner in both networks; without them a runner is a pipe with a
+        // rigid plug in the end of it, which reflects everything and rings.
+        let valves = block.model.valves;
+        let exhaust_valve_area = crate::physics::engine_block::PhaseRing::downsample_angles_from(
+            self.evo_angle,
+            |theta| valves.exhaust.effective_area(theta),
+        );
+        let intake_valve_area = crate::physics::engine_block::PhaseRing::downsample_angles_from(
+            self.evo_angle,
+            |theta| valves.intake.effective_area(theta),
+        );
 
         // The exhaust section by section. Each primary is at the temperature its
         // own wall has let its gas reach, so an engine whose header is still
@@ -803,6 +818,8 @@ impl SnapshotSource {
             cylinder_pressure,
             exhaust_port_flow,
             intake_port_flow,
+            exhaust_valve_area,
+            intake_valve_area,
             exhaust_manifold_pressure: manifold_pressure as f32,
             exhaust_cutout: controls.exhaust_cutout,
             anti_lag: anti_lag_active,
