@@ -839,13 +839,19 @@ pub struct SynthConfig {
     ///
     /// `backfire_level` is above the others on purpose: a pop is an unmetered
     /// charge lighting off in open pipe, and it is genuinely larger than an
-    /// ordinary blowdown. It is not as far above them as it once was, because
-    /// a pop is broadband and the mouth radiates the top of that band far
-    /// better than it radiates a firing fundamental — see
-    /// [`radiation`](crate::audio::radiation). Against a tailpipe that tilts,
-    /// the old figure put every overrun through the clipper hard enough to
-    /// slew. Set where the whole catalogue renders clean with headroom to
-    /// spare.
+    /// ordinary blowdown.
+    ///
+    /// How far above depends on what the pop is *made of*, which is why this
+    /// number moved when [`Pop`] did. A mouth radiates the rate of change of
+    /// what it passes — see [`radiation`](crate::audio::radiation) — so a burst
+    /// of near-white noise leaves it far louder than a pressure pulse of the
+    /// same amplitude that takes a millisecond to rise. Reshaping the pop from
+    /// the first into the second, which is what a deflagration in a pipe
+    /// actually is, cost it about half its radiated peak, and the level it was
+    /// mixed at did not follow: a limiter bounce came out 1.1 times the clean
+    /// engine, which is an ignition cut nobody can hear as an event. At this
+    /// figure it comes out 2.1 times, the catalogue still renders clean, and
+    /// the pop is a crack rather than a click.
     pub exhaust_level: f64,
     pub intake_level: f64,
     pub backfire_level: f64,
@@ -938,7 +944,7 @@ impl SynthConfig {
             combustion_variation_idle_rpm: 700.0,
             exhaust_level: 1.0,
             intake_level: 0.35,
-            backfire_level: 0.4,
+            backfire_level: 0.8,
             // Calibrated to sit about 8 dB under the exhaust at idle: audible
             // in the gaps between firings, which is its whole job, without
             // becoming the thing the engine sounds like. The rig itself sits at
