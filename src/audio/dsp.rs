@@ -1235,6 +1235,14 @@ struct CycleTables {
     exhaust_valve_area: [f32; CYCLE_TABLE],
     /// Effective intake valve flow area over the cycle [m^2].
     intake_valve_area: [f32; CYCLE_TABLE],
+    /// Gas crossing the exhaust port over the cycle, positive out [kg/s].
+    ///
+    /// [`Self::exhaust`] is this curve normalised, because what drives the pipe
+    /// is a *shape*. What resists at the valve is the flow itself, in kilograms
+    /// per second, so the unnormalised trace is kept alongside it.
+    exhaust_flow: [f32; CYCLE_TABLE],
+    /// Space enclosed above the piston over the cycle [m^3].
+    cylinder_volume: [f32; CYCLE_TABLE],
 }
 
 impl Default for CycleTables {
@@ -1247,6 +1255,8 @@ impl Default for CycleTables {
             intake_slope: [0.0; CYCLE_TABLE],
             exhaust_valve_area: [0.0; CYCLE_TABLE],
             intake_valve_area: [0.0; CYCLE_TABLE],
+            exhaust_flow: [0.0; CYCLE_TABLE],
+            cylinder_volume: [1e-4; CYCLE_TABLE],
         }
     }
 }
@@ -1305,6 +1315,8 @@ impl CycleTables {
             intake_slope,
             exhaust_valve_area: snapshot.exhaust_valve_area,
             intake_valve_area: snapshot.intake_valve_area,
+            exhaust_flow: snapshot.exhaust_port_flow,
+            cylinder_volume: snapshot.cylinder_volume,
         }
     }
 
@@ -1359,6 +1371,18 @@ impl CycleTables {
     #[inline(always)]
     fn intake_valve_area_at(&self, phase: f32) -> f32 {
         Self::read(&self.intake_valve_area, phase)
+    }
+
+    /// Exhaust port mass flow at a cycle phase measured from EVO [kg/s].
+    #[inline(always)]
+    fn exhaust_flow_at(&self, phase: f32) -> f32 {
+        Self::read(&self.exhaust_flow, phase)
+    }
+
+    /// Cylinder volume at a cycle phase measured from EVO [m^3].
+    #[inline(always)]
+    fn cylinder_volume_at(&self, phase: f32) -> f32 {
+        Self::read(&self.cylinder_volume, phase)
     }
 }
 
@@ -1467,6 +1491,22 @@ impl CyclePlayer {
     fn intake_valve_area_at(&self, phase: f32, blend: f32) -> f32 {
         let a = self.previous.intake_valve_area_at(phase);
         let b = self.current.intake_valve_area_at(phase);
+        a + (b - a) * blend
+    }
+
+    /// Exhaust port mass flow at a cycle phase measured from EVO [kg/s].
+    #[inline(always)]
+    fn exhaust_flow_at(&self, phase: f32, blend: f32) -> f32 {
+        let a = self.previous.exhaust_flow_at(phase);
+        let b = self.current.exhaust_flow_at(phase);
+        a + (b - a) * blend
+    }
+
+    /// Cylinder volume at a cycle phase measured from EVO [m^3].
+    #[inline(always)]
+    fn cylinder_volume_at(&self, phase: f32, blend: f32) -> f32 {
+        let a = self.previous.cylinder_volume_at(phase);
+        let b = self.current.cylinder_volume_at(phase);
         a + (b - a) * blend
     }
 
@@ -2657,6 +2697,14 @@ pub struct EngineSynth {
     /// construction; nothing here touches the heap on the callback.
     exhaust_valve_areas: Vec<f64>,
     intake_valve_areas: Vec<f64>,
+    /// The cylinder each valve opens into, this control block.
+    ///
+    /// One volume per cylinder rather than one for the engine, because the
+    /// whole point of the load is that a cylinder is at a different point in
+    /// its stroke from its neighbours; and the port flows beside it, because
+    /// what the gap resists is what is crossing it.
+    cylinder_volumes: Vec<f64>,
+    exhaust_port_flows: Vec<f64>,
     turbo: TurboVoice,
     roots: RootsVoice,
     centrifugal: CentrifugalVoice,
@@ -2859,6 +2907,8 @@ impl EngineSynth {
             intake_excitations: vec![0.0; n_cyl],
             exhaust_valve_areas: vec![0.0; n_cyl],
             intake_valve_areas: vec![0.0; n_cyl],
+            cylinder_volumes: vec![1e-4; n_cyl],
+            exhaust_port_flows: vec![0.0; n_cyl],
             turbo: TurboVoice::new(fs),
             roots: RootsVoice::new(fs),
             centrifugal: CentrifugalVoice::new(fs),
@@ -3021,6 +3071,9 @@ impl EngineSynth {
         self.cycle.reset();
         self.excitations.fill(0.0);
         self.intake_excitations.fill(0.0);
+        self.exhaust_valve_areas.fill(0.0);
+        self.intake_valve_areas.fill(0.0);
+        self.exhaust_port_flows.fill(0.0);
         self.bank_excitations.fill(0.0);
         self.radiated.fill(0.0);
         for smoother in self.blowdown_pa.iter_mut() {
@@ -3389,6 +3442,12 @@ impl EngineSynth {
                 self.cycle.exhaust_valve_area_at(cylinder, blend) as f64;
             self.intake_valve_areas[index] =
                 self.cycle.intake_valve_area_at(cylinder, blend) as f64;
+            // The other two thirds of the boundary: what is behind the valve
+            // and what is going through it. Both read at the bare cylinder
+            // phase, like the areas — a piston's position and a port's flux are
+            // geometry and gas dynamics, and neither waits for a flame.
+            self.cylinder_volumes[index] = self.cycle.cylinder_volume_at(cylinder, blend) as f64;
+            self.exhaust_port_flows[index] = self.cycle.exhaust_flow_at(cylinder, blend) as f64;
 
             // Induction is read at the bare cylinder phase. The retard and the
             // jitter are properties of *combustion* — how long the flame takes
@@ -3430,7 +3489,11 @@ impl EngineSynth {
         // pressure curve drives the block harder at speed, which is why
         // combustion noise climbs with rpm on every engine ever measured.
         let rise = self.fill_excitations(turning, cycle_hz) * cycle_hz;
-        self.network.set_valve_areas(&self.exhaust_valve_areas);
+        self.network.set_valve_loads(
+            &self.exhaust_valve_areas,
+            &self.cylinder_volumes,
+            &self.exhaust_port_flows,
+        );
         self.intake_network
             .set_valve_areas(&self.intake_valve_areas);
 
@@ -3572,6 +3635,9 @@ mod tests {
     /// cylinder is at its combustion pressure when the valve cracks, and blows
     /// down from *there*. A curve that stepped 55 bar in one cell would be a
     /// cycle no engine runs, and the structural path differentiates this.
+    /// Peak mass flow through one exhaust port on the synthetic cycle [kg/s].
+    const EXHAUST_PORT_PEAK_FLOW: f32 = 0.12;
+
     fn synthetic_cycle(
         peak: f32,
         exhaust_duration: f32,
@@ -3586,7 +3652,13 @@ mod tests {
             if phi < exhaust_duration {
                 let u = phi / exhaust_duration;
                 pressure[k] = TEST_MANIFOLD_PA + 15.0 * peak * (-phi / 0.04).exp();
-                exhaust[k] = 0.5 * (1.0 - (TAU * u).cos());
+                // Kilograms a second, and the figure matters now: the valve
+                // boundary resists what crosses it. A 5 litre V8 at 3000 rpm
+                // pushes something over a tenth of a kilogram a second through
+                // one port at the top of the stroke, and the excitation this
+                // curve also drives is normalised, so the scale is free
+                // everywhere else it is read.
+                exhaust[k] = EXHAUST_PORT_PEAK_FLOW * 0.5 * (1.0 - (TAU * u).cos());
             } else if phi < ivc {
                 let u = ((phi - ivo) / (ivc - ivo)).clamp(0.0, 1.0);
                 intake[k] = 0.05 * 0.5 * (1.0 - (TAU * u).cos());
@@ -3612,12 +3684,28 @@ mod tests {
         area
     }
 
+    /// The swept volume over the same synthetic cycle, from `clearance` to
+    /// `clearance + displacement` [m^3].
+    ///
+    /// Index zero is EVO, which on a real cam is close enough to BDC to put the
+    /// piston at the bottom of the bore, so the box starts at its largest and
+    /// halves its way up twice a cycle.
+    fn synthetic_volume(clearance: f32, displacement: f32) -> [f32; CYCLE_TABLE] {
+        let mut volume = [0.0f32; CYCLE_TABLE];
+        for (k, v) in volume.iter_mut().enumerate() {
+            let phi = k as f32 / CYCLE_TABLE as f32;
+            *v = clearance + 0.5 * displacement * (1.0 + (2.0 * TAU * phi).cos());
+        }
+        volume
+    }
+
     fn loaded_snapshot() -> EngineSnapshot {
         let (cylinder_pressure, exhaust_port_flow, intake_port_flow) =
             synthetic_cycle(4.0e5, 240.0 / 720.0);
         // Matching the windows `synthetic_cycle` opens its ports over.
         let exhaust_valve_area = synthetic_valve(0.0, 240.0 / 720.0, 4.5e-4);
         let intake_valve_area = synthetic_valve(200.0 / 720.0, 260.0 / 720.0, 7.0e-4);
+        let cylinder_volume = synthetic_volume(6.2e-5, 6.2e-4);
         EngineSnapshot {
             rpm: 3_000.0,
             blowdown_delta: [4.0e5; MAX_CYLINDERS],
@@ -3646,6 +3734,7 @@ mod tests {
             intake_port_flow,
             exhaust_valve_area,
             intake_valve_area,
+            cylinder_volume,
             exhaust_manifold_pressure: TEST_MANIFOLD_PA,
             exhaust_cutout: false,
             anti_lag: false,
@@ -4363,7 +4452,7 @@ mod tests {
         // areas — the per-cylinder blowdown, intake flow and primary
         // temperature arrays, eighteen scalars and one padded bool. Every byte
         // accounted for is a byte that is not a pointer.
-        let expected = 5 * CYCLE_TABLE * 4 + 3 * MAX_CYLINDERS * 4 + 18 * 4 + 4;
+        let expected = 6 * CYCLE_TABLE * 4 + 3 * MAX_CYLINDERS * 4 + 18 * 4 + 4;
         assert_eq!(std::mem::size_of::<EngineSnapshot>(), expected);
     }
 
@@ -4397,6 +4486,7 @@ mod tests {
             intake_port_flow: [f32::NAN; CYCLE_TABLE],
             exhaust_valve_area: [f32::NAN; CYCLE_TABLE],
             intake_valve_area: [f32::NEG_INFINITY; CYCLE_TABLE],
+            cylinder_volume: [f32::NAN; CYCLE_TABLE],
             exhaust_manifold_pressure: f32::NAN,
             exhaust_cutout: false,
             anti_lag: false,
@@ -5330,55 +5420,101 @@ mod tests {
 
     // -- the valve boundary --------------------------------------------------
 
+    /// Frequencies the valve boundary is probed at across the audio band.
+    const VALVE_PROBE_HZ: [f32; 9] = [
+        30.0, 60.0, 125.0, 250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 8_000.0,
+    ];
+
+    /// Walks cylinder zero's valve through one cycle at 3000 rpm and reports,
+    /// for each of [`VALVE_PROBE_HZ`], the weakest reflection it ever presents,
+    /// alongside the fraction of the cycle the valve spent on its seat.
+    fn valve_reflection_floor(synth: &mut EngineSynth) -> ([f32; 9], f32) {
+        let cycle_samples = (FS / (3_000.0 / 120.0)) as usize;
+        let mut floor = [1.0f32; 9];
+        let mut seated = 0usize;
+        let mut buffer = [0.0f32; 2];
+        for _ in 0..cycle_samples {
+            synth.render(&mut buffer, 2);
+            if !synth.network.valve_helmholtz_hz(0).is_finite() {
+                seated += 1;
+            }
+            for (slot, &hz) in floor.iter_mut().zip(VALVE_PROBE_HZ.iter()) {
+                *slot = slot.min(synth.network.valve_reflection_at(0, hz));
+            }
+        }
+        (floor, seated as f32 / cycle_samples as f32)
+    }
+
     #[test]
     fn the_valve_opens_the_head_of_the_runner_once_a_cycle() {
-        // The claim the Transit-Time Decision Rule used to stand in for, made
-        // directly: the head of a primary is a rigid end while the valve is on
-        // its seat and a real area step while it is off it, and the reflection
-        // there is the two-pipe result for the areas involved,
+        // The head of a primary is rigid while the valve is on its seat, and
+        // the valve is on its seat for most of the cycle.
+        let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
+        synth.set_snapshot(&loaded_snapshot());
+        render(&mut synth, 48_000);
+        let (_, seated) = valve_reflection_floor(&mut synth);
+
+        // A four-stroke exhaust valve is off its seat for something like a
+        // third of the cycle and shut for the rest.
+        let open_fraction = 1.0 - seated;
+        assert!(
+            (0.15..0.55).contains(&open_fraction),
+            "the valve was open for {open_fraction:.2} of the cycle"
+        );
+    }
+
+    #[test]
+    fn the_open_valve_keeps_the_low_end_and_takes_the_midrange() {
+        // The reason the cylinder is modelled and not just its port area. A
+        // box the wave cannot compress is a wall, so a long wave arriving at a
+        // fully lifted valve turns round almost intact; the same valve swallows
+        // the band its own gap and volume resonate at, somewhere in the middle.
         //
-        //     r = (A_pipe - A_valve) / (A_pipe + A_valve)
-        //
-        // A rule that scaled that reflection on a speed schedule was hiding the
-        // absence of the lift curve; with the curve in the snapshot there is
-        // nothing left for it to hide.
+        // An area step, r = (A_p - A_v) / (A_p + A_v), gets this backwards in
+        // the place it costs most. It is flat, so whatever it takes out of the
+        // midrange it takes out of 30 Hz too — and at full lift on this header
+        // that is a quarter of every bounce, a third of every cycle, which is
+        // an exhaust with no rumble left in it.
         let config = SynthConfig::cross_plane_v8(FS);
         let pipe_area = config.exhaust.primaries[0].area as f32;
         let mut synth = EngineSynth::new(config);
         synth.set_snapshot(&loaded_snapshot());
         render(&mut synth, 48_000);
+        let (floor, _) = valve_reflection_floor(&mut synth);
 
-        // Follow cylinder zero's valve through one whole cycle at 3000 rpm.
-        let cycle_samples = (FS / (3_000.0 / 120.0)) as usize;
-        let (mut shut, mut widest) = (0usize, 1.0f32);
-        let mut buffer = [0.0f32; 2];
-        for _ in 0..cycle_samples {
-            synth.render(&mut buffer, 2);
-            let r = synth.network.valve_reflection(0);
-            if r > 0.999 {
-                shut += 1;
-            }
-            widest = widest.min(r);
-        }
-
-        // A four-stroke exhaust valve is off its seat for something like a
-        // third of the cycle and shut for the rest.
-        let open_fraction = 1.0 - shut as f32 / cycle_samples as f32;
+        // The bottom of the band comes back off this boundary all cycle.
         assert!(
-            (0.15..0.55).contains(&open_fraction),
-            "the valve was open for {open_fraction:.2} of the cycle"
+            floor[0] > 0.85,
+            "the valve bled 30 Hz away: |r| fell to {:.3}",
+            floor[0]
+        );
+        // The absorption is above it, and it is deep.
+        let deepest = floor[1..8].iter().cloned().fold(1.0f32, f32::min);
+        assert!(
+            deepest < 0.7,
+            "the cylinder absorbed nothing in the midrange: |r| only fell to {deepest:.3}"
+        );
+        // And it is the midrange that is absorbed, not the band underneath it —
+        // which is the difference between a pipe with an engine on the end of
+        // it and a pipe with a hole in the end of it.
+        assert!(
+            floor[0] > deepest + 0.15,
+            "the valve took as much from 30 Hz ({:.3}) as from its own band ({deepest:.3})",
+            floor[0]
         );
 
-        // And at full lift the reflection is the area ratio, not a schedule.
+        // The flat area step this replaced would have done the same at 30 Hz as
+        // it did at 500, which is the whole complaint against it.
         let peak_area = loaded_snapshot()
             .exhaust_valve_area
             .iter()
             .cloned()
             .fold(0.0f32, f32::max);
-        let expected = (pipe_area - peak_area) / (pipe_area + peak_area);
+        let area_step = (pipe_area - peak_area) / (pipe_area + peak_area);
         assert!(
-            (widest - expected).abs() < 0.05,
-            "widest reflection {widest:.3}, area ratio says {expected:.3}"
+            floor[0] > area_step + 0.2,
+            "the cylinder load reflects {:.3} at 30 Hz, the area step {area_step:.3}",
+            floor[0]
         );
     }
 

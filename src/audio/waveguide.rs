@@ -384,56 +384,284 @@ impl ViscothermalLoss {
 // Valve-end termination
 // ---------------------------------------------------------------------------
 
-/// Acoustic boundary condition at the exhaust valve end of a primary runner.
+/// Acoustic boundary condition at the valve end of a runner: the cylinder.
 ///
-/// Models the interface between the cylinder combustion chamber and the exhaust runner.
-/// When the exhaust valve is shut ($A_v = 0$), the boundary is acoustically rigid
-/// with pressure reflection coefficient $r = +1.0$. As the valve opens with effective
-/// area $A_v$, the reflection coefficient glides according to:
+/// A runner is terminated at one end by a junction and at the other by a valve,
+/// and what that valve is a boundary *to* is the cylinder. Off its seat it is
+/// not a hole into free space, it is a short constriction opening into a closed
+/// box with a piston for one wall, and the three things that box and that gap
+/// do to an arriving wave are the whole of this type.
 ///
-/// $$r = \frac{A_p - A_v}{A_p + A_v}$$
+/// **The gap has mass.** Gas has to be accelerated through the curtain between
+/// the valve and its seat, and an aperture of effective area $A_v$ carries an
+/// inertance
 ///
-/// allowing wave energy to transmit into the cylinder cavity. Blowdown excitation
-/// pulses are injected into the forward path at this boundary:
+/// ```text
+/// M = rho * L_eff / A_v,     L_eff = 2 * FLANGED_END_CORRECTION * sqrt(A_v / pi)
+/// ```
 ///
-/// $$p^+ = p_{\text{excitation}} + r \cdot p^-$$
+/// the end correction counted twice because an aperture in a wall loads air on
+/// both of its faces. It has no length of its own worth the name; all of it is
+/// end correction.
+///
+/// **The cylinder has stiffness.** A box of volume $V$ that is short against
+/// the wavelength does not propagate, it compresses, with acoustic compliance
+///
+/// ```text
+/// C = V / (rho c^2)
+/// ```
+///
+/// **The gap resists.** Gas crossing the curtain at mean velocity $v$ costs
+/// $\tfrac{1}{2} \rho v^2$ of head, and differentiating that against volume
+/// flow leaves an acoustic resistance
+///
+/// ```text
+/// R = rho v / A_v = mdot / A_v^2
+/// ```
+///
+/// which the density drops straight out of: the port's own mass flow and the
+/// area it is crossing are enough.
+///
+/// In series those are a Helmholtz resonator hung on the end of the pipe,
+///
+/// ```text
+///                   Z_L(s) - Z_p                          1
+/// r(s) = ---------------------------- ,   Z_L(s) = R + sM + ---- ,   Z_p = rho c / A_p
+///                   Z_L(s) + Z_p                           sC
+/// ```
+///
+/// and multiplying through by $sC$ puts it in the form a biquad runs:
+///
+/// ```text
+///         s^2 MC + sC (R - Z_p) + 1
+/// r(s) = ---------------------------
+///         s^2 MC + sC (R + Z_p) + 1
+/// ```
+///
+/// # What that buys, and what the area ratio cost
+///
+/// Read the limits off it. At DC the compliance is infinitely stiff, the
+/// numerator and denominator are both 1, and $r = +1$: **a long wave sees a
+/// rigid end however far the valve is lifted**, because a box it cannot
+/// compress is a wall. At Nyquist the inertance blocks, and $r \to +1$ again.
+/// In between, at
+///
+/// ```text
+/// f_H = 1 / (2 pi sqrt(MC))
+/// ```
+///
+/// the reactances cancel and $r = (R - Z_p) / (R + Z_p)$, which for a gap
+/// resisting anything like the pipe's own impedance is somewhere near zero —
+/// the load swallows what lands on it. So the cylinder is an absorber with a
+/// *notch*, not a broadband sink, and the notch moves: $V$ shrinks by an order
+/// of magnitude as the piston comes up the bore under an open exhaust valve, so
+/// $f_H$ sweeps upward through the midrange once every cycle and no standing
+/// pattern survives it.
+///
+/// Shutting the valve needs no special case. $A_v \to 0$ sends $M \to \infty$,
+/// which sends both quadratics to $s^2 MC$ and $r$ to $+1$ at every frequency:
+/// the boundary goes rigid on its own, the way the metal does.
+///
+/// The thing this replaces was the two-pipe step for the two areas,
+/// $r = (A_p - A_v)/(A_p + A_v)$, a real number applied flat across the band.
+/// That says an open valve leads to a pipe of area $A_v$ running away forever,
+/// and it is wrong in the one place it matters most: it throws away 40% of
+/// every wave *at 20 Hz*, where a real cylinder returns essentially all of it.
+/// A third of every cycle spent bleeding the bottom of the band out of the
+/// runners is an engine with no rumble left in it — and, because the loss was
+/// flat, it took no more out of the midrange than out of the bottom, so what
+/// survived was the hollow two-tone of a tube with nothing damping its middle.
+///
+/// Blowdown is injected into the forward path here, ahead of the reflection:
+///
+/// ```text
+/// p+ = p_excitation + r{p-}
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct ValveTermination {
     pipe_area: f32,
-    reflection: f32,
+    sample_rate: f32,
+    /// $\rho c / A_p$, the pipe's own characteristic impedance [Pa s/m^3].
+    pipe_impedance: f32,
+    density: f32,
+    speed_of_sound: f32,
+    /// The load as last set, kept so [`Self::reflection_at`] can report the
+    /// curve the biquad is actually running rather than an idealisation of it.
+    resistance: f32,
+    inertance: f32,
+    compliance: f32,
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    z1: f32,
+    z2: f32,
 }
 
+/// Effective area below which the valve counts as seated [m^2].
+///
+/// A square micrometre. Under it the inertance of the gap is large enough that
+/// the boundary is rigid to well past Nyquist anyway, and the divide by $A_v^2$
+/// in the resistance stops being worth doing in single precision.
+const SEATED_AREA: f32 = 1e-9;
+
 impl ValveTermination {
-    /// Constructs a valve termination for a pipe of area $A_p$ [m^2].
-    pub fn new(pipe_area: f64) -> Self {
-        Self {
+    /// A valve at the head of a pipe of area $A_p$ [m^2], seated, in air.
+    ///
+    /// Call [`Self::tune`] before use: the gas the runner is carrying decides
+    /// the impedance every term here is measured against.
+    pub fn new(sample_rate: f32, pipe_area: f64) -> Self {
+        let mut valve = Self {
             pipe_area: pipe_area.max(1e-7) as f32,
-            reflection: 1.0,
+            sample_rate: sample_rate.max(1.0),
+            pipe_impedance: 1.0,
+            density: 1.2,
+            speed_of_sound: 343.0,
+            resistance: 0.0,
+            inertance: 0.0,
+            compliance: 0.0,
+            b0: 1.0,
+            b1: 0.0,
+            b2: 0.0,
+            a1: 0.0,
+            a2: 0.0,
+            z1: 0.0,
+            z2: 0.0,
+        };
+        valve.tune(1.4, 287.0, 293.0);
+        valve
+    }
+
+    /// Retunes to the gas in the pipe: `gamma` [-], `gas_constant` [J/(kg K)]
+    /// and `temperature` [K].
+    ///
+    /// Density is taken at [`REFERENCE_PRESSURE_PA`] like every other mean-flow
+    /// quantity in the network, so a hot runner is a light one.
+    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
+        let t = temperature.max(1.0);
+        self.speed_of_sound = speed_of_sound(gamma, gas_constant, t);
+        self.density = REFERENCE_PRESSURE_PA / (gas_constant.max(1.0) * t);
+        self.pipe_impedance = self.density * self.speed_of_sound / self.pipe_area;
+    }
+
+    /// Sets the cylinder behind the valve this sample:
+    /// - `effective_area`: `C_d` times the curtain area at the seat [m^2].
+    /// - `cylinder_volume`: the space enclosed above the piston [m^3].
+    /// - `port_mass_flow`: gas crossing the valve, either direction [kg/s].
+    pub fn set_load(&mut self, effective_area: f64, cylinder_volume: f64, port_mass_flow: f64) {
+        let av = (effective_area.max(0.0) as f32).min(1.0);
+        if av <= SEATED_AREA {
+            self.resistance = 0.0;
+            self.inertance = f32::INFINITY;
+            self.compliance = 0.0;
+            self.set_rigid();
+            return;
+        }
+        let radius = (av / std::f32::consts::PI).sqrt();
+        let length = 2.0 * crate::audio::radiation::FLANGED_END_CORRECTION as f32 * radius;
+        self.inertance = self.density * length / av;
+        let volume = (cylinder_volume as f32).max(1e-9);
+        self.compliance =
+            volume / (self.density * self.speed_of_sound * self.speed_of_sound).max(1e-9);
+        self.resistance = (port_mass_flow.abs() as f32) / (av * av);
+
+        // Bilinear, unwarped. The transform is exact at DC, which is the limit
+        // this boundary has to hold — a rigid end at the bottom of the band is
+        // the whole point — and `f_H` sits in the midrange at any sample rate
+        // worth running, far enough below Nyquist that the warping there is
+        // under a percent.
+        let k = 2.0 * self.sample_rate;
+        let k2 = k * k;
+        let mc = self.inertance * self.compliance;
+        let quad = mc * k2;
+        let lead = self.compliance * k;
+        let minus = lead * (self.resistance - self.pipe_impedance);
+        let plus = lead * (self.resistance + self.pipe_impedance);
+        let d0 = quad + plus + 1.0;
+        if !d0.is_finite() || d0.abs() < 1e-20 {
+            self.set_rigid();
+            return;
+        }
+        let inv = 1.0 / d0;
+        self.b0 = (quad + minus + 1.0) * inv;
+        self.b1 = (2.0 - 2.0 * quad) * inv;
+        self.b2 = (quad - minus + 1.0) * inv;
+        self.a1 = (2.0 - 2.0 * quad) * inv;
+        self.a2 = (quad - plus + 1.0) * inv;
+        if !(self.b0.is_finite()
+            && self.b1.is_finite()
+            && self.b2.is_finite()
+            && self.a1.is_finite()
+            && self.a2.is_finite())
+        {
+            self.set_rigid();
         }
     }
 
-    /// Updates the reflection coefficient from the valve effective flow area $A_v$ [m^2].
-    pub fn set_effective_area(&mut self, effective_area: f64) {
-        let av = effective_area.max(0.0) as f32;
-        let ap = self.pipe_area;
-        self.reflection = if av <= 1e-9 {
-            1.0
-        } else {
-            ((ap - av) / (ap + av)).clamp(-1.0, 1.0)
-        };
+    /// Puts the boundary back to the seated case: unity at every frequency.
+    #[inline]
+    fn set_rigid(&mut self) {
+        self.b0 = 1.0;
+        self.b1 = 0.0;
+        self.b2 = 0.0;
+        self.a1 = 0.0;
+        self.a2 = 0.0;
     }
 
-    /// Reflection coefficient currently in effect [-].
-    pub fn reflection(&self) -> f32 {
-        self.reflection
+    /// Magnitude of the reflection this load presents at `hz` [-].
+    ///
+    /// Evaluated on the analogue prototype rather than the discrete filter, so
+    /// it reads the same at any sample rate. Unity at DC by construction.
+    pub fn reflection_at(&self, hz: f32) -> f32 {
+        if !self.inertance.is_finite() {
+            return 1.0;
+        }
+        let w = std::f32::consts::TAU * hz.max(0.0);
+        let real = 1.0 - w * w * self.inertance * self.compliance;
+        let num_imag = w * self.compliance * (self.resistance - self.pipe_impedance);
+        let den_imag = w * self.compliance * (self.resistance + self.pipe_impedance);
+        let num = (real * real + num_imag * num_imag).sqrt();
+        let den = (real * real + den_imag * den_imag).sqrt();
+        if den < 1e-30 {
+            1.0
+        } else {
+            (num / den).min(1.0)
+        }
+    }
+
+    /// Frequency at which the gap's mass and the cylinder's stiffness cancel [Hz].
+    ///
+    /// Infinite while the valve is seated, which is the honest answer: there is
+    /// no resonance because there is no aperture.
+    pub fn helmholtz_hz(&self) -> f32 {
+        let mc = self.inertance * self.compliance;
+        if !mc.is_finite() || mc <= 0.0 {
+            return f32::INFINITY;
+        }
+        1.0 / (std::f32::consts::TAU * mc.sqrt())
+    }
+
+    /// Clears the filter's memory and reseats the valve.
+    pub fn reset(&mut self) {
+        self.z1 = 0.0;
+        self.z2 = 0.0;
+        self.set_load(0.0, 1e-4, 0.0);
     }
 
     /// Computes the forward-travelling wave entering the runner:
     /// - `excitation`: blowdown pressure pulse injected at the port [Pa].
     /// - `returning_wave`: backward wave arriving at the valve boundary ($p^-(0)$) [Pa].
     #[inline(always)]
-    pub fn step(&self, excitation: f32, returning_wave: f32) -> f32 {
-        excitation + self.reflection() * returning_wave
+    pub fn step(&mut self, excitation: f32, returning_wave: f32) -> f32 {
+        // Transposed direct form II: one multiply-add per coefficient and no
+        // history of the input, so a coefficient that moves between samples
+        // moves the filter rather than reinterpreting what it already stored.
+        let x = returning_wave;
+        let y = self.b0 * x + self.z1;
+        self.z1 = self.b1 * x - self.a1 * y + self.z2;
+        self.z2 = self.b2 * x - self.a2 * y;
+        excitation + y
     }
 }
 
@@ -1925,7 +2153,7 @@ impl ExhaustNetwork {
                 stations.primary(i),
             );
             prim.set_steepening(0.20);
-            let valve = ValveTermination::new(spec.area);
+            let valve = ValveTermination::new(sample_rate, spec.area);
             primaries.push(prim);
             valves.push(valve);
         }
@@ -2089,6 +2317,12 @@ impl ExhaustNetwork {
         for (i, p) in self.primaries.iter_mut().enumerate() {
             p.tune(gamma, gas_constant, stations.primary(i));
         }
+        // The valve is a boundary on the same gas the primary behind it is
+        // carrying, and every term of its load is measured against that pipe's
+        // impedance, so it retunes with the pipe and not separately.
+        for (i, v) in self.valves.iter_mut().enumerate() {
+            v.tune(gamma, gas_constant, stations.primary(i));
+        }
         for coll in &mut self.collectors {
             coll.tune(gamma, gas_constant, stations.collector);
         }
@@ -2195,15 +2429,32 @@ impl ExhaustNetwork {
         total / cyls.len() as f32
     }
 
-    /// Reflection coefficient currently at a cylinder's valve end [-].
-    pub fn valve_reflection(&self, cylinder: usize) -> f32 {
-        self.valves[cylinder.min(self.valves.len() - 1)].reflection()
+    /// Magnitude of the reflection at a cylinder's valve end at `hz` [-].
+    ///
+    /// Takes a frequency because the answer is a function of one: the cylinder
+    /// behind an open valve reflects the bottom of the band and absorbs its own
+    /// Helmholtz band, and a single number for "the reflection" would have to
+    /// pick one of those and call it the other.
+    pub fn valve_reflection_at(&self, cylinder: usize, hz: f32) -> f32 {
+        self.valves[cylinder.min(self.valves.len() - 1)].reflection_at(hz)
     }
 
-    /// Updates valve effective flow areas for all cylinders.
-    pub fn set_valve_areas(&mut self, valve_areas: &[f64]) {
-        for (v, &area) in self.valves.iter_mut().zip(valve_areas.iter()) {
-            v.set_effective_area(area);
+    /// Frequency the cylinder behind a valve resonates at [Hz].
+    pub fn valve_helmholtz_hz(&self, cylinder: usize) -> f32 {
+        self.valves[cylinder.min(self.valves.len() - 1)].helmholtz_hz()
+    }
+
+    /// Sets the cylinder each valve opens into, for all cylinders.
+    ///
+    /// Areas [m^2], volumes [m^3] and port mass flows [kg/s], one per cylinder
+    /// and in the same order the taps were declared.
+    pub fn set_valve_loads(&mut self, areas: &[f64], volumes: &[f64], flows: &[f64]) {
+        for (i, v) in self.valves.iter_mut().enumerate() {
+            v.set_load(
+                areas.get(i).copied().unwrap_or(0.0),
+                volumes.get(i).copied().unwrap_or(1e-4),
+                flows.get(i).copied().unwrap_or(0.0),
+            );
         }
     }
 
@@ -2350,6 +2601,9 @@ impl ExhaustNetwork {
     pub fn reset(&mut self) {
         for p in &mut self.primaries {
             p.reset();
+        }
+        for v in &mut self.valves {
+            v.reset();
         }
         for coll in &mut self.collectors {
             coll.reset();

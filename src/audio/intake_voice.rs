@@ -21,7 +21,7 @@
 
 use crate::audio::filters::speed_of_sound;
 use crate::audio::radiation::Mouth;
-use crate::audio::waveguide::{ScatteringJunction, ValveTermination, WaveguidePipe, SMOOTH_WALL};
+use crate::audio::waveguide::{ScatteringJunction, WaveguidePipe, SMOOTH_WALL};
 use crate::physics::plumbing::{IntakeSystem, ThrottleLayout};
 
 /// Reference ambient temperature for intake air [K].
@@ -245,13 +245,74 @@ pub fn scatter_throttle_restriction(
     (p1_minus, p2_minus)
 }
 
+/// Area-step boundary at the intake valve end of a runner.
+///
+/// Rigid on the seat, and off it the two-pipe result for the runner area $A_p$
+/// against the valve's effective area $A_v$:
+///
+/// ```text
+/// r = (A_p - A_v) / (A_p + A_v)
+/// ```
+///
+/// applied flat across the band. This is what the exhaust side used to do, and
+/// it is not what a cylinder is: see
+/// [`ValveTermination`](crate::audio::waveguide::ValveTermination), which loads
+/// the runner with the gap's inertance and the cylinder's compliance instead,
+/// and holds the bottom of the band where an area step bleeds it away.
+///
+/// The induction side has not been moved onto that load yet. It is a bigger
+/// change here than on the exhaust: a runner damped by nothing but its valve —
+/// smooth walls, and a bellmouth that keeps its reflection because air drawn
+/// *in* arrives without a shear layer to shed — rings hard the moment that
+/// valve stops absorbing, and the plenum tuning is calibrated against this
+/// boundary. Moving it wants its own measurements.
+#[derive(Debug, Clone, Copy)]
+pub struct PortAreaStep {
+    pipe_area: f32,
+    reflection: f32,
+}
+
+impl PortAreaStep {
+    /// A boundary at the head of a runner of area $A_p$ [m^2], seated.
+    pub fn new(pipe_area: f64) -> Self {
+        Self {
+            pipe_area: pipe_area.max(1e-7) as f32,
+            reflection: 1.0,
+        }
+    }
+
+    /// Sets the valve's effective flow area $A_v$ [m^2].
+    pub fn set_effective_area(&mut self, effective_area: f64) {
+        let av = effective_area.max(0.0) as f32;
+        let ap = self.pipe_area;
+        self.reflection = if av <= 1e-9 {
+            1.0
+        } else {
+            ((ap - av) / (ap + av)).clamp(-1.0, 1.0)
+        };
+    }
+
+    /// Reflection coefficient currently in effect [-].
+    pub fn reflection(&self) -> f32 {
+        self.reflection
+    }
+
+    /// Computes the forward-travelling wave entering the runner:
+    /// - `excitation`: pressure pulse injected at the port [Pa].
+    /// - `returning_wave`: backward wave arriving at the boundary ($p^-(0)$) [Pa].
+    #[inline(always)]
+    pub fn step(&self, excitation: f32, returning_wave: f32) -> f32 {
+        excitation + self.reflection() * returning_wave
+    }
+}
+
 /// 1D digital waveguide network representing the complete intake system.
 #[derive(Debug, Clone)]
 pub struct IntakeNetwork {
     /// Intake runners (one per cylinder).
     runners: Vec<WaveguidePipe>,
     /// Valve boundary conditions at the cylinder ports.
-    valves: Vec<ValveTermination>,
+    valves: Vec<PortAreaStep>,
     /// Junction where all runners meet the central plenum cavity.
     plenum_junction: Option<ScatteringJunction>,
     /// Central plenum cavity duct.
@@ -333,7 +394,7 @@ impl IntakeNetwork {
                 pipe.set_wall_enhancement(SMOOTH_WALL);
                 runners.push(pipe);
             }
-            valves.push(ValveTermination::new(spec.area));
+            valves.push(PortAreaStep::new(spec.area));
         }
 
         // 2. Single throttle path (plenum, airbox, snorkel, mouth)
