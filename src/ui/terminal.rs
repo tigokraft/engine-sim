@@ -55,7 +55,8 @@ use ratatui::widgets::{
 use ratatui::{Frame, Terminal};
 
 use crate::audio::AudioScope;
-use crate::bench::EnginePreset;
+use crate::bench::{DynoMode, EnginePreset};
+use crate::physics::control::{LimiterCut, LimiterMode};
 use crate::physics::engine_block::ManifoldMode;
 use crate::ui::spectrum::SpectrumAnalyzer;
 use crate::ui::telemetry::{Command, Telemetry};
@@ -307,6 +308,14 @@ pub struct Dashboard {
     last_frame: Instant,
     /// Set once the driver has asked to quit.
     quitting: bool,
+    /// Active screen layout arrangement.
+    pub layout_mode: LayoutMode,
+    /// Currently focused pane index for keyboard control.
+    pub active_pane_idx: usize,
+    /// Assigned views for each pane slot (up to 4 panes).
+    pub panes: [ViewPane; 4],
+    /// Cylinder currently targeted by cylinder health inspection commands.
+    pub selected_cylinder: usize,
 }
 
 impl Default for Dashboard {
@@ -333,6 +342,53 @@ impl Dashboard {
             fps: 0.0,
             last_frame: Instant::now(),
             quitting: false,
+            layout_mode: LayoutMode::Single,
+            active_pane_idx: 0,
+            panes: [
+                ViewPane::DynoCell,
+                ViewPane::CombustionLab,
+                ViewPane::EcuTuning,
+                ViewPane::ThermalFluids,
+            ],
+            selected_cylinder: 0,
+        }
+    }
+
+    /// Cycles through screen layout modes.
+    pub fn cycle_layout_mode(&mut self) {
+        self.layout_mode = match self.layout_mode {
+            LayoutMode::Single => LayoutMode::SplitVertical,
+            LayoutMode::SplitVertical => LayoutMode::SplitHorizontal,
+            LayoutMode::SplitHorizontal => LayoutMode::TripleWide,
+            LayoutMode::TripleWide => LayoutMode::QuadGrid,
+            LayoutMode::QuadGrid => LayoutMode::Single,
+        };
+        self.clamp_active_pane();
+    }
+
+    /// Cycles focus to the next pane.
+    pub fn cycle_active_pane(&mut self) {
+        let count = self.layout_mode.pane_count();
+        self.active_pane_idx = (self.active_pane_idx + 1) % count;
+    }
+
+    /// Cycles focus to the previous pane.
+    pub fn cycle_active_pane_prev(&mut self) {
+        let count = self.layout_mode.pane_count();
+        self.active_pane_idx = (self.active_pane_idx + count - 1) % count;
+    }
+
+    /// Sets the view for the currently focused pane.
+    pub fn set_active_pane_view(&mut self, view: ViewPane) {
+        if self.active_pane_idx < self.panes.len() {
+            self.panes[self.active_pane_idx] = view;
+        }
+    }
+
+    fn clamp_active_pane(&mut self) {
+        let count = self.layout_mode.pane_count();
+        if self.active_pane_idx >= count {
+            self.active_pane_idx = 0;
         }
     }
 
@@ -423,6 +479,57 @@ impl Dashboard {
             }
             KeyCode::Char(' ') => Some(Command::ToggleCut),
             KeyCode::Char('m') | KeyCode::Char('M') => Some(Command::ToggleMute),
+            KeyCode::Char('v') | KeyCode::Char('V') => {
+                self.cycle_layout_mode();
+                None
+            }
+            KeyCode::Tab => {
+                self.cycle_active_pane();
+                None
+            }
+            KeyCode::BackTab => {
+                self.cycle_active_pane_prev();
+                None
+            }
+            KeyCode::F(1) => {
+                self.set_active_pane_view(ViewPane::DynoCell);
+                None
+            }
+            KeyCode::F(2) => {
+                self.set_active_pane_view(ViewPane::CombustionLab);
+                None
+            }
+            KeyCode::F(3) => {
+                self.set_active_pane_view(ViewPane::EcuTuning);
+                None
+            }
+            KeyCode::F(4) => {
+                self.set_active_pane_view(ViewPane::ThermalFluids);
+                None
+            }
+            KeyCode::F(5) => {
+                self.set_active_pane_view(ViewPane::NvhOrders);
+                None
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') => Some(Command::TriggerDynoPull),
+            KeyCode::Char('h') | KeyCode::Char('H') => Some(Command::ToggleRpmHold),
+            KeyCode::Char('+') | KeyCode::Char('=') => Some(Command::AdjustHeldRpm(100.0)),
+            KeyCode::Char('-') | KeyCode::Char('_') => Some(Command::AdjustHeldRpm(-100.0)),
+            KeyCode::Char('j') | KeyCode::Char('J') => Some(Command::TrimSpark(1.0)),
+            KeyCode::Char('k') | KeyCode::Char('K') => Some(Command::TrimSpark(-1.0)),
+            KeyCode::Char('u') | KeyCode::Char('U') => Some(Command::TrimAfr(0.2)),
+            KeyCode::Char('i') | KeyCode::Char('I') => Some(Command::TrimAfr(-0.2)),
+            KeyCode::Char('r') | KeyCode::Char('R') => Some(Command::ResetTrims),
+            KeyCode::Char('l') | KeyCode::Char('L') => Some(Command::CycleLimiterMode),
+            KeyCode::Char('c') | KeyCode::Char('C') => Some(Command::CycleLimiterCut),
+            KeyCode::Char('z') | KeyCode::Char('Z') => {
+                let count = self.telemetry.cylinders.max(1);
+                self.selected_cylinder = (self.selected_cylinder + 1) % count;
+                None
+            }
+            KeyCode::Char('x') | KeyCode::Char('X') => {
+                Some(Command::ToggleCylinder(self.selected_cylinder))
+            }
             KeyCode::Char(c @ '1'..='9') => {
                 let index = (c as u8 - b'1') as usize;
                 (index < self.presets.len()).then_some(Command::SelectPreset(index))
@@ -488,51 +595,37 @@ impl Dashboard {
         ])
         .areas(area);
 
-        // The left column is fixed: its contents are readouts of a known width,
-        // and letting them stretch would only add whitespace. Everything that
-        // benefits from more room — the diagrams — is on the right.
-        let [left, right] =
-            Layout::horizontal([Constraint::Length(46), Constraint::Min(0)]).areas(body);
-
-        // The engine list is sized to the catalogue rather than fixed: adding a
-        // preset should lengthen the panel, not silently clip the last row off
-        // the bottom of it.
-        let engine_rows = self.presets.len() as u16 + 2;
-        let [tacho, pedal, manifold, vitals, presets] = Layout::vertical([
-            Constraint::Length(7),
-            Constraint::Length(5),
-            Constraint::Length(6),
-            Constraint::Min(6),
-            Constraint::Length(engine_rows),
-        ])
-        .areas(left);
-
-        let [pv, curves, audio] = Layout::vertical([
-            Constraint::Percentage(42),
-            Constraint::Percentage(30),
-            Constraint::Min(9),
-        ])
-        .areas(right);
-
         self.draw_header(frame, header);
-        self.draw_tacho(frame, tacho);
-        self.draw_pedal(frame, pedal);
-        self.draw_manifold(frame, manifold);
-        self.draw_vitals(frame, vitals);
-        self.draw_presets(frame, presets);
-        self.draw_pv(frame, pv);
-        self.draw_curves(frame, curves);
-        self.draw_audio(frame, audio);
+
+        let pane_areas = self.layout_mode.split(body);
+        let count = pane_areas.len();
+        for (i, &pane_area) in pane_areas.iter().enumerate() {
+            let view = self.panes[i % self.panes.len()];
+            let is_active = i == (self.active_pane_idx % count);
+            self.draw_pane(frame, pane_area, i, view, is_active);
+        }
+
         self.draw_footer(frame, footer);
     }
 
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
         let t = &self.telemetry;
 
+        let active_num = (self.active_pane_idx % self.layout_mode.pane_count()) + 1;
         let mut spans = vec![
             Span::styled(
                 format!(" {} ", t.preset_name),
                 Style::default().fg(Color::Black).bg(ACCENT).bold(),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!(" [{}] ", self.layout_mode.label()),
+                Style::default().fg(Color::Black).bg(COOL).bold(),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!(" PANE {active_num} "),
+                Style::default().fg(Color::Black).bg(LIVE).bold(),
             ),
             Span::raw("  "),
             Span::styled(t.preset_spec.clone(), Style::default().fg(LABEL)),
@@ -589,6 +682,609 @@ impl Dashboard {
                 .alignment(Alignment::Right),
             inner,
         );
+    }
+
+    /// Draws one test cell view pane.
+    fn draw_pane(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        pane_idx: usize,
+        view: ViewPane,
+        is_active: bool,
+    ) {
+        let border_color = if is_active { ACCENT } else { FRAME_COLOR };
+        let title_color = if is_active { ACCENT } else { LABEL };
+        let title = format!(
+            " [{}] {} · {} {}",
+            pane_idx + 1,
+            view.title(),
+            view.f_key(),
+            if is_active { "◄ ACTIVE" } else { "" }
+        );
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color))
+            .title(Span::styled(title, Style::default().fg(title_color).bold()));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        if inner.width < 10 || inner.height < 4 {
+            return;
+        }
+
+        match view {
+            ViewPane::DynoCell => self.draw_view_dyno_cell(frame, inner),
+            ViewPane::CombustionLab => self.draw_view_combustion_lab(frame, inner),
+            ViewPane::EcuTuning => self.draw_view_ecu_tuning(frame, inner),
+            ViewPane::ThermalFluids => self.draw_view_thermal_fluids(frame, inner),
+            ViewPane::NvhOrders => self.draw_view_nvh_orders(frame, inner),
+        }
+    }
+
+    /// View 1: Dyno Test Cell Console.
+    fn draw_view_dyno_cell(&self, frame: &mut Frame, area: Rect) {
+        if area.width < 72 {
+            let [top, bottom] = Layout::vertical([
+                Constraint::Length(14.min(area.height / 2)),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+            self.draw_dyno_controls_compact(frame, top);
+            self.draw_curves(frame, bottom);
+        } else {
+            let [left, right] =
+                Layout::horizontal([Constraint::Length(46), Constraint::Min(0)]).areas(area);
+
+            let [tacho, dyno_box, pedal_box, manifold_box, vitals_box] = Layout::vertical([
+                Constraint::Length(7),
+                Constraint::Length(5),
+                Constraint::Length(4),
+                Constraint::Length(6),
+                Constraint::Min(4),
+            ])
+            .areas(left);
+
+            self.draw_tacho(frame, tacho);
+            self.draw_dyno_absorber_status(frame, dyno_box);
+            self.draw_pedal(frame, pedal_box);
+            self.draw_manifold(frame, manifold_box);
+            self.draw_vitals(frame, vitals_box);
+
+            let presets_len = (self.presets.len() as u16 + 2).min(area.height.saturating_sub(8));
+            let [curves, presets] =
+                Layout::vertical([Constraint::Min(8), Constraint::Length(presets_len)])
+                    .areas(right);
+            self.draw_curves(frame, curves);
+            self.draw_presets(frame, presets);
+        }
+    }
+
+    fn draw_dyno_absorber_status(&self, frame: &mut Frame, area: Rect) {
+        let t = &self.telemetry;
+        let block = panel("DYNO ABSORBER");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let (mode_str, mode_color, detail) = match t.dyno_mode {
+            DynoMode::FreeRev => (
+                "FREE REV",
+                LIVE,
+                "Inertia + aerodynamic windage load".to_string(),
+            ),
+            DynoMode::RpmHold { target_rpm } => (
+                "RPM HOLD",
+                WARN,
+                format!(
+                    "Target: {:>5.0} rpm · Absorber: {:>4.0} N·m",
+                    target_rpm, t.dyno_absorber_torque
+                ),
+            ),
+            DynoMode::SweepPull {
+                start_rpm,
+                rate_rpm_s,
+            } => (
+                "SWEEP PULL",
+                HOT,
+                format!(
+                    "WOT Ramp: {:>4.0}→{:.0} @ {:>3.0} rpm/s",
+                    start_rpm, t.redline, rate_rpm_s
+                ),
+            ),
+            DynoMode::Motoring { target_rpm } => (
+                "MOTORING",
+                COOL,
+                format!(
+                    "Spun to {:>5.0} rpm · Motoring: {:>4.0} N·m",
+                    target_rpm, t.dyno_absorber_torque
+                ),
+            ),
+        };
+
+        let rows = vec![
+            TextLine::from(vec![
+                Span::styled("Mode: ", Style::default().fg(LABEL)),
+                Span::styled(
+                    format!(" {mode_str} "),
+                    Style::default().fg(Color::Black).bg(mode_color).bold(),
+                ),
+                Span::styled(
+                    format!("  {:>5.0} N·m", t.dyno_absorber_torque),
+                    Style::default().fg(LIVE),
+                ),
+            ]),
+            TextLine::from(Span::styled(detail, Style::default().fg(INK))),
+            TextLine::from(Span::styled(
+                "[P] Sweep Pull   [H] RPM Hold   [+/-] Target",
+                Style::default().fg(LABEL),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(rows), inner);
+    }
+
+    fn draw_dyno_controls_compact(&self, frame: &mut Frame, area: Rect) {
+        let block = panel("DYNO SPEED & CONTROLS");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let [tacho, status] =
+            Layout::vertical([Constraint::Length(7), Constraint::Min(0)]).areas(inner);
+
+        self.draw_tacho(frame, tacho);
+        self.draw_dyno_absorber_status(frame, status);
+    }
+
+    /// View 2: Combustion & Indicator Lab.
+    fn draw_view_combustion_lab(&self, frame: &mut Frame, area: Rect) {
+        if area.width < 75 {
+            let [pv, vitals] =
+                Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
+                    .areas(area);
+            self.draw_pv(frame, pv);
+            self.draw_combustion_diagnostics(frame, vitals);
+        } else if area.width >= 115 {
+            let [pv, diag, vitals] = Layout::horizontal([
+                Constraint::Min(40),
+                Constraint::Length(38),
+                Constraint::Length(36),
+            ])
+            .areas(area);
+            self.draw_pv(frame, pv);
+            self.draw_combustion_diagnostics(frame, diag);
+            self.draw_vitals(frame, vitals);
+        } else {
+            let [pv, vitals] =
+                Layout::horizontal([Constraint::Min(40), Constraint::Length(38)]).areas(area);
+            self.draw_pv(frame, pv);
+            self.draw_combustion_diagnostics(frame, vitals);
+        }
+    }
+
+    fn draw_combustion_diagnostics(&self, frame: &mut Frame, area: Rect) {
+        let t = &self.telemetry;
+        let block = panel("INDICATOR DIAGNOSTICS");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let lpp_color = if (12.0..=16.0).contains(&t.lpp_deg_atdc) {
+            LIVE
+        } else if t.lpp_deg_atdc < 12.0 {
+            WARN
+        } else {
+            COOL
+        };
+        let lpp_label = if (12.0..=16.0).contains(&t.lpp_deg_atdc) {
+            "MBT Optimal"
+        } else if t.lpp_deg_atdc < 12.0 {
+            "Early / Knock"
+        } else {
+            "Late / Loss"
+        };
+
+        let fmep = (t.imep - t.bmep).max(0.0);
+        let mech_eff = if t.imep > 1e3 {
+            (t.bmep / t.imep * 100.0).clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+
+        let rows = vec![
+            vital(
+                "Peak Pressure",
+                format!("{:>7.1} bar", t.peak_pressure / 1e5),
+                HOT,
+            ),
+            vital(
+                "Peak Loc (LPP)",
+                format!("{:>5.1}° ATDC", t.lpp_deg_atdc),
+                lpp_color,
+            ),
+            vital("  LPP Timing", format!("{:>12}", lpp_label), lpp_color),
+            vital(
+                "IMEP (Indicated)",
+                format!("{:>7.2} bar", t.imep / 1e5),
+                INK,
+            ),
+            vital("BMEP (Brake)", format!("{:>7.2} bar", t.bmep / 1e5), INK),
+            vital("FMEP (Friction)", format!("{:>7.2} bar", fmep / 1e5), INK),
+            vital("Mechanical η_m", format!("{:>7.1} %", mech_eff), LIVE),
+            vital(
+                "Volumetric η_v",
+                format!("{:>7.1} %", t.volumetric_efficiency * 100.0),
+                COOL,
+            ),
+            vital("BSFC", format!("{:>5.0} g/kWh", t.bsfc_g_kwh), INK),
+            vital(
+                "Knock Integral",
+                format!("{:>7.3}", t.knock_integral),
+                if t.knock_integral > 0.8 { HOT } else { INK },
+            ),
+            vital(
+                "Autoignition",
+                if t.knocking { "DETONATION" } else { "Normal" },
+                if t.knocking { HOT } else { LIVE },
+            ),
+        ];
+        frame.render_widget(Paragraph::new(rows), inner);
+    }
+
+    /// View 3: ECU Tuning & Calibration Bench.
+    fn draw_view_ecu_tuning(&self, frame: &mut Frame, area: Rect) {
+        let t = &self.telemetry;
+        let [top, bottom] =
+            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+
+        let [spark_card, fuel_card] =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(top);
+
+        let [limiter_card, cyl_card] =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(bottom);
+
+        // --- Spark Card ---
+        let spark_block = panel("IGNITION CALIBRATION  [J/K]");
+        let spark_inner = spark_block.inner(spark_card);
+        frame.render_widget(spark_block, spark_card);
+
+        let slider_w = spark_inner.width.saturating_sub(14).clamp(10, 30) as usize;
+        let spark_slider = slider_gauge(-15.0, 15.0, t.spark_trim, slider_w);
+        let spark_rows = vec![
+            vital(
+                "Net Advance",
+                format!("{:>6.1}° BTDC", t.spark_advance_deg),
+                LIVE,
+            ),
+            vital(
+                "Knock Retard",
+                format!("-{:>5.1}°", t.knock_retard_deg),
+                if t.knock_retard_deg > 0.1 { WARN } else { INK },
+            ),
+            vital("Manual Trim", format!("{:>+6.1}°", t.spark_trim), ACCENT),
+            TextLine::from(vec![
+                Span::styled("-15° ", Style::default().fg(LABEL)),
+                Span::styled(
+                    format!("[{spark_slider}]"),
+                    Style::default().fg(ACCENT).bold(),
+                ),
+                Span::styled(" +15°", Style::default().fg(LABEL)),
+            ]),
+            TextLine::from(Span::styled(
+                "Keys: [J] +1° Advance   [K] -1° Retard",
+                Style::default().fg(INK),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(spark_rows), spark_inner);
+
+        // --- Fuel Card ---
+        let fuel_block = panel("FUELLING CALIBRATION  [U/I/R]");
+        let fuel_inner = fuel_block.inner(fuel_card);
+        frame.render_widget(fuel_block, fuel_card);
+
+        let afr_slider_w = fuel_inner.width.saturating_sub(14).clamp(10, 30) as usize;
+        let afr_slider = slider_gauge(-3.0, 3.0, t.afr_trim, afr_slider_w);
+        let fuel_rows = vec![
+            vital("Target AFR", format!("{:>6.2}:1", t.actual_afr), LIVE),
+            vital("Stoichiometric", " 14.70:1", INK),
+            vital("Manual Trim", format!("{:>+6.2}", t.afr_trim), ACCENT),
+            TextLine::from(vec![
+                Span::styled("-3.0 ", Style::default().fg(LABEL)),
+                Span::styled(
+                    format!("[{afr_slider}]"),
+                    Style::default().fg(ACCENT).bold(),
+                ),
+                Span::styled(" +3.0", Style::default().fg(LABEL)),
+            ]),
+            TextLine::from(Span::styled(
+                "Keys: [U] +0.2 Lean  [I] -0.2 Rich  [R] Reset",
+                Style::default().fg(INK),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(fuel_rows), fuel_inner);
+
+        // --- Limiter Card ---
+        let lim_block = panel("REV LIMITER  [L/C]");
+        let lim_inner = lim_block.inner(limiter_card);
+        frame.render_widget(lim_block, limiter_card);
+
+        let lim_mode_str = match t.limiter_mode {
+            LimiterMode::HardCut => "HARD CUT (All Cylinders)",
+            LimiterMode::SoftCut => "SOFT PROGRESSIVE CUT",
+            LimiterMode::RotatingStutter => "ROTATING STUTTER",
+        };
+        let lim_cut_str = match t.limiter_cut {
+            LimiterCut::Spark => "SPARK CUT (Backfire)",
+            LimiterCut::Fuel => "FUEL CUT (Clean)",
+            LimiterCut::None => "NONE",
+        };
+        let lim_rows = vec![
+            vital("Redline Ceiling", format!("{:>6.0} rpm", t.redline), HOT),
+            vital("Pattern Mode", lim_mode_str, LIVE),
+            vital("Cut Type", lim_cut_str, ACCENT),
+            vital(
+                "Intervention",
+                if t.limiter { "CUT ACTIVE" } else { "Inactive" },
+                if t.limiter { WARN } else { INK },
+            ),
+            TextLine::from(Span::styled(
+                "Keys: [L] Cycle Mode   [C] Cycle Cut Type",
+                Style::default().fg(INK),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(lim_rows), lim_inner);
+
+        // --- Cylinder Health Matrix Card ---
+        let cyl_block = panel("CYLINDER HEALTH MATRIX  [Z/X]");
+        let cyl_inner = cyl_block.inner(cyl_card);
+        frame.render_widget(cyl_block, cyl_card);
+
+        let num_cyls = t.cylinders.max(1);
+        let mut cyl_rows = Vec::new();
+        for i in 0..num_cyls {
+            let is_sel = i == (self.selected_cylinder % num_cyls);
+            let health = t.cylinder_health.get(i).copied().unwrap_or_default();
+            let cursor = if is_sel { "▶" } else { " " };
+            let spark_badge = if health.spark_ok {
+                Span::styled(
+                    " SPARK:OK ",
+                    Style::default().fg(Color::Black).bg(LIVE).bold(),
+                )
+            } else {
+                Span::styled(
+                    " NO SPARK ",
+                    Style::default().fg(Color::White).bg(HOT).bold(),
+                )
+            };
+            let fuel_badge = if health.fuel_ok {
+                Span::styled(
+                    " INJ:OK ",
+                    Style::default().fg(Color::Black).bg(LIVE).bold(),
+                )
+            } else {
+                Span::styled(
+                    " NO FUEL ",
+                    Style::default().fg(Color::White).bg(HOT).bold(),
+                )
+            };
+            cyl_rows.push(TextLine::from(vec![
+                Span::styled(
+                    format!("{cursor} Cyl {:>2}: ", i + 1),
+                    if is_sel {
+                        Style::default().fg(ACCENT).bold()
+                    } else {
+                        Style::default().fg(LABEL)
+                    },
+                ),
+                spark_badge,
+                Span::raw(" "),
+                fuel_badge,
+            ]));
+        }
+        cyl_rows.push(TextLine::from(Span::styled(
+            "Keys: [Z] Select Cyl   [X] Fault / Restore",
+            Style::default().fg(INK),
+        )));
+        frame.render_widget(Paragraph::new(cyl_rows), cyl_inner);
+    }
+
+    /// View 4: Thermal & Fluid Circuits.
+    fn draw_view_thermal_fluids(&self, frame: &mut Frame, area: Rect) {
+        let t = &self.telemetry;
+        let [top, bottom] =
+            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+
+        let [tree_card, warmup_card] =
+            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(top);
+
+        let [oil_card, egt_card] =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(bottom);
+
+        // Thermocouple tree
+        let tree_block = panel("THERMOCOUPLE TREE");
+        let tree_inner = tree_block.inner(tree_card);
+        frame.render_widget(tree_block, tree_card);
+
+        let coolant_col = if t.coolant_c() > 105.0 {
+            HOT
+        } else if t.coolant_c() > 75.0 {
+            LIVE
+        } else {
+            COOL
+        };
+        let oil_col = if t.oil_c() > 115.0 {
+            HOT
+        } else if t.oil_c() > 80.0 {
+            LIVE
+        } else {
+            COOL
+        };
+        let head_col = if t.head_c() > 120.0 { HOT } else { INK };
+
+        let stat_str = if t.coolant_c() >= 85.0 {
+            "OPEN (Radiator Cooling)"
+        } else {
+            "CLOSED (Block Bypass)"
+        };
+
+        let tree_rows = vec![
+            vital(
+                "Coolant Bulk",
+                format!("{:>5.1} °C ({:>5.1} K)", t.coolant_c(), t.coolant_k),
+                coolant_col,
+            ),
+            vital(
+                "  Thermostat",
+                stat_str,
+                if t.coolant_c() >= 85.0 { LIVE } else { COOL },
+            ),
+            vital(
+                "Oil Gallery",
+                format!("{:>5.1} °C ({:>5.1} K)", t.oil_c(), t.oil_k),
+                oil_col,
+            ),
+            vital(
+                "Cylinder Head Metal",
+                format!("{:>5.1} °C ({:>5.1} K)", t.head_c(), t.head_k),
+                head_col,
+            ),
+        ];
+        frame.render_widget(Paragraph::new(tree_rows), tree_inner);
+
+        // Warmup status
+        let warmup_block = panel("THERMAL SOAK");
+        let warmup_inner = warmup_block.inner(warmup_card);
+        frame.render_widget(warmup_block, warmup_card);
+
+        let warm_pct = ((t.coolant_c() - 20.0) / 70.0).clamp(0.0, 1.0);
+        let [gauge_area, note_area] =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(warmup_inner);
+
+        frame.render_widget(
+            Gauge::default()
+                .gauge_style(
+                    Style::default()
+                        .fg(if warm_pct >= 0.95 { LIVE } else { COOL })
+                        .bg(Color::Rgb(38, 42, 48)),
+                )
+                .ratio(warm_pct)
+                .label(Span::styled(
+                    format!("{:.0} % Warm", warm_pct * 100.0),
+                    Style::default().fg(Color::White).bold(),
+                )),
+            gauge_area,
+        );
+        frame.render_widget(
+            Paragraph::new(TextLine::from(Span::styled(
+                if warm_pct >= 0.95 {
+                    "ENGINE THERMALLY SOAKED"
+                } else {
+                    "COLD START ENRICHMENT ACTIVE"
+                },
+                Style::default().fg(if warm_pct >= 0.95 { LIVE } else { WARN }),
+            ))),
+            note_area,
+        );
+
+        // Lubrication circuit
+        let oil_block = panel("LUBRICATION CIRCUIT");
+        let oil_inner = oil_block.inner(oil_card);
+        frame.render_widget(oil_block, oil_card);
+
+        let [gauge_bar, vitals_area] =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(oil_inner);
+
+        let p_ratio = (t.oil_pressure_bar / 6.5).clamp(0.0, 1.0);
+        frame.render_widget(
+            Gauge::default()
+                .gauge_style(Style::default().fg(LIVE).bg(Color::Rgb(38, 42, 48)))
+                .ratio(p_ratio)
+                .label(Span::styled(
+                    format!(
+                        "{:.2} bar ({:.0} psi)",
+                        t.oil_pressure_bar,
+                        t.oil_pressure_psi()
+                    ),
+                    Style::default().fg(Color::White).bold(),
+                )),
+            gauge_bar,
+        );
+        let relief_str = if t.oil_pressure_bar >= 5.4 {
+            "BLOW-OFF ACTIVE (Relief Open)"
+        } else {
+            "NORMAL GALLERY FLOW"
+        };
+        let oil_rows = vec![
+            vital(
+                "Pressure Relief",
+                relief_str,
+                if t.oil_pressure_bar >= 5.4 {
+                    WARN
+                } else {
+                    LIVE
+                },
+            ),
+            vital("Pump Drive", "Crankshaft Geared 1:1", INK),
+        ];
+        frame.render_widget(Paragraph::new(oil_rows), vitals_area);
+
+        // Exhaust thermometry
+        let egt_block = panel("EXHAUST THERMOMETRY & MODES");
+        let egt_inner = egt_block.inner(egt_card);
+        frame.render_widget(egt_block, egt_card);
+
+        let egt_rows = vec![
+            vital(
+                "Exhaust Gas (EGT)",
+                format!("{:>5.0} °C ({:>5.0} K)", t.exhaust_k - 273.15, t.exhaust_k),
+                if t.exhaust_k > 1250.0 { WARN } else { INK },
+            ),
+            vital(
+                "Port Pressure",
+                format!("{:>5.1} kPa", t.exhaust_pa / 1e3),
+                INK,
+            ),
+            vital("Acoustic Modes", manifold_modes(&t.manifold_modes), LIVE),
+        ];
+        frame.render_widget(Paragraph::new(egt_rows), egt_inner);
+    }
+
+    /// View 5: NVH & Spectral Acoustics.
+    fn draw_view_nvh_orders(&self, frame: &mut Frame, area: Rect) {
+        let t = &self.telemetry;
+        let [audio_half, nvh_half] =
+            Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(area);
+
+        self.draw_audio(frame, audio_half);
+
+        let nvh_block = panel("CRANKSHAFT HARMONIC ORDERS & ACOUSTICS");
+        let nvh_inner = nvh_block.inner(nvh_half);
+        frame.render_widget(nvh_block, nvh_half);
+
+        let crank_hz = t.rpm / 60.0;
+        let firing_hz = crank_hz * (t.cylinders as f64 / 2.0);
+        let half_order_hz = crank_hz * 0.5;
+        let sec_order_hz = crank_hz * 2.0;
+
+        let rows = vec![
+            vital(
+                "Crank 1.0th Order",
+                format!("{:>6.1} Hz ({:>4.0} rpm)", crank_hz, t.rpm),
+                LIVE,
+            ),
+            vital("Firing Fundamental", format!("{:>6.1} Hz", firing_hz), HOT),
+            vital(
+                "0.5th Subharmonic",
+                format!("{:>6.1} Hz (Cylinder Imbalance)", half_order_hz),
+                WARN,
+            ),
+            vital(
+                "2.0th Order Shake",
+                format!("{:>6.1} Hz (Secondary Inertia)", sec_order_hz),
+                COOL,
+            ),
+            vital("Acoustic Modes", manifold_modes(&t.manifold_modes), ACCENT),
+        ];
+        frame.render_widget(Paragraph::new(rows), nvh_inner);
     }
 
     /// Tachometer: a seven-segment readout over a bar that reddens at the top.
@@ -987,32 +1683,63 @@ impl Dashboard {
             .map(|p| (p.rpm, p.power * 1.341_022))
             .collect();
 
+        let pull_torque: Vec<(f64, f64)> = t
+            .last_pull
+            .as_ref()
+            .map(|p| p.points.iter().map(|pt| (pt.rpm, pt.torque)).collect())
+            .unwrap_or_default();
+        let pull_power: Vec<(f64, f64)> = t
+            .last_pull
+            .as_ref()
+            .map(|p| {
+                p.points
+                    .iter()
+                    .map(|pt| (pt.rpm, pt.power_kw * 1.341_022))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let ceiling = torque
             .iter()
             .chain(power.iter())
+            .chain(pull_torque.iter())
+            .chain(pull_power.iter())
             .fold(50.0f64, |m, &(_, y)| m.max(y))
             * 1.1;
 
         let peak_torque = t.curve.peak_torque();
         let peak_power = t.curve.peak_power();
-        let title = match (peak_torque, peak_power) {
-            (Some(tq), Some(pw)) => format!(
-                "DYNO   peak {:.0} N·m @ {:.0}   {:.0} hp @ {:.0}   {} of {} buckets measured",
-                tq.torque,
-                tq.rpm,
-                pw.power * 1.341_022,
-                pw.rpm,
-                t.curve.len(),
-                crate::ui::telemetry::CURVE_BUCKETS,
-            ),
-            _ => "DYNO   rev the engine to trace its curve".to_string(),
+        let title = if let Some(ref pull) = t.last_pull {
+            let tq_val = pull.peak_torque.map_or(0.0, |p| p.torque);
+            let pw_val = pull.peak_power.map_or(0.0, |p| p.power_kw * 1.341_022);
+            format!(
+                "DYNO PULL: {:.0} N·m · {:.0} hp (SAE CF: {:.3}) · LIVE: {:.0} N·m / {:.0} hp",
+                tq_val,
+                pw_val,
+                pull.sae_correction,
+                t.torque,
+                t.power_hp()
+            )
+        } else {
+            match (peak_torque, peak_power) {
+                (Some(tq), Some(pw)) => format!(
+                    "DYNO   peak {:.0} N·m @ {:.0}   {:.0} hp @ {:.0}   {} of {} buckets",
+                    tq.torque,
+                    tq.rpm,
+                    pw.power * 1.341_022,
+                    pw.rpm,
+                    t.curve.len(),
+                    crate::ui::telemetry::CURVE_BUCKETS,
+                ),
+                _ => "DYNO   rev or press [P] to sweep pull".to_string(),
+            }
         };
 
         // A vertical marker at the current speed, drawn as a two-point dataset
         // so it lives on the same axes as the curves.
         let cursor = vec![(t.rpm, 0.0), (t.rpm, ceiling)];
 
-        let datasets = vec![
+        let mut datasets = vec![
             Dataset::default()
                 .name("cursor")
                 .marker(Marker::Braille)
@@ -1032,6 +1759,25 @@ impl Dashboard {
                 .style(Style::default().fg(WARN))
                 .data(&power),
         ];
+
+        if !pull_torque.is_empty() {
+            datasets.push(
+                Dataset::default()
+                    .name("pull tq")
+                    .marker(Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(COOL))
+                    .data(&pull_torque),
+            );
+            datasets.push(
+                Dataset::default()
+                    .name("pull hp")
+                    .marker(Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(ACCENT))
+                    .data(&pull_power),
+            );
+        }
 
         let chart = Chart::new(datasets)
             .block(panel(&title))
@@ -1149,8 +1895,18 @@ impl Dashboard {
             ]
         };
         let mut spans = Vec::new();
-        spans.extend(key("↑/W ↓/S", "throttle"));
-        spans.extend(key("SPACE", "ignition cut · 2-step"));
+        spans.extend(key("↑/W ↓/S", "pedal"));
+        spans.extend(key("V", "layout"));
+        spans.extend(key("TAB", "pane"));
+        spans.extend(key("F1-F5", "views"));
+        spans.extend(key("P", "pull"));
+        spans.extend(key("H", "hold"));
+        spans.extend(key("+/-", "rpm"));
+        spans.extend(key("J/K", "spark"));
+        spans.extend(key("U/I", "afr"));
+        spans.extend(key("L/C", "limiter"));
+        spans.extend(key("Z/X", "cyl"));
+        spans.extend(key("SPACE", "cut"));
         spans.extend(key("1-9 / [ ]", "engine"));
         spans.extend(key(
             "M",
@@ -1163,10 +1919,27 @@ impl Dashboard {
         spans.extend(key("Q/ESC", "quit"));
 
         frame.render_widget(
-            Paragraph::new(TextLine::from(spans)).block(panel("CONTROLS")),
+            Paragraph::new(TextLine::from(spans)).block(panel("TEST CELL CONTROLS")),
             area,
         );
     }
+}
+
+/// An ASCII slider gauge for trim visualization: `[────│────█────]`.
+fn slider_gauge(min: f64, max: f64, val: f64, width: usize) -> String {
+    let span = (max - min).max(1e-3);
+    let frac = ((val - min) / span).clamp(0.0, 1.0);
+    let zero_frac = ((0.0 - min) / span).clamp(0.0, 1.0);
+    let pos = (frac * (width.saturating_sub(1) as f64)).round() as usize;
+    let zero_pos = (zero_frac * (width.saturating_sub(1) as f64)).round() as usize;
+    let mut chars: Vec<char> = vec!['─'; width];
+    if zero_pos < width {
+        chars[zero_pos] = '│';
+    }
+    if pos < width {
+        chars[pos] = '█';
+    }
+    chars.into_iter().collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1193,10 +1966,10 @@ fn badge(text: &str, fg: Color, bg: Color) -> Span<'static> {
 }
 
 /// One `label ......... value` row.
-fn vital(label: &str, value: String, colour: Color) -> TextLine<'static> {
+fn vital(label: &str, value: impl Into<String>, colour: Color) -> TextLine<'static> {
     TextLine::from(vec![
         Span::styled(format!("{label:<16}"), Style::default().fg(LABEL)),
-        Span::styled(value, Style::default().fg(colour)),
+        Span::styled(value.into(), Style::default().fg(colour)),
     ])
 }
 
@@ -1518,6 +2291,7 @@ pub fn seven_segment(value: f64, digits: usize) -> Paragraph<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physics::CylinderHealth;
     use crossterm::event::KeyEventState;
     use ratatui::backend::TestBackend;
 
@@ -1900,5 +2674,103 @@ mod tests {
                 assert!(r.width > 0 && r.height > 0);
             }
         }
+    }
+
+    #[test]
+    fn cycling_layout_modes_and_panes() {
+        let mut d = Dashboard::new();
+        assert_eq!(d.layout_mode, LayoutMode::Single);
+        assert_eq!(d.active_pane_idx, 0);
+
+        d.cycle_layout_mode();
+        assert_eq!(d.layout_mode, LayoutMode::SplitVertical);
+        d.cycle_active_pane();
+        assert_eq!(d.active_pane_idx, 1);
+        d.cycle_active_pane();
+        assert_eq!(d.active_pane_idx, 0);
+
+        d.cycle_layout_mode();
+        assert_eq!(d.layout_mode, LayoutMode::SplitHorizontal);
+        d.cycle_layout_mode();
+        assert_eq!(d.layout_mode, LayoutMode::TripleWide);
+        d.cycle_layout_mode();
+        assert_eq!(d.layout_mode, LayoutMode::QuadGrid);
+        d.cycle_layout_mode();
+        assert_eq!(d.layout_mode, LayoutMode::Single);
+    }
+
+    #[test]
+    fn switching_views_and_rendering_all_layouts() {
+        let mut d = Dashboard::new();
+        d.telemetry = Telemetry {
+            spark_trim: 3.0,
+            afr_trim: -0.4,
+            lpp_deg_atdc: 14.5,
+            oil_pressure_bar: 4.2,
+            dyno_absorber_torque: 350.0,
+            cylinder_health: vec![
+                CylinderHealth {
+                    spark_ok: true,
+                    fuel_ok: true,
+                },
+                CylinderHealth {
+                    spark_ok: false,
+                    fuel_ok: true,
+                },
+            ],
+            last_pull: Some(crate::bench::DynoRun {
+                points: Vec::new(),
+                peak_torque: Some(crate::bench::DynoPoint {
+                    rpm: 4500.0,
+                    torque: 420.0,
+                    power_kw: 198.0,
+                }),
+                peak_power: Some(crate::bench::DynoPoint {
+                    rpm: 6200.0,
+                    torque: 360.0,
+                    power_kw: 234.0,
+                }),
+                sae_correction: 1.025,
+            }),
+            ..Telemetry::default()
+        };
+
+        // Test each view in Single mode
+        for view in [
+            ViewPane::DynoCell,
+            ViewPane::CombustionLab,
+            ViewPane::EcuTuning,
+            ViewPane::ThermalFluids,
+            ViewPane::NvhOrders,
+        ] {
+            d.set_active_pane_view(view);
+            let s = screen(&d, 160, 50);
+            assert!(!s.is_empty());
+        }
+
+        // Test ECU tuning screen contains calibration indicators
+        d.set_active_pane_view(ViewPane::EcuTuning);
+        let ecu_screen = screen(&d, 160, 50);
+        assert!(ecu_screen.contains("IGNITION CALIBRATION"));
+        assert!(ecu_screen.contains("FUELLING CALIBRATION"));
+        assert!(ecu_screen.contains("REV LIMITER"));
+        assert!(ecu_screen.contains("CYLINDER HEALTH MATRIX"));
+
+        // Test Combustion lab contains LPP and IMEP
+        d.set_active_pane_view(ViewPane::CombustionLab);
+        let comb_screen = screen(&d, 160, 50);
+        assert!(comb_screen.contains("INDICATOR DIAGNOSTICS"));
+        assert!(comb_screen.contains("Peak Loc (LPP)"));
+        assert!(comb_screen.contains("MBT Optimal"));
+
+        // Test Dyno Cell with completed pull shows ghost overlay info
+        d.set_active_pane_view(ViewPane::DynoCell);
+        let dyno_screen = screen(&d, 160, 50);
+        assert!(dyno_screen.contains("DYNO PULL: 420 N·m · 314 hp (SAE CF: 1.025)"));
+
+        // Test QuadGrid layout renders without issue
+        d.layout_mode = LayoutMode::QuadGrid;
+        let quad_screen = screen(&d, 180, 60);
+        assert!(!quad_screen.is_empty());
     }
 }
