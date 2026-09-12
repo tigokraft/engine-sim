@@ -21,7 +21,7 @@
 
 use crate::audio::filters::speed_of_sound;
 use crate::audio::radiation::Mouth;
-use crate::audio::waveguide::{ScatteringJunction, ValveTermination, WaveguidePipe};
+use crate::audio::waveguide::{ScatteringJunction, ValveTermination, WaveguidePipe, SMOOTH_WALL};
 use crate::physics::plumbing::{IntakeSystem, ThrottleLayout};
 
 /// Reference ambient temperature for intake air [K].
@@ -32,6 +32,120 @@ pub const INTAKE_AIR_GAMMA: f32 = 1.40;
 
 /// Specific gas constant of fresh air [J/(kg K)].
 pub const INTAKE_GAS_CONSTANT: f32 = 287.0;
+
+// ---------------------------------------------------------------------------
+// The air filter
+// ---------------------------------------------------------------------------
+
+/// Specific airflow resistance of automotive filter medium [Pa s / m].
+///
+/// The quantity a resistive sheet is characterised by: the pressure it drops
+/// per unit of velocity *through the medium*. Cellulose engine-intake paper is
+/// a dense one, several hundred to a couple of thousand rayls; acoustic
+/// resistive screens, made for the job, sit at the bottom of that range.
+///
+/// It is a viscous resistance, so it is flat with frequency, and that is the
+/// point of it: unlike every other element in the tract it dissipates rather
+/// than reflects, and it does so at every frequency the tract can ring at.
+pub const FILTER_MEDIUM_RAYLS: f32 = 1_000.0;
+
+/// How much medium a pleated element folds into its face area [-].
+///
+/// A 40 mm deep pleat on a 10 mm pitch is eight times the face, and the depth
+/// is what an airbox is mostly made of. It divides the medium's resistance,
+/// because the acoustic velocity through the paper is lower than the velocity
+/// in the duct by the same factor — which is exactly why a filter can drop so
+/// little pressure and still be a filter.
+pub const FILTER_PLEAT_RATIO: f32 = 10.0;
+
+/// Resistance an element presents across the duct it sits in, normalised [-].
+///
+/// $\zeta = \frac{R_s}{n \rho c}$, the medium's resistance referred to the
+/// duct and divided by the characteristic impedance of the air in it.
+#[inline]
+pub fn filter_resistance(temperature: f32, gas_constant: f32, speed_of_sound: f32) -> f32 {
+    let rho = 101_325.0 / (gas_constant.max(1.0) * temperature.max(1.0));
+    FILTER_MEDIUM_RAYLS / (FILTER_PLEAT_RATIO * rho * speed_of_sound).max(1.0)
+}
+
+/// A resistive sheet across a duct: the air filter element.
+///
+/// # What it is for
+///
+/// Everything else in an intake tract is reactive. A runner reflects, a plenum
+/// reflects, a snorkel mouth reflects almost everything below its radiation
+/// corner, and the junctions between them conserve energy exactly. Put those
+/// together with a valve that is shut for three quarters of the cycle and the
+/// tract is very nearly a lossless resonator — which is audible as a hollow
+/// midrange comb sitting over the whole engine, and is not what an induction
+/// system sounds like, because every induction system has a filter in it.
+///
+/// # The element
+///
+/// A sheet of specific flow resistance $R_s$ drops pressure in proportion to
+/// the velocity through it and passes that velocity unchanged:
+///
+/// ```text
+/// p1 - p2 = R_s u,        u1 = u2
+/// ```
+///
+/// In travelling waves, with $\zeta = R_s / \rho c$, that is a symmetric
+/// two-port
+///
+/// ```text
+/// p1- = r p1+ + t p2-
+/// p2+ = t p1+ + r p2-
+/// r = zeta / (2 + zeta),   t = 2 / (2 + zeta)
+/// ```
+///
+/// which is transparent at $\zeta = 0$ and a rigid wall as $\zeta \to \infty$.
+/// It is not lossless at either end of that range but the middle: `r + t = 1`
+/// in pressure, so `r^2 + t^2 < 1` in power, and what is missing went into the
+/// paper as heat. That is the whole reason it is here.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResistiveSheet {
+    reflection: f32,
+    transmission: f32,
+}
+
+impl ResistiveSheet {
+    /// A sheet of normalised resistance `zeta`.
+    pub fn new(zeta: f32) -> Self {
+        let z = zeta.max(0.0);
+        Self {
+            reflection: z / (2.0 + z),
+            transmission: 2.0 / (2.0 + z),
+        }
+    }
+
+    /// Retunes for the current gas.
+    pub fn tune(&mut self, temperature: f32, gas_constant: f32, speed_of_sound: f32) {
+        *self = Self::new(filter_resistance(temperature, gas_constant, speed_of_sound));
+    }
+
+    /// Fraction of an incident wave sent back [-].
+    pub fn reflection(&self) -> f32 {
+        self.reflection
+    }
+
+    /// Fraction of an incident wave passed through [-].
+    pub fn transmission(&self) -> f32 {
+        self.transmission
+    }
+
+    /// Scatters the two waves arriving at the sheet.
+    ///
+    /// Given `p_in_plus` arriving from the engine side and `p_out_minus`
+    /// arriving from the atmosphere side, returns `(p_in_minus, p_out_plus)`:
+    /// what goes back towards the engine, and what continues outwards.
+    #[inline(always)]
+    pub fn scatter(&self, p_in_plus: f32, p_out_minus: f32) -> (f32, f32) {
+        (
+            self.reflection * p_in_plus + self.transmission * p_out_minus,
+            self.transmission * p_in_plus + self.reflection * p_out_minus,
+        )
+    }
+}
 
 /// Induction rarefaction acoustic pressure pulse at valve opening [Pa]:
 ///
@@ -144,6 +258,9 @@ pub struct IntakeNetwork {
     plenum_pipe: Option<WaveguidePipe>,
     /// Upstream airbox duct, if fitted.
     airbox_pipe: Option<WaveguidePipe>,
+    /// The element in that airbox. A box has a filter in it; that is what a box
+    /// is for, and it is the only thing in the tract that dissipates.
+    filter: Option<ResistiveSheet>,
     /// Air inlet snorkel duct, if fitted.
     snorkel_pipe: Option<WaveguidePipe>,
     /// Mouth radiation termination for single-throttle systems.
@@ -204,66 +321,88 @@ impl IntakeNetwork {
                 let mouth = Mouth::new(sample_rate, radius, intake.trumpet_flanged, c);
                 let eff_len = spec.length + mouth.end_correction() as f64;
                 let mut pipe = WaveguidePipe::new(eff_len, spec.area, sample_rate, gamma, r, temp);
+                // Cast, cold, and drawing a column rather than venting a jet:
+                // the textbook boundary layer, not the exhaust's rough one.
+                pipe.set_wall_enhancement(SMOOTH_WALL);
                 pipe.set_boundary_phase_delay(mouth.phase_delay_samples());
                 runners.push(pipe);
                 itb_mouths.push(mouth);
             } else {
-                let pipe = WaveguidePipe::new(spec.length, spec.area, sample_rate, gamma, r, temp);
+                let mut pipe =
+                    WaveguidePipe::new(spec.length, spec.area, sample_rate, gamma, r, temp);
+                pipe.set_wall_enhancement(SMOOTH_WALL);
                 runners.push(pipe);
             }
             valves.push(ValveTermination::new(spec.area));
         }
 
         // 2. Single throttle path (plenum, airbox, snorkel, mouth)
-        let (plenum_junction, plenum_pipe, airbox_pipe, snorkel_pipe, single_mouth) = if is_itb {
-            (None, None, None, None, None)
-        } else {
-            // Plenum cavity: length 0.20 m, area = volume / length
-            let plenum_len = 0.20f64;
-            let plenum_area = (intake.plenum_volume / plenum_len).max(1e-5);
-            let plenum_pipe =
-                WaveguidePipe::new(plenum_len, plenum_area, sample_rate, gamma, r, temp);
+        let (plenum_junction, plenum_pipe, airbox_pipe, filter, snorkel_pipe, single_mouth) =
+            if is_itb {
+                (None, None, None, None, None, None)
+            } else {
+                // Plenum cavity: length 0.20 m, area = volume / length
+                let plenum_len = 0.20f64;
+                let plenum_area = (intake.plenum_volume / plenum_len).max(1e-5);
+                let mut plenum_pipe =
+                    WaveguidePipe::new(plenum_len, plenum_area, sample_rate, gamma, r, temp);
+                plenum_pipe.set_wall_enhancement(SMOOTH_WALL);
 
-            // Scattering junction: N runners + 1 plenum pipe
-            let mut junction_areas = Vec::with_capacity(n_cyl + 1);
-            for r in &runners {
-                junction_areas.push(r.area() as f64);
-            }
-            junction_areas.push(plenum_area);
-            let plenum_junction = ScatteringJunction::from_areas(&junction_areas);
+                // Scattering junction: N runners + 1 plenum pipe
+                let mut junction_areas = Vec::with_capacity(n_cyl + 1);
+                for r in &runners {
+                    junction_areas.push(r.area() as f64);
+                }
+                junction_areas.push(plenum_area);
+                let plenum_junction = ScatteringJunction::from_areas(&junction_areas);
 
-            // Airbox
-            let airbox_pipe = intake.airbox.map(|box_spec| {
-                WaveguidePipe::new(box_spec.length, box_spec.area, sample_rate, gamma, r, temp)
-            });
+                // Airbox
+                let filter = intake
+                    .airbox
+                    .map(|_| ResistiveSheet::new(filter_resistance(temp, r, c)));
+                let airbox_pipe = intake.airbox.map(|box_spec| {
+                    let mut pipe = WaveguidePipe::new(
+                        box_spec.length,
+                        box_spec.area,
+                        sample_rate,
+                        gamma,
+                        r,
+                        temp,
+                    );
+                    pipe.set_wall_enhancement(SMOOTH_WALL);
+                    pipe
+                });
 
-            // Snorkel
-            let snorkel_pipe = intake.snorkel.map(|snork_spec| {
-                WaveguidePipe::new(
-                    snork_spec.length,
-                    snork_spec.area,
-                    sample_rate,
-                    gamma,
-                    r,
-                    temp,
+                // Snorkel
+                let snorkel_pipe = intake.snorkel.map(|snork_spec| {
+                    let mut pipe = WaveguidePipe::new(
+                        snork_spec.length,
+                        snork_spec.area,
+                        sample_rate,
+                        gamma,
+                        r,
+                        temp,
+                    );
+                    pipe.set_wall_enhancement(SMOOTH_WALL);
+                    pipe
+                });
+
+                // Exit mouth
+                let exit_spec = intake.snorkel.or(intake.airbox).unwrap_or_else(|| {
+                    crate::physics::plumbing::PipeSection::from_diameter(0.20, 0.070, 300.0)
+                });
+                let mouth_radius = (exit_spec.area / std::f64::consts::PI).sqrt() as f32;
+                let mouth = Mouth::new(sample_rate, mouth_radius, intake.trumpet_flanged, c);
+
+                (
+                    Some(plenum_junction),
+                    Some(plenum_pipe),
+                    airbox_pipe,
+                    filter,
+                    snorkel_pipe,
+                    Some(mouth),
                 )
-            });
-
-            // Exit mouth
-            let exit_spec = intake.snorkel.or(intake.airbox).unwrap_or_else(|| {
-                crate::physics::plumbing::PipeSection::from_diameter(0.20, 0.070, 300.0)
-            });
-            let mouth_radius = (exit_spec.area / std::f64::consts::PI).sqrt() as f32;
-            let mouth = Mouth::new(sample_rate, mouth_radius, intake.trumpet_flanged, c);
-
-            (
-                Some(plenum_junction),
-                Some(plenum_pipe),
-                airbox_pipe,
-                snorkel_pipe,
-                Some(mouth),
-            )
-        };
+            };
 
         let runner_in_0 = vec![0.0; n_cyl];
         let runner_to_plenum = vec![0.0; n_cyl];
@@ -297,6 +436,7 @@ impl IntakeNetwork {
             plenum_junction,
             plenum_pipe,
             airbox_pipe,
+            filter,
             snorkel_pipe,
             single_mouth,
             itb_mouths,
@@ -449,36 +589,71 @@ impl IntakeNetwork {
             );
             self.plenum_to_downstream = p_to_downstream;
 
-            // 5. Downstream chain: airbox -> snorkel -> mouth
-            let mut wave_forward = p_to_downstream;
-            let mut wave_backward = 0.0f32;
+            // 5. Downstream chain: filter -> airbox -> snorkel -> mouth.
+            //
+            // Every element's downstream input is its neighbour's upstream
+            // output *from this sample*, which is why both ducts are read
+            // before either is pushed. Handing each of them one shared value
+            // instead — which is what this did — feeds the snorkel its own
+            // backward wave and leaves the mouth's reflection with nowhere to
+            // go, so the one end of the tract that is open to the world never
+            // reaches the rest of it.
+            let (box_up, box_down) = match &mut self.airbox_pipe {
+                Some(p) => p.read_outputs(),
+                None => (0.0, 0.0),
+            };
+            let (snorkel_up, snorkel_down) = match &mut self.snorkel_pipe {
+                Some(p) => p.read_outputs(),
+                None => (0.0, 0.0),
+            };
+
+            // The mouth is fed by whatever duct is last in the chain, and with
+            // no ducts at all by the throttle itself.
+            let to_mouth = if self.snorkel_pipe.is_some() {
+                snorkel_down
+            } else if self.airbox_pipe.is_some() {
+                box_down
+            } else {
+                p_to_downstream
+            };
+            let (mouth_reflection, radiated) = match &mut self.single_mouth {
+                Some(mouth) => mouth.step(to_mouth),
+                None => (0.0, 0.0),
+            };
+
+            // Walking back up: what waits on the far side of each interface.
+            let past_airbox = if self.snorkel_pipe.is_some() {
+                snorkel_up
+            } else {
+                mouth_reflection
+            };
+            let past_filter = if self.airbox_pipe.is_some() {
+                box_up
+            } else {
+                past_airbox
+            };
+
+            // The element sits on the clean side of the box, so it is the first
+            // thing a wave leaving the throttle meets on its way out and the
+            // last thing a wave from the mouth meets on its way in — which is
+            // why the tract pays for it twice per round trip.
+            let (back_to_plenum, into_airbox) = match &self.filter {
+                Some(filter) => filter.scatter(p_to_downstream, past_filter),
+                None => (past_filter, p_to_downstream),
+            };
+            self.downstream_to_plenum = back_to_plenum;
 
             if let Some(airbox) = &mut self.airbox_pipe {
-                let (p_box_in, p_box_out) = airbox.read_outputs();
-                airbox.push_inputs(wave_forward, self.downstream_to_plenum);
-                wave_forward = p_box_out;
-                wave_backward = p_box_in;
+                airbox.push_inputs(into_airbox, past_airbox);
             }
-
             if let Some(snorkel) = &mut self.snorkel_pipe {
-                let (p_snork_in, p_snork_out) = snorkel.read_outputs();
-                snorkel.push_inputs(wave_forward, self.downstream_to_plenum);
-                wave_forward = p_snork_out;
-                wave_backward = p_snork_in;
+                let into_snorkel = if self.airbox_pipe.is_some() {
+                    box_down
+                } else {
+                    into_airbox
+                };
+                snorkel.push_inputs(into_snorkel, mouth_reflection);
             }
-
-            let radiated = if let Some(mouth) = &mut self.single_mouth {
-                let (refl, rad) = mouth.step(wave_forward);
-                self.downstream_to_plenum =
-                    if self.snorkel_pipe.is_some() || self.airbox_pipe.is_some() {
-                        wave_backward
-                    } else {
-                        refl
-                    };
-                rad
-            } else {
-                0.0
-            };
 
             let p_into_plenum_0 = self.plenum_scatter_out[n_cyl];
             if let Some(plenum) = &mut self.plenum_pipe {
@@ -487,6 +662,11 @@ impl IntakeNetwork {
 
             radiated
         }
+    }
+
+    /// Whether an air filter element is fitted.
+    pub fn has_filter(&self) -> bool {
+        self.filter.is_some()
     }
 
     /// Resets all internal delay lines and filters.
@@ -737,6 +917,58 @@ mod tests {
             let rad = network.step(&excitations);
             assert!(rad.is_finite());
         }
+    }
+
+    #[test]
+    fn a_resistive_sheet_absorbs_what_it_neither_passes_nor_returns() {
+        // The element is the only thing in an intake tract that dissipates.
+        // Reflection and transmission sum to one in pressure by construction,
+        // so what it costs shows up in power: `r^2 + t^2 < 1`, and the
+        // difference went into the paper as heat.
+        for zeta in [0.0f32, 0.05, 0.25, 1.0, 4.0] {
+            let sheet = ResistiveSheet::new(zeta);
+            let (r, t) = (sheet.reflection(), sheet.transmission());
+            assert!((r + t - 1.0).abs() < 1e-6, "zeta {zeta}: r + t = {}", r + t);
+            let absorbed = 1.0 - (r * r + t * t);
+            if zeta == 0.0 {
+                assert!(
+                    absorbed.abs() < 1e-6,
+                    "a transparent sheet absorbed {absorbed}"
+                );
+            } else {
+                assert!(absorbed > 0.0, "zeta {zeta} absorbed nothing");
+            }
+            // The scatter is symmetric: the element does not care which side a
+            // wave arrives from.
+            let (back, through) = sheet.scatter(1.0, 0.0);
+            let (back_r, through_r) = sheet.scatter(0.0, 1.0);
+            assert!((back - through_r).abs() < 1e-6);
+            assert!((through - back_r).abs() < 1e-6);
+        }
+
+        // The limits: transparent at zero, a rigid wall at infinity.
+        let open = ResistiveSheet::new(0.0);
+        assert!((open.transmission() - 1.0).abs() < 1e-6);
+        let blocked = ResistiveSheet::new(1.0e6);
+        assert!(blocked.reflection() > 0.999);
+    }
+
+    #[test]
+    fn a_fitted_filter_damps_the_tract_and_a_bare_trumpet_does_not() {
+        // An airbox has an element in it; that is what a box is for. A set of
+        // individual throttle bodies has bare stacks and gets none, which is
+        // also why they are the louder installation.
+        let with_box = crate::bench::EnginePreset::inline_four().intake;
+        assert!(with_box.airbox.is_some());
+        let net = IntakeNetwork::new(&with_box, 4, 48_000.0);
+        assert!(net.has_filter(), "an airbox was fitted without an element");
+
+        let mut bare = with_box.clone();
+        bare.airbox = None;
+        bare.snorkel = None;
+        bare.throttle = ThrottleLayout::IndividualBodies { bore: 0.048 };
+        let net = IntakeNetwork::new(&bare, 4, 48_000.0);
+        assert!(!net.has_filter(), "bare stacks were given a filter");
     }
 
     #[test]
