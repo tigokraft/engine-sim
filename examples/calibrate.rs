@@ -1189,16 +1189,23 @@ fn markdown(all: &[Calibrated]) -> String {
     );
     let _ = writeln!(
         out,
-        "5. **The peak nearest a primary's quarter wave is not the primary's \
-         alone.** Stretching the inline-four's primaries by half, with nothing \
-         else touched, drops it from 403 Hz to 244 Hz where strict \
-         proportionality says 269, and shortening them by a quarter puts it at \
-         428 Hz where proportionality says 537. It moves with the length, \
-         monotonically and by most of what the length says, but it is a mode of \
-         the primary *and* the taper and chain behind it — which is why the test \
-         suite asserts that it tracks the declared length to 20 % rather than \
-         asserting `c/4L`, and why a single placement tolerance does not hold \
-         across the catalogue.\n"
+        "5. **A primary's quarter wave is now a hump rather than a peak, and \
+         mostly reports as not found.** It used to be the loudest thing near its \
+         own frequency, and stretching the inline-four's primaries by half moved \
+         it bodily from 403 Hz to 244 Hz. That was a nearly lossless network \
+         talking: with the wall taking a fiftieth of the decibels `alpha` asks \
+         for, the whole run from the valve to the mouth was one resonator of \
+         enormous Q. With the loss filter tracking `alpha` and the valve opening \
+         once a cycle, a primary's loop pays about 1.4 dB a round trip and the \
+         four-into-one behind it sends most of what arrives onward. The length \
+         still reaches the sound — the band's centre of gravity moves down \
+         monotonically as the primaries are stretched, which is what the test \
+         suite now asserts — but it no longer stands up as a peak the picker can \
+         place, and the count of modes found in the table above fell across the \
+         catalogue when it stopped doing so. Whether a real header's primary is \
+         more prominent than this one is the open question, and it is a question \
+         about the enhancement factor on the wall loss, which has no \
+         derivation.\n"
     );
     let _ = writeln!(
         out,

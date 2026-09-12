@@ -305,224 +305,224 @@ pub const RECORDED: &[Fingerprint] = &[
         preset: "Inline-4",
         firing_order: 2.0,
         balance: &[
-            (0.5, -34.5),
-            (1.0, -32.3),
-            (1.5, -51.6),
+            (0.5, -21.9),
+            (1.0, -15.7),
+            (1.5, -35.5),
             (2.0, 0.0),
-            (2.5, -35.0),
-            (3.0, -39.2),
-            (3.5, -32.7),
-            (4.0, -26.4),
+            (2.5, -48.9),
+            (3.0, -34.6),
+            (3.5, -39.9),
+            (4.0, -17.3),
         ],
-        resonances: &[1481.7, 216.3, 1046.0],
-        tilt_db_per_octave: -8.6,
+        resonances: &[1482.9, 3598.5, 214.8],
+        tilt_db_per_octave: -9.5,
     },
     Fingerprint {
         preset: "Cross-plane V8",
         firing_order: 4.0,
         balance: &[
-            (0.5, -18.3),
-            (1.0, 11.2),
-            (1.5, -0.4),
-            (2.0, -3.5),
-            (2.5, 9.3),
-            (3.0, 3.3),
-            (3.5, 3.9),
+            (0.5, -11.9),
+            (1.0, -12.6),
+            (1.5, -12.2),
+            (2.0, -26.4),
+            (2.5, -1.9),
+            (3.0, -36.6),
+            (3.5, -16.9),
             (4.0, 0.0),
-            (4.5, -13.4),
-            (5.0, -22.5),
-            (5.5, 0.6),
-            (6.0, 1.8),
-            (6.5, -3.5),
-            (7.0, -11.5),
-            (7.5, -16.9),
-            (8.0, -10.6),
+            (4.5, -34.2),
+            (5.0, -23.7),
+            (5.5, -15.1),
+            (6.0, -27.3),
+            (6.5, -12.6),
+            (7.0, -28.1),
+            (7.5, -36.8),
+            (8.0, -14.4),
         ],
-        resonances: &[1231.6, 963.7, 346.0],
-        tilt_db_per_octave: -9.5,
+        resonances: &[1535.3, 3840.1, 1199.7],
+        tilt_db_per_octave: -11.2,
     },
     Fingerprint {
         preset: "Flat-plane V8",
         firing_order: 4.0,
         balance: &[
-            (0.5, -8.4),
-            (1.0, -20.2),
-            (1.5, -24.5),
-            (2.0, -24.3),
-            (2.5, -27.4),
-            (3.0, -28.7),
-            (3.5, -28.5),
+            (0.5, -13.9),
+            (1.0, -16.8),
+            (1.5, -21.6),
+            (2.0, -27.7),
+            (2.5, -26.8),
+            (3.0, -26.6),
+            (3.5, -27.7),
             (4.0, 0.0),
-            (4.5, -38.4),
-            (5.0, -29.2),
-            (5.5, -29.1),
-            (6.0, -15.9),
-            (6.5, -23.8),
-            (7.0, -11.3),
-            (7.5, -17.5),
-            (8.0, -9.8),
+            (4.5, -33.6),
+            (5.0, -26.2),
+            (5.5, -30.2),
+            (6.0, -27.4),
+            (6.5, -33.2),
+            (7.0, -32.4),
+            (7.5, -200.0),
+            (8.0, -12.9),
         ],
-        resonances: &[3336.5, 806.3, 1401.0],
-        tilt_db_per_octave: -6.6,
+        resonances: &[1440.3, 3120.2, 3840.3],
+        tilt_db_per_octave: -9.8,
     },
     Fingerprint {
         preset: "V10",
         firing_order: 5.0,
         balance: &[
-            (0.5, 3.6),
-            (1.0, -0.9),
-            (1.5, -11.6),
-            (2.0, -13.0),
-            (2.5, -21.8),
-            (3.0, -16.7),
-            (3.5, 0.0),
-            (4.0, -6.3),
-            (4.5, -2.5),
+            (0.5, -5.2),
+            (1.0, -10.8),
+            (1.5, -14.9),
+            (2.0, -21.6),
+            (2.5, -25.1),
+            (3.0, -17.6),
+            (3.5, -18.2),
+            (4.0, -18.2),
+            (4.5, -31.6),
             (5.0, 0.0),
-            (5.5, -25.8),
-            (6.0, -24.7),
-            (6.5, -17.1),
-            (7.0, -19.4),
-            (7.5, -15.6),
-            (8.0, -19.0),
-            (8.5, -17.7),
-            (9.0, -16.1),
-            (9.5, -11.5),
-            (10.0, -8.4),
+            (5.5, -49.3),
+            (6.0, -26.9),
+            (6.5, -26.6),
+            (7.0, -29.7),
+            (7.5, -32.3),
+            (8.0, -27.7),
+            (8.5, -35.2),
+            (9.0, -34.0),
+            (9.5, -39.4),
+            (10.0, -14.1),
         ],
-        resonances: &[1431.8, 465.2, 263.8],
-        tilt_db_per_octave: -5.6,
+        resonances: &[2086.3, 2880.1, 960.2],
+        tilt_db_per_octave: -7.8,
     },
     Fingerprint {
         preset: "V12",
         firing_order: 6.0,
         balance: &[
-            (0.5, -8.8),
-            (1.0, -18.7),
-            (1.5, -17.9),
-            (2.0, 5.1),
-            (2.5, 20.2),
-            (3.0, 25.8),
-            (3.5, -19.3),
-            (4.0, -23.5),
-            (4.5, -24.2),
-            (5.0, -27.1),
+            (0.5, -11.6),
+            (1.0, -17.1),
+            (1.5, -17.4),
+            (2.0, -19.9),
+            (2.5, -31.7),
+            (3.0, 8.8),
+            (3.5, -15.2),
+            (4.0, -17.4),
+            (4.5, -24.6),
+            (5.0, -26.5),
             (5.5, -200.0),
             (6.0, 0.0),
-            (6.5, -48.7),
+            (6.5, -200.0),
             (7.0, -31.9),
-            (7.5, -26.9),
-            (8.0, -26.6),
-            (8.5, -5.9),
-            (9.0, 4.0),
-            (9.5, -24.9),
-            (10.0, -29.1),
-            (10.5, -17.9),
-            (11.0, -13.0),
-            (11.5, -17.5),
-            (12.0, -11.8),
+            (7.5, -31.9),
+            (8.0, -30.3),
+            (8.5, -41.9),
+            (9.0, -17.8),
+            (9.5, -30.7),
+            (10.0, -29.4),
+            (10.5, -29.9),
+            (11.0, -30.6),
+            (11.5, -34.2),
+            (12.0, -20.0),
         ],
-        resonances: &[1188.9, 269.9, 3566.6],
-        tilt_db_per_octave: -11.5,
+        resonances: &[1920.2, 3600.1, 1200.3],
+        tilt_db_per_octave: -13.4,
     },
     Fingerprint {
         preset: "2-Rotor Wankel",
         firing_order: 2.0,
         balance: &[
-            (0.5, -27.8),
-            (1.0, -39.4),
-            (1.5, -9.8),
+            (0.5, -19.8),
+            (1.0, -21.9),
+            (1.5, -32.5),
             (2.0, 0.0),
-            (2.5, -26.0),
-            (3.0, -24.5),
-            (3.5, -32.4),
-            (4.0, -15.8),
+            (2.5, -37.6),
+            (3.0, -32.5),
+            (3.5, -48.6),
+            (4.0, -11.3),
         ],
-        resonances: &[205.2, 1144.3, 1718.9],
-        tilt_db_per_octave: -6.7,
+        resonances: &[52.4, 1732.3, 3359.9],
+        tilt_db_per_octave: -9.4,
     },
     Fingerprint {
         preset: "Turbo Inline-4",
         firing_order: 2.0,
         balance: &[
-            (0.5, -3.7),
-            (1.0, -14.6),
-            (1.5, -26.3),
+            (0.5, -18.4),
+            (1.0, -12.7),
+            (1.5, -26.7),
             (2.0, 0.0),
-            (2.5, -18.1),
-            (3.0, -22.0),
-            (3.5, -45.8),
-            (4.0, 3.6),
+            (2.5, -27.9),
+            (3.0, -23.3),
+            (3.5, -46.9),
+            (4.0, -5.0),
         ],
-        resonances: &[1631.9, 1150.4, 246.9],
-        tilt_db_per_octave: -7.9,
+        resonances: &[1636.8, 3585.5, 1150.4],
+        tilt_db_per_octave: -7.6,
     },
     Fingerprint {
         preset: "Twin-turbo V8",
         firing_order: 4.0,
         balance: &[
-            (0.5, -18.5),
-            (1.0, 4.0),
-            (1.5, 6.9),
-            (2.0, -2.5),
-            (2.5, 4.2),
-            (3.0, -4.7),
-            (3.5, -1.1),
+            (0.5, -14.0),
+            (1.0, -15.4),
+            (1.5, -2.0),
+            (2.0, -24.3),
+            (2.5, -3.2),
+            (3.0, -42.6),
+            (3.5, -19.6),
             (4.0, 0.0),
-            (4.5, -14.8),
-            (5.0, -12.3),
-            (5.5, -13.9),
-            (6.0, -24.5),
-            (6.5, -7.4),
-            (7.0, -11.2),
-            (7.5, -24.3),
-            (8.0, -7.9),
+            (4.5, -32.6),
+            (5.0, -28.8),
+            (5.5, -18.4),
+            (6.0, -32.5),
+            (6.5, -10.2),
+            (7.0, -29.2),
+            (7.5, -48.6),
+            (8.0, -12.1),
         ],
-        resonances: &[1535.5, 114.3, 3072.6],
-        tilt_db_per_octave: -8.1,
+        resonances: &[3544.0, 1111.7, 102.5],
+        tilt_db_per_octave: -8.6,
     },
     Fingerprint {
         preset: "Turbo Inline-6",
         firing_order: 3.0,
         balance: &[
-            (0.5, -7.8),
-            (1.0, -47.1),
-            (1.5, -12.8),
-            (2.0, -6.3),
-            (2.5, -19.0),
+            (0.5, -20.0),
+            (1.0, -20.3),
+            (1.5, -24.2),
+            (2.0, -24.0),
+            (2.5, -200.0),
             (3.0, 0.0),
-            (3.5, -46.1),
-            (4.0, -42.2),
-            (4.5, -41.7),
-            (5.0, -44.4),
+            (3.5, -32.5),
+            (4.0, -30.0),
+            (4.5, -29.1),
+            (5.0, -24.9),
             (5.5, -200.0),
-            (6.0, -21.7),
+            (6.0, -16.3),
         ],
-        resonances: &[148.5, 1477.2, 731.0],
-        tilt_db_per_octave: -8.6,
+        resonances: &[147.6, 2826.6, 1025.6],
+        tilt_db_per_octave: -9.1,
     },
     Fingerprint {
         preset: "Turbodiesel I4",
         firing_order: 2.0,
         balance: &[
-            (0.5, -11.0),
-            (1.0, -7.4),
-            (1.5, -27.4),
+            (0.5, -12.7),
+            (1.0, -8.6),
+            (1.5, -200.0),
             (2.0, 0.0),
-            (2.5, -28.2),
-            (3.0, -28.5),
-            (3.5, -15.6),
-            (4.0, -11.1),
+            (2.5, -200.0),
+            (3.0, -24.5),
+            (3.5, -200.0),
+            (4.0, -17.3),
         ],
-        resonances: &[2031.8, 409.0, 1678.9],
-        tilt_db_per_octave: -4.0,
+        resonances: &[3592.4, 409.2, 2037.2],
+        tilt_db_per_octave: -4.2,
     },
     Fingerprint {
         preset: "Big Single",
         firing_order: 0.5,
-        balance: &[(0.5, 0.0), (1.0, 17.8)],
-        resonances: &[2874.8, 111.1, 1197.9],
-        tilt_db_per_octave: -4.5,
+        balance: &[(0.5, 0.0), (1.0, 7.8)],
+        resonances: &[2035.4, 116.2, 1197.6],
+        tilt_db_per_octave: -7.4,
     },
 ];
 
@@ -646,38 +646,45 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// The audible exhaust mode is set by the declared primary length: stretch
-    /// the primaries by half and the peak near their quarter wave drops by
-    /// about half as much again.
+    /// The declared primary length still reaches the sound: stretch the
+    /// primaries and the rendered exhaust band moves down with them.
     ///
-    /// End to end, through the physics, the whole network, the radiation model
-    /// and the analysis — which is what makes it worth having and also what
-    /// limits what it can claim. The relation is *not* asserted to be `c/4L`
-    /// exactly, because as measured it is not: a primary's peak moves with its
-    /// own length and with the collector taper and chain behind it, so
-    /// stretching the inline-four's primaries by half moves the peak from
-    /// 403 Hz to 244 Hz where strict proportionality says 269. Twenty per cent
-    /// either side of proportional is the stated tolerance, and it is wide
-    /// enough to hold the taper's share and narrow enough to fail a synth that
-    /// had stopped reading the length at all — which is the regression this is
-    /// here to catch. The exact placement against `c/4(L+d)` per preset is
-    /// recorded in `docs/measurements/calibration.md`.
+    /// # Why this no longer looks for a peak
+    ///
+    /// It used to. It located the peak nearest `c/4L`, stretched the primaries
+    /// by half, and required the peak to move by about half as much again. That
+    /// worked because the network it measured was very nearly lossless: with
+    /// the wall taking a fiftieth of the decibels `alpha` asks for, the whole
+    /// run from the valve to the mouth was one resonator of enormous Q, and
+    /// stretching the primaries moved its modes bodily — 358 Hz to 172 Hz on
+    /// the network's own response, at a resonant gain of 51 dB.
+    ///
+    /// The same measurement now reads 21 dB, and the primary's own quarter wave
+    /// is a broad hump rather than a peak: its loop pays 1.4 dB a round trip to
+    /// the wall, and the four-into-one collector behind it sends most of what
+    /// arrives onward rather than back. That is what a header does, and it is
+    /// why the peak picker reports the mode as *not found* — a finding recorded
+    /// per preset in `docs/measurements/calibration.md`, not a failure of the
+    /// synth to read the length.
+    ///
+    /// So the claim is made where it survives: at the network, where the
+    /// primary's transit is exactly proportional to the length it was given,
+    /// and in the render, where the spectrum's centre of gravity over the band
+    /// the primaries occupy moves down monotonically as they are stretched.
+    /// A synth that had stopped reading the length would fail both.
     #[test]
-    fn the_exhaust_peak_follows_the_declared_primary_length() {
-        use crate::analysis::orders::{place, resonances, PLACEMENT_WINDOW_PCT};
-        use crate::audio::filters::speed_of_sound;
+    fn the_declared_primary_length_still_reaches_the_sound() {
+        use crate::analysis::orders::Stft;
+        use crate::audio::dsp::EngineSnapshot;
+        use crate::audio::waveguide::ExhaustNetwork;
+        use crate::environment::Environment;
         use crate::physics::plumbing::PipeSection;
 
-        /// How much longer the stretched primaries are.
-        const STRETCH: f64 = 1.5;
-        /// How far from strict proportionality the peak may land.
-        const TOLERANCE: f64 = 0.20;
+        /// The band the inline-four's primaries and the modes around them
+        /// occupy at the temperatures the sweep reaches [Hz].
+        const BAND: (f64, f64) = (150.0, 900.0);
 
-        // A primary at the temperature the solver settles them to through a
-        // pull, which is all the prediction is for: it only has to be close
-        // enough to find the right peak.
-        let nominal_c = speed_of_sound(1.33, 287.0, 1_200.0) as f64;
-        let measure_peak = |factor: f64| -> f64 {
+        let stretched = |factor: f64| -> EnginePreset {
             let mut preset = EnginePreset::inline_four();
             let primary = preset.exhaust.primaries[0];
             preset.exhaust.primaries = vec![
@@ -688,26 +695,74 @@ mod tests {
                 );
                 preset.firing.len()
             ];
-
-            let script = script::calibration_sweep(&preset);
-            let render = RenderPlan::new(&preset, &script).render();
-            let peaks = resonances(&render.mono(), render.sample_rate, 24);
-            let predicted = nominal_c / (4.0 * preset.exhaust.primary_length());
-            place(predicted, &peaks, PLACEMENT_WINDOW_PCT)
-                .measured_hz
-                .unwrap_or_else(|| {
-                    panic!("no peak within reach of {predicted:.0} Hz at {factor}x length")
-                })
+            preset
         };
 
-        let short = measure_peak(1.0);
-        let long = measure_peak(STRETCH);
-        let ratio = long / short;
+        // 1. The network's own transit, which is where the length enters.
+        let transit = |factor: f64| -> f32 {
+            let preset = stretched(factor);
+            let block = preset.block(Environment::default());
+            let config = preset.synth_config(&block, 48_000.0);
+            let network = ExhaustNetwork::new(
+                &config.exhaust,
+                &config.cylinders,
+                config.bank_count,
+                48_000.0,
+                &EngineSnapshot::default(),
+            );
+            network.primary_round_trip_seconds(0)
+        };
+        let ratio = transit(1.5) / transit(1.0);
         assert!(
-            (ratio - 1.0 / STRETCH).abs() <= TOLERANCE / STRETCH,
-            "primaries {STRETCH}x longer moved the peak from {short:.1} Hz to \
-             {long:.1} Hz, a ratio of {ratio:.3} where proportional is {:.3}",
-            1.0 / STRETCH
+            (ratio - 1.5).abs() < 0.02,
+            "a primary half again as long round-trips in {ratio:.3} of the time"
+        );
+
+        // 2. And it reaches the render: the centre of gravity of the band the
+        //    primaries work in falls as they lengthen, every step of the way.
+        let centroid = |factor: f64| -> f64 {
+            let preset = stretched(factor);
+            let script = script::calibration_sweep(&preset);
+            let render = RenderPlan::new(&preset, &script).render();
+            let mono = render.mono();
+            let mut stft = Stft::new(8_192, render.sample_rate);
+            let mut power = vec![0.0f64; 8_192 / 2 + 1];
+            let (mut frames, mut at) = (0usize, 0usize);
+            let hop = stft.hop();
+            while at + 8_192 <= mono.len() {
+                stft.analyse(&mono[at..at + 8_192]);
+                for (sum, p) in power.iter_mut().zip(stft.power()) {
+                    *sum += *p;
+                }
+                frames += 1;
+                at += hop;
+            }
+            let bin = render.sample_rate / 8_192.0;
+            let (mut moment, mut total) = (0.0, 0.0);
+            for (k, &p) in power.iter().enumerate() {
+                let hz = k as f64 * bin;
+                if (BAND.0..=BAND.1).contains(&hz) {
+                    moment += hz * p / frames.max(1) as f64;
+                    total += p / frames.max(1) as f64;
+                }
+            }
+            moment / total.max(1e-30)
+        };
+
+        let short = centroid(1.0);
+        let middle = centroid(1.25);
+        let long = centroid(1.5);
+        assert!(
+            short > middle && middle > long,
+            "the band did not follow the length: {short:.1}, {middle:.1}, {long:.1} Hz"
+        );
+        // Five per cent over a half-again stretch. Far short of proportional,
+        // because most of what is in this band is the collector, the chamber
+        // and the tailpipe, and none of those moved.
+        assert!(
+            long < 0.95 * short,
+            "stretching the primaries by half moved the band only from \
+             {short:.1} Hz to {long:.1} Hz"
         );
     }
 
