@@ -249,6 +249,33 @@ impl PhaseRing {
         table
     }
 
+    /// Downsamples a function of crank angle onto the same table.
+    ///
+    /// The companion to [`PhaseRing::downsample_from`] for quantities that are
+    /// a pure function of angle and therefore have nothing to log — valve lift
+    /// above all. Sharing the origin, the box average and the half-cell
+    /// convention is the point: a valve area table read at the phase a pressure
+    /// table is read at has to describe the same instant, or the port opens at
+    /// a different moment from the pulse that comes out of it.
+    pub fn downsample_angles_from(origin: f64, field: impl Fn(f64) -> f64) -> [f32; CYCLE_TABLE] {
+        let first = Self::cell_of(origin);
+        let mut table = [0.0f32; CYCLE_TABLE];
+        for (k, out) in table.iter_mut().enumerate() {
+            let from = k * PHASE_CELLS / CYCLE_TABLE;
+            let to = (k + 1) * PHASE_CELLS / CYCLE_TABLE;
+            let mut sum = 0.0;
+            for cell in from..to {
+                // The centre of the cell, because a cell stands for the degree
+                // it spans and the function being sampled is continuous.
+                let theta = (((first + cell) % PHASE_CELLS) as f64 + 0.5) * CYCLE_ANGLE
+                    / PHASE_CELLS as f64;
+                sum += field(theta);
+            }
+            *out = (sum / (to - from) as f64) as f32;
+        }
+        table
+    }
+
     /// Cycle mean of one field of the logged cycle.
     ///
     /// The cells are uniform in crank angle and a cycle is uniform in time at a
