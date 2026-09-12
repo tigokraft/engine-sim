@@ -26,15 +26,17 @@ The analysis is an 8192-point Hann STFT at 48 kHz: a 5.86 Hz bin, and a 17.6 Hz 
 
 | Engine | Spec | Induction | Firing order | Top resonance | Clean |
 |---|---|---|---:|---:|---|
-| [Inline-4](inline-4.md) | 2.0 L  4 cyl  11.5:1 | naturally aspirated | 2 | 314 Hz | yes |
-| [Cross-plane V8](cross-plane-v8.md) | 5.0 L  8 cyl  11.0:1 | naturally aspirated | 4 | 290 Hz | yes |
-| [Flat-plane V8](flat-plane-v8.md) | 4.5 L  8 cyl  12.5:1 | naturally aspirated | 4 | 398 Hz | yes |
-| [V10](v10.md) | 5.2 L  10 cyl  12.7:1 | naturally aspirated | 5 | 404 Hz | yes |
-| [V12](v12.md) | 6.5 L  12 cyl  11.8:1 | naturally aspirated | 6 | 730 Hz | yes |
-| [2-Rotor Wankel](2-rotor-wankel.md) | 2.6 L  4 cyl  10.0:1 | naturally aspirated | 2 | 241 Hz | yes |
-| [Turbo Inline-4](turbo-inline-4.md) | 2.0 L  4 cyl  9.6:1 | turbocharged | 2 | 384 Hz | yes |
-| [Twin-turbo V8](twin-turbo-v8.md) | 4.0 L  8 cyl  10.0:1 | turbocharged | 4 | 339 Hz | yes |
-| [Turbo Inline-6](turbo-inline-6.md) | 3.0 L  6 cyl  9.2:1 | turbocharged | 3 | 175 Hz | yes |
+| [Inline-4](inline-4.md) | 2.0 L  4 cyl  11.5:1 | naturally aspirated | 2 | 13441 Hz | yes |
+| [Cross-plane V8](cross-plane-v8.md) | 5.0 L  8 cyl  11.0:1 | roots supercharged | 4 | 13200 Hz | yes |
+| [Flat-plane V8](flat-plane-v8.md) | 4.5 L  8 cyl  12.5:1 | naturally aspirated | 4 | 12480 Hz | yes |
+| [V10](v10.md) | 5.2 L  10 cyl  12.7:1 | centrifugal supercharged | 5 | 7920 Hz | yes |
+| [V12](v12.md) | 6.5 L  12 cyl  11.8:1 | naturally aspirated | 6 | 6000 Hz | yes |
+| [2-Rotor Wankel](2-rotor-wankel.md) | 2.6 L  4 cyl  10.0:1 | naturally aspirated | 2 | 16800 Hz | yes |
+| [Turbo Inline-4](turbo-inline-4.md) | 2.0 L  4 cyl  9.6:1 | turbocharged | 2 | 1634 Hz | yes |
+| [Twin-turbo V8](twin-turbo-v8.md) | 4.0 L  8 cyl  10.0:1 | turbocharged | 4 | 9636 Hz | yes |
+| [Turbo Inline-6](turbo-inline-6.md) | 3.0 L  6 cyl  9.2:1 | turbocharged | 3 | 15360 Hz | yes |
+| [Turbodiesel I4](turbodiesel-i4.md) | 2.0 L  4 cyl  21.5:1 | turbocharged | 2 | 9869 Hz | yes |
+| [Big Single](big-single.md) | 0.7 L  1 cyl  12.0:1 | naturally aspirated | 0.5 | 18170 Hz | yes |
 
 Every engine now breathes through its own plumbing, so this column no longer reads the one muffler they all used to share and no longer lands in a narrow band. It is the most prominent peak in the sweep average and nothing more: a network of primaries, a collector and a silencer chain has modes all the way up, and which of them stands tallest is a property of that engine's pipes. Read the per-engine tables for the peaks in order rather than this one number.
 
@@ -46,12 +48,14 @@ Unlike everything else here these figures are a property of the machine that ran
 
 | Engine | `idle_hold` | `sweep_up` | `sweep_down` | `tip_in` | `overrun_cut` | `limiter_bounce` | Synth core, worst |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Inline-4 | 88x | 52x | 47x | 66x | 47x | 36x | 0.77 % |
-| Cross-plane V8 | 65x | 42x | 40x | 51x | 38x | 32x | 1.24 % |
-| Flat-plane V8 | 66x | 39x | 35x | 48x | 36x | 28x | 1.22 % |
-| V10 | 56x | 35x | 33x | 43x | 33x | 26x | 1.47 % |
-| V12 | 54x | 35x | 33x | 41x | 33x | 26x | 1.50 % |
-| 2-Rotor Wankel | 88x | 46x | 42x | 58x | 42x | 32x | 0.72 % |
-| Turbo Inline-4 | 79x | 48x | 44x | 58x | 44x | 35x | 0.98 % |
-| Twin-turbo V8 | 54x | 35x | 34x | 43x | 35x | 29x | 1.66 % |
-| Turbo Inline-6 | 75x | 45x | 40x | 53x | 41x | 32x | 1.18 % |
+| Inline-4 | 34x | 26x | 24x | 29x | 24x | 21x | 2.43 % |
+| Cross-plane V8 | 21x | 18x | 17x | 19x | 17x | 15x | 4.32 % |
+| Flat-plane V8 | 24x | 19x | 18x | 20x | 18x | 15x | 3.80 % |
+| V10 | 19x | 16x | 15x | 17x | 15x | 13x | 4.84 % |
+| V12 | 19x | 16x | 15x | 17x | 15x | 13x | 4.91 % |
+| 2-Rotor Wankel | 36x | 25x | 23x | 29x | 23x | 19x | 2.29 % |
+| Turbo Inline-4 | 33x | 25x | 24x | 28x | 24x | 21x | 2.63 % |
+| Twin-turbo V8 | 21x | 17x | 16x | 18x | 16x | 15x | 4.57 % |
+| Turbo Inline-6 | 28x | 22x | 21x | 24x | 21x | 18x | 3.18 % |
+| Turbodiesel I4 | 31x | 26x | 25x | 28x | 25x | 22x | 2.79 % |
+| Big Single | 47x | 33x | 31x | 38x | 31x | 26x | 1.54 % |
