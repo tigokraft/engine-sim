@@ -622,42 +622,6 @@ impl SnapshotSource {
         manifold_pressure /= banks;
         manifold_temperature /= banks;
 
-        // The blowdown driver per cylinder. Clamped at zero because a negative difference
-        // means the manifold is momentarily above the cylinder — reverse flow,
-        // which is a scavenging event, not an acoustic excitation.
-        let mut blowdown_delta = [0.0f32; MAX_CYLINDERS];
-        for (i, cyl) in block
-            .firing
-            .cylinders
-            .iter()
-            .enumerate()
-            .take(MAX_CYLINDERS)
-        {
-            let bank = (cyl.bank as usize) % block.exhaust_banks.len().max(1);
-            let manifold_p = block
-                .exhaust_banks
-                .get(bank)
-                .map_or(manifold_pressure, |b| b.port_pressure());
-            let evo_p = block.cylinder_evo_pressure(i);
-            blowdown_delta[i] = (evo_p - manifold_p).max(0.0) as f32;
-        }
-
-        // Instantaneous induction flux summed over the cylinders that are
-        // actually drawing. This is a *sum of instants*, not a cycle average:
-        // the intake roar is made by the individual gulps, so the value that
-        // drives it has to keep their peaks.
-        let mut cylinder_intake_flow = [0.0f32; MAX_CYLINDERS];
-        let mut intake_mass_flow = 0.0f64;
-        for (i, slot) in cylinder_intake_flow
-            .iter_mut()
-            .take(block.firing.len())
-            .enumerate()
-        {
-            let flow = block.sample_of(i).intake_flow.max(0.0);
-            *slot = flow as f32;
-            intake_mass_flow += flow;
-        }
-
         // Fuel that reaches the exhaust unburnt.
         //
         // The solver has no ignition switch: its Wiebe profile fires on every
@@ -685,6 +649,48 @@ impl SnapshotSource {
         let spark_cut = has_spark
             && (controls.spark_cut || block.ecu.dfco_tip_in || limiter_spark)
             && !limiter_fuel;
+
+        // The blowdown driver per cylinder. Clamped at zero because a negative difference
+        // means the manifold is momentarily above the cylinder — reverse flow,
+        // which is a scavenging event, not an acoustic excitation. On a cut cylinder,
+        // combustion never lit so the blowdown delta is zero.
+        let mut blowdown_delta = [0.0f32; MAX_CYLINDERS];
+        for (i, cyl) in block
+            .firing
+            .cylinders
+            .iter()
+            .enumerate()
+            .take(MAX_CYLINDERS)
+        {
+            if spark_cut || !block.ecu.is_spark_ok(i) {
+                blowdown_delta[i] = 0.0;
+                continue;
+            }
+            let bank = (cyl.bank as usize) % block.exhaust_banks.len().max(1);
+            let manifold_p = block
+                .exhaust_banks
+                .get(bank)
+                .map_or(manifold_pressure, |b| b.port_pressure());
+            let evo_p = block.cylinder_evo_pressure(i);
+            blowdown_delta[i] = (evo_p - manifold_p).max(0.0) as f32;
+        }
+
+        // Instantaneous induction flux summed over the cylinders that are
+        // actually drawing. This is a *sum of instants*, not a cycle average:
+        // the intake roar is made by the individual gulps, so the value that
+        // drives it has to keep their peaks.
+        let mut cylinder_intake_flow = [0.0f32; MAX_CYLINDERS];
+        let mut intake_mass_flow = 0.0f64;
+        for (i, slot) in cylinder_intake_flow
+            .iter_mut()
+            .take(block.firing.len())
+            .enumerate()
+        {
+            let flow = block.sample_of(i).intake_flow.max(0.0);
+            *slot = flow as f32;
+            intake_mass_flow += flow;
+        }
+
         let burned_at_evo = if spark_cut {
             0.0
         } else {
@@ -1299,6 +1305,14 @@ mod tests {
         // Ignition cut: the whole metered charge goes out unburnt.
         let cut = source.sample(&block, 4_000.0, dt, EngineControls::on_the_limiter(1.0));
         assert!(cut.spark_cut);
+        assert_eq!(
+            cut.blowdown_delta[0], 0.0,
+            "a spark cut must zero the combustion blowdown delta"
+        );
+        assert!(
+            burning.blowdown_delta[0] > 0.0,
+            "an unfired cylinder must carry positive blowdown delta"
+        );
         assert!(
             cut.unburnt_fuel_mass > 0.0,
             "a spark cut must leave fuel in the exhaust"
