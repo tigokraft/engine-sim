@@ -26,17 +26,17 @@ The analysis is an 8192-point Hann STFT at 48 kHz: a 5.86 Hz bin, and a 17.6 Hz 
 
 | Engine | Spec | Induction | Firing order | Top resonance | Clean |
 |---|---|---|---:|---:|---|
-| [Inline-4](inline-4.md) | 2.0 L  4 cyl  11.5:1 | naturally aspirated | 2 | 13441 Hz | yes |
+| [Inline-4](inline-4.md) | 2.0 L  4 cyl  11.5:1 | naturally aspirated | 2 | 1484 Hz | yes |
 | [Cross-plane V8](cross-plane-v8.md) | 5.0 L  8 cyl  11.0:1 | roots supercharged | 4 | 13200 Hz | yes |
-| [Flat-plane V8](flat-plane-v8.md) | 4.5 L  8 cyl  12.5:1 | naturally aspirated | 4 | 12480 Hz | yes |
-| [V10](v10.md) | 5.2 L  10 cyl  12.7:1 | centrifugal supercharged | 5 | 7920 Hz | yes |
+| [Flat-plane V8](flat-plane-v8.md) | 4.5 L  8 cyl  12.5:1 | naturally aspirated | 4 | 6480 Hz | yes |
+| [V10](v10.md) | 5.2 L  10 cyl  12.7:1 | centrifugal supercharged | 5 | 23280 Hz | yes |
 | [V12](v12.md) | 6.5 L  12 cyl  11.8:1 | naturally aspirated | 6 | 6000 Hz | yes |
-| [2-Rotor Wankel](2-rotor-wankel.md) | 2.6 L  4 cyl  10.0:1 | naturally aspirated | 2 | 16800 Hz | yes |
-| [Turbo Inline-4](turbo-inline-4.md) | 2.0 L  4 cyl  9.6:1 | turbocharged | 2 | 1634 Hz | yes |
-| [Twin-turbo V8](twin-turbo-v8.md) | 4.0 L  8 cyl  10.0:1 | turbocharged | 4 | 9636 Hz | yes |
-| [Turbo Inline-6](turbo-inline-6.md) | 3.0 L  6 cyl  9.2:1 | turbocharged | 3 | 15360 Hz | yes |
-| [Turbodiesel I4](turbodiesel-i4.md) | 2.0 L  4 cyl  21.5:1 | turbocharged | 2 | 9869 Hz | yes |
-| [Big Single](big-single.md) | 0.7 L  1 cyl  12.0:1 | naturally aspirated | 0.5 | 18170 Hz | yes |
+| [2-Rotor Wankel](2-rotor-wankel.md) | 2.6 L  4 cyl  10.0:1 | naturally aspirated | 2 | 53 Hz | yes |
+| [Turbo Inline-4](turbo-inline-4.md) | 2.0 L  4 cyl  9.6:1 | turbocharged | 2 | 13076 Hz | yes |
+| [Twin-turbo V8](twin-turbo-v8.md) | 4.0 L  8 cyl  10.0:1 | turbocharged | 4 | 9463 Hz | yes |
+| [Turbo Inline-6](turbo-inline-6.md) | 3.0 L  6 cyl  9.2:1 | turbocharged | 3 | 10800 Hz | yes |
+| [Turbodiesel I4](turbodiesel-i4.md) | 2.0 L  4 cyl  21.5:1 | turbocharged | 2 | 10046 Hz | yes |
+| [Big Single](big-single.md) | 0.7 L  1 cyl  12.0:1 | naturally aspirated | 0.5 | 2035 Hz | yes |
 
 Every engine now breathes through its own plumbing, so this column no longer reads the one muffler they all used to share and no longer lands in a narrow band. It is the most prominent peak in the sweep average and nothing more: a network of primaries, a collector and a silencer chain has modes all the way up, and which of them stands tallest is a property of that engine's pipes. Read the per-engine tables for the peaks in order rather than this one number.
 
@@ -48,14 +48,14 @@ Unlike everything else here these figures are a property of the machine that ran
 
 | Engine | `idle_hold` | `sweep_up` | `sweep_down` | `tip_in` | `overrun_cut` | `limiter_bounce` | Synth core, worst |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Inline-4 | 34x | 26x | 24x | 29x | 24x | 21x | 2.43 % |
-| Cross-plane V8 | 21x | 18x | 17x | 19x | 17x | 15x | 4.32 % |
-| Flat-plane V8 | 24x | 19x | 18x | 20x | 18x | 15x | 3.80 % |
-| V10 | 19x | 16x | 15x | 17x | 15x | 13x | 4.84 % |
-| V12 | 19x | 16x | 15x | 17x | 15x | 13x | 4.91 % |
-| 2-Rotor Wankel | 36x | 25x | 23x | 29x | 23x | 19x | 2.29 % |
-| Turbo Inline-4 | 33x | 25x | 24x | 28x | 24x | 21x | 2.63 % |
-| Twin-turbo V8 | 21x | 17x | 16x | 18x | 16x | 15x | 4.57 % |
-| Turbo Inline-6 | 28x | 22x | 21x | 24x | 21x | 18x | 3.18 % |
-| Turbodiesel I4 | 31x | 26x | 25x | 28x | 25x | 22x | 2.79 % |
-| Big Single | 47x | 33x | 31x | 38x | 31x | 26x | 1.54 % |
+| Inline-4 | 31x | 24x | 23x | 26x | 23x | 19x | 2.77 % |
+| Cross-plane V8 | 19x | 16x | 15x | 17x | 14x | 14x | 5.30 % |
+| Flat-plane V8 | 21x | 16x | 16x | 18x | 16x | 14x | 4.38 % |
+| V10 | 17x | 14x | 13x | 15x | 14x | 12x | 5.44 % |
+| V12 | 18x | 14x | 13x | 15x | 13x | 12x | 5.63 % |
+| 2-Rotor Wankel | 31x | 22x | 21x | 25x | 21x | 18x | 2.68 % |
+| Turbo Inline-4 | 30x | 23x | 22x | 26x | 23x | 19x | 2.95 % |
+| Twin-turbo V8 | 19x | 15x | 15x | 15x | 15x | 13x | 5.34 % |
+| Turbo Inline-6 | 26x | 20x | 19x | 22x | 19x | 17x | 3.61 % |
+| Turbodiesel I4 | 28x | 23x | 23x | 25x | 22x | 20x | 3.15 % |
+| Big Single | 41x | 29x | 27x | 34x | 28x | 24x | 1.79 % |
