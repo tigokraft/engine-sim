@@ -391,7 +391,7 @@ impl ViscothermalLoss {
 /// in the port pocket, seat compliance, and carbon coating absorb sound energy,
 /// providing $|r| \approx 0.90$. Without this baseline dissipation, a closed
 /// runner at idle or low flow rings endlessly like a hollow metal tin can.
-pub const CLOSED_VALVE_REFLECTION: f32 = 0.90;
+pub const CLOSED_VALVE_REFLECTION: f32 = 0.95;
 
 /// Acoustic boundary condition at the exhaust valve end of a primary runner.
 ///
