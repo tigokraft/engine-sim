@@ -126,6 +126,9 @@ pub fn distance_attenuation(distance: f32) -> f32 {
 /// Default pressure reflection coefficient of hard ground (asphalt/road) [-].
 pub const GROUND_REFLECTION_COEFF: f32 = 0.8;
 
+/// Cutoff frequency above which ground reflection loses specular coherence to roughness and absorption [Hz].
+pub const GROUND_ABSORPTION_CUTOFF_HZ: f32 = 2_500.0;
+
 /// Ground bounce path difference between reflected and direct paths [m]:
 ///
 /// ```text
@@ -305,6 +308,8 @@ pub struct AperturePath {
     right_directivity: OnePole,
     left_ground: DelayLine,
     right_ground: DelayLine,
+    left_ground_filter: OnePole,
+    right_ground_filter: OnePole,
     pub ground_reflection: bool,
     /// Velocity vector of the aperture [m/s] (X right, Y forward, Z up).
     pub velocity: [f32; 3],
@@ -327,6 +332,8 @@ impl AperturePath {
             right_directivity: OnePole::new(sample_rate, 0.45 * sample_rate),
             left_ground: DelayLine::with_max_delay(max_ground_samples),
             right_ground: DelayLine::with_max_delay(max_ground_samples),
+            left_ground_filter: OnePole::new(sample_rate, GROUND_ABSORPTION_CUTOFF_HZ),
+            right_ground_filter: OnePole::new(sample_rate, GROUND_ABSORPTION_CUTOFF_HZ),
             ground_reflection: true,
             velocity: [0.0, 0.0, 0.0],
         }
@@ -368,6 +375,8 @@ impl AperturePath {
         self.right_directivity.reset();
         self.left_ground.reset();
         self.right_ground.reset();
+        self.left_ground_filter.reset();
+        self.right_ground_filter.reset();
     }
 
     /// Delays one input sample by the physical path length to each ear.
@@ -404,19 +413,29 @@ impl AperturePath {
                 let delta_r_left = ground_path_difference(self.aperture.position, left_ear);
                 let delta_r_right = ground_path_difference(self.aperture.position, right_ear);
 
+                let comp = self.left_ground_filter.phase_delay_samples();
                 let d_ground_left = (1.0
-                    + path_delay_samples(delta_r_left, SPEED_OF_SOUND_AIR, self.sample_rate))
-                .clamp(1.0, self.left_ground.max_delay());
+                    + path_delay_samples(delta_r_left, SPEED_OF_SOUND_AIR, self.sample_rate)
+                    - comp)
+                    .clamp(1.0, self.left_ground.max_delay());
                 let d_ground_right = (1.0
-                    + path_delay_samples(delta_r_right, SPEED_OF_SOUND_AIR, self.sample_rate))
-                .clamp(1.0, self.right_ground.max_delay());
+                    + path_delay_samples(delta_r_right, SPEED_OF_SOUND_AIR, self.sample_rate)
+                    - comp)
+                    .clamp(1.0, self.right_ground.max_delay());
 
                 self.left_ground.push(sample);
                 self.right_ground.push(sample);
 
+                let refl_l = self
+                    .left_ground_filter
+                    .process(self.left_ground.read(d_ground_left));
+                let refl_r = self
+                    .right_ground_filter
+                    .process(self.right_ground.read(d_ground_right));
+
                 (
-                    sample + GROUND_REFLECTION_COEFF * self.left_ground.read(d_ground_left),
-                    sample + GROUND_REFLECTION_COEFF * self.right_ground.read(d_ground_right),
+                    sample + GROUND_REFLECTION_COEFF * refl_l,
+                    sample + GROUND_REFLECTION_COEFF * refl_r,
                 )
             } else {
                 (sample, sample)
@@ -1079,6 +1098,21 @@ mod tests {
         assert!(
             error < 0.03,
             "Minimum transmission frequency ({min_freq:.1} Hz) must match predicted notch ({predicted_f_notch:.1} Hz) within 3%"
+        );
+    }
+
+    #[test]
+    fn ground_reflection_absorbs_high_frequencies() {
+        // Road roughness and porous ground attenuate high-frequency specular reflections.
+        let low_mag = 1.0 / (1.0 + (200.0 / GROUND_ABSORPTION_CUTOFF_HZ).powi(2)).sqrt();
+        let high_mag = 1.0 / (1.0 + (8_000.0 / GROUND_ABSORPTION_CUTOFF_HZ).powi(2)).sqrt();
+        assert!(
+            low_mag > 0.99,
+            "ground reflection must be fully reflective at low frequencies"
+        );
+        assert!(
+            high_mag < 0.35,
+            "ground reflection must attenuate high frequencies to prevent comb ripple"
         );
     }
 }
