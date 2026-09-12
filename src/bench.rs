@@ -1147,6 +1147,41 @@ impl Driveline {
         self.throttle_target = (self.throttle_target + delta).clamp(0.0, 1.0);
     }
 
+    /// Toggles isochronous RPM hold at current engine speed.
+    pub fn toggle_rpm_hold(&mut self) {
+        match self.dyno_mode {
+            DynoMode::RpmHold { .. } => {
+                self.dyno_mode = DynoMode::FreeRev;
+                self.dyno_absorber_torque = 0.0;
+            }
+            _ => {
+                let target = (self.rpm / 100.0).round() * 100.0;
+                self.dyno_mode = DynoMode::RpmHold {
+                    target_rpm: target.clamp(self.idle, self.redline),
+                };
+            }
+        }
+    }
+
+    /// Nudges held RPM target by delta if RPM hold is active.
+    pub fn nudge_held_rpm(&mut self, delta: f64) {
+        if let DynoMode::RpmHold { target_rpm } = self.dyno_mode {
+            self.dyno_mode = DynoMode::RpmHold {
+                target_rpm: (target_rpm + delta).clamp(self.idle, self.redline),
+            };
+        }
+    }
+
+    /// Triggers an automated wide-open-throttle sweep pull to redline.
+    pub fn trigger_sweep_pull(&mut self) {
+        self.active_pull = None;
+        let start_rpm = (self.idle * 1.5).max(1800.0).min(self.redline - 500.0);
+        self.dyno_mode = DynoMode::SweepPull {
+            start_rpm,
+            rate_rpm_s: 300.0,
+        };
+    }
+
     /// Advances the flywheel one frame from the block's solved torque.
     pub fn update(&mut self, block: &EngineBlock, dt: f64) {
         match self.dyno_mode {
@@ -2292,5 +2327,39 @@ mod tests {
         // Hotter day reduces air density -> CF > 1.0
         let hot_day = sae_j1349_correction(99_000.0, 315.0);
         assert!(hot_day > 1.0);
+    }
+
+    #[test]
+    fn dyno_controls_toggle_and_sweep() {
+        let preset = EnginePreset::inline_four();
+        let mut driveline = Driveline::new(&preset);
+        driveline.rpm = 3_456.0;
+
+        driveline.toggle_rpm_hold();
+        match driveline.dyno_mode {
+            DynoMode::RpmHold { target_rpm } => {
+                assert_eq!(target_rpm, 3_500.0);
+            }
+            _ => panic!("expected RpmHold mode"),
+        }
+
+        driveline.nudge_held_rpm(100.0);
+        match driveline.dyno_mode {
+            DynoMode::RpmHold { target_rpm } => {
+                assert_eq!(target_rpm, 3_600.0);
+            }
+            _ => panic!("expected RpmHold mode with nudged target"),
+        }
+
+        driveline.toggle_rpm_hold();
+        assert_eq!(driveline.dyno_mode, DynoMode::FreeRev);
+
+        driveline.trigger_sweep_pull();
+        match driveline.dyno_mode {
+            DynoMode::SweepPull { rate_rpm_s, .. } => {
+                assert_eq!(rate_rpm_s, 300.0);
+            }
+            _ => panic!("expected SweepPull mode"),
+        }
     }
 }
