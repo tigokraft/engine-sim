@@ -79,18 +79,42 @@ pub const EXHAUST_PRANDTL_NUMBER: f32 = 0.71;
 /// Effective turbulent boundary layer enhancement factor in corrugated/hot exhaust pipe.
 ///
 /// A multiplier on the kinematic viscosity, so it is worth its square root in
-/// attenuation: four times the dissipation of a smooth-walled tube carrying
-/// quiescent gas. What it stands for is everything a header is that a
-/// laboratory tube is not — weld beads, mandrel bends, flex joints, a
-/// perforated silencer core, and a strongly pulsating turbulent flow that never
-/// lets a laminar boundary layer form.
+/// attenuation: this is $\sqrt{2} \approx 1.4$ times the dissipation of a
+/// smooth-walled tube carrying quiescent gas. What it stands for is everything a
+/// header is that a laboratory tube is not — weld beads, mandrel bends, flex
+/// joints, a perforated silencer core, and a strongly pulsating turbulent flow
+/// that never lets a laminar boundary layer form.
 ///
-/// It has no derivation, which by the rule in the plan makes it a finding
-/// rather than a setting. It stays at the value the module has always carried;
-/// what has changed is that it now means something, because
-/// [`ViscothermalLoss`] finally attenuates by the amount `alpha` asks for
-/// instead of by a fiftieth of it.
-pub const BOUNDARY_LAYER_TURBULENCE_FACTOR: f32 = 16.0;
+/// # Where the number comes from
+///
+/// Not from taste: from what a pipe measures. Sound attenuation down a hot
+/// automotive exhaust pipe of 55–65 mm bore runs about **0.2 to 0.6 dB per
+/// metre** through 250 Hz–1 kHz, which is the band an exhaust note lives in and
+/// the band a tailpipe is long enough to matter over. Against a 60 mm pipe at
+/// 800 K [`ViscothermalLoss`] puts this constant at
+///
+/// ```text
+/// factor    250 Hz   500 Hz  1000 Hz   [dB/m]
+///    1.0     0.185    0.262    0.370
+///    2.0     0.262    0.370    0.524
+///    4.0     0.370    0.524    0.741
+///   16.0     0.741    1.047    1.481
+/// ```
+///
+/// so 2 sits in the upper half of the measured band — a real header, rougher
+/// than plain Kirchhoff, and inside what anybody has ever measured off one.
+/// Sixteen is three to four times the top of it, and a tailpipe losing 1.5 dB a
+/// metre at 1 kHz strips an exhaust of everything above its firing orders. What
+/// is left standing is two or three low peaks in an otherwise empty spectrum,
+/// which is the sound of an engine heard through a wall, or from inside a can.
+///
+/// The value was not always wrong. It was chosen when [`ViscothermalLoss`]
+/// delivered a fiftieth of the `alpha` it computed, and against that filter
+/// sixteen came out near a third of Kirchhoff — quiet, but the right order.
+/// Fixing the filter multiplied what this constant buys by about seven and left
+/// the constant alone, and a calibration that outlives the bug it was
+/// calibrated against is worse than no calibration at all.
+pub const BOUNDARY_LAYER_TURBULENCE_FACTOR: f32 = 2.0;
 
 /// Wall enhancement of a duct that is smooth, cold and not full of exhaust [-].
 ///
@@ -2745,7 +2769,8 @@ mod tests {
     fn a_smooth_wall_loses_half_of_what_a_rough_one_does() {
         // The enhancement multiplies the viscosity, so it is worth its square
         // root in attenuation: an intake tract that declares itself smooth is
-        // four times less lossy than a header at the same size and gas.
+        // less lossy than a header at the same size and gas, by exactly the
+        // root of what it declares.
         let c = 343.0;
         let mut rough = ViscothermalLoss::new(0.021, 0.25, c, 1.4, 287.0, 300.0, 48_000.0);
         let mut smooth = ViscothermalLoss::new(0.021, 0.25, c, 1.4, 287.0, 300.0, 48_000.0);
