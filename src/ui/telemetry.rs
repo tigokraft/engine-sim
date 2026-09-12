@@ -43,6 +43,26 @@ pub enum Command {
     ToggleMute,
     /// Shut down: stop the stream, then the thread.
     Quit,
+    /// Set dyno loading mode directly.
+    SetDynoMode(DynoMode),
+    /// Trigger an automated dyno sweep pull.
+    TriggerDynoPull,
+    /// Toggle closed-loop RPM hold on/off at current engine RPM.
+    ToggleRpmHold,
+    /// Adjust held RPM target by delta [rev/min].
+    AdjustHeldRpm(f64),
+    /// Manual spark advance trim delta [deg].
+    TrimSpark(f64),
+    /// Manual AFR trim delta [-].
+    TrimAfr(f64),
+    /// Reset manual spark and AFR trims to 0.0.
+    ResetTrims,
+    /// Cycle rev limiter mode (Hard -> Soft -> Rotating).
+    CycleLimiterMode,
+    /// Cycle rev limiter cut type (Spark -> Fuel).
+    CycleLimiterCut,
+    /// Toggle cylinder health for cylinder index.
+    ToggleCylinder(usize),
 }
 
 /// Something that happened to the simulation which the dashboard should show.

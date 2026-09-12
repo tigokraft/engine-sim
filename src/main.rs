@@ -349,6 +349,16 @@ fn simulation_thread(
                         }
                     }
                 }
+                Ok(Command::SetDynoMode(mode)) => rig.driveline.dyno_mode = mode,
+                Ok(Command::TriggerDynoPull) => rig.driveline.trigger_sweep_pull(),
+                Ok(Command::ToggleRpmHold) => rig.driveline.toggle_rpm_hold(),
+                Ok(Command::AdjustHeldRpm(delta)) => rig.driveline.nudge_held_rpm(delta),
+                Ok(Command::TrimSpark(delta)) => rig.block.ecu.nudge_spark_trim(delta),
+                Ok(Command::TrimAfr(delta)) => rig.block.ecu.nudge_afr_trim(delta),
+                Ok(Command::ResetTrims) => rig.block.ecu.reset_trims(),
+                Ok(Command::CycleLimiterMode) => rig.block.ecu.cycle_limiter_mode(),
+                Ok(Command::CycleLimiterCut) => rig.block.ecu.cycle_limiter_cut(),
+                Ok(Command::ToggleCylinder(cyl)) => rig.block.ecu.toggle_cylinder_health(cyl),
                 Err(TryRecvError::Empty) => break,
                 // The dashboard has gone: shut down rather than run headless.
                 Err(TryRecvError::Disconnected) => quit = true,
