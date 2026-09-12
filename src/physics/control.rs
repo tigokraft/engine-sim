@@ -325,6 +325,22 @@ impl EngineControlUnit {
         }
     }
 
+    /// Cycles cylinder operational health (Healthy -> DeadPlug -> DeadInjector -> Dead -> Healthy).
+    pub fn toggle_cylinder_health(&mut self, cylinder: usize) {
+        if cylinder < MAX_CYLINDERS {
+            let current = self.cylinder_health[cylinder];
+            self.cylinder_health[cylinder] = if current.spark_ok && current.fuel_ok {
+                CylinderHealth::dead_plug()
+            } else if !current.spark_ok && current.fuel_ok {
+                CylinderHealth::dead_injector()
+            } else if current.spark_ok && !current.fuel_ok {
+                CylinderHealth::dead()
+            } else {
+                CylinderHealth::healthy()
+            };
+        }
+    }
+
     /// Returns whether cylinder `i` has working spark.
     pub fn is_spark_ok(&self, cylinder: usize) -> bool {
         self.cylinder_health
@@ -1005,5 +1021,19 @@ mod tests {
         assert_eq!(ecu.afr_trim, 0.0);
         assert_eq!(ecu.schedule_spark_advance(0.5, 3_000.0), base_adv);
         assert_eq!(ecu.target_afr(0.5, 3_000.0, 0.4), base_afr);
+    }
+
+    #[test]
+    fn cylinder_health_toggling_cycles_states() {
+        let mut ecu = EngineControlUnit::new(7_000.0);
+        assert_eq!(ecu.cylinder_health(2), CylinderHealth::healthy());
+        ecu.toggle_cylinder_health(2);
+        assert_eq!(ecu.cylinder_health(2), CylinderHealth::dead_plug());
+        ecu.toggle_cylinder_health(2);
+        assert_eq!(ecu.cylinder_health(2), CylinderHealth::dead_injector());
+        ecu.toggle_cylinder_health(2);
+        assert_eq!(ecu.cylinder_health(2), CylinderHealth::dead());
+        ecu.toggle_cylinder_health(2);
+        assert_eq!(ecu.cylinder_health(2), CylinderHealth::healthy());
     }
 }
