@@ -3154,15 +3154,15 @@ impl EngineSynth {
         if let Some((severity, decay)) = self.backfire.poll(&mut self.noise, CONTROL_BLOCK) {
             let bank = (self.noise.next_u32() as usize) % self.backfire_pulses.len();
             let amplitude = severity * self.config.backfire_level as f32;
-            // Backfires are almost entirely broadband and much longer than a
-            // blowdown crack; they share the runner and muffler so they pick up
-            // the same pipe colour.
+            // Backfires combine an explosive positive expansion wave with
+            // turbulent flame roar; sharing the runner and muffler gives them
+            // the pipe's acoustic colour without reducing to a thin metallic click.
             self.backfire_pulses[bank].trigger(
                 self.config.sample_rate,
                 amplitude,
-                0.0004,
+                0.0012,
                 decay,
-                0.92,
+                0.35,
                 self.noise.next_unit(),
             );
         }
