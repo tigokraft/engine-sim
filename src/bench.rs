@@ -1149,45 +1149,173 @@ impl Driveline {
 
     /// Advances the flywheel one frame from the block's solved torque.
     pub fn update(&mut self, block: &EngineBlock, dt: f64) {
-        // Pedal travel. A step input would be both unrealistic and a parameter
-        // discontinuity for the audio thread to chase.
-        let slew = 1.0 - (-dt / 0.12).exp();
-        self.throttle += (self.throttle_target - self.throttle) * slew;
+        match self.dyno_mode {
+            DynoMode::FreeRev => {
+                self.dyno_absorber_torque = 0.0;
+                self.dyno_hold_integral = 0.0;
 
-        // Idle governor: enough throttle to hold the idle speed, and no more.
-        // This is what stops the engine stalling the moment the pedal comes up.
-        // The speed it holds is the engine's own, and a cold one is held faster.
-        let target = self.idle_target(block);
-        let governor = ((target + 60.0 - self.rpm) / 500.0).clamp(0.0, 0.30);
-        let effective = self.throttle.max(governor);
+                // Pedal travel. A step input would be both unrealistic and a parameter
+                // discontinuity for the audio thread to chase.
+                let slew = 1.0 - (-dt / 0.12).exp();
+                self.throttle += (self.throttle_target - self.throttle) * slew;
 
-        // The block solves torque for a speed, not for a throttle, so the pedal
-        // is applied here. See the module docs.
-        self.torque = block.mean_brake_torque(self.rpm);
-        let drive = if self.cutting() {
-            0.0
-        } else {
-            self.torque * (0.05 + 0.95 * effective)
-        };
+                // Idle governor: enough throttle to hold the idle speed, and no more.
+                // This is what stops the engine stalling the moment the pedal comes up.
+                // The speed it holds is the engine's own, and a cold one is held faster.
+                let target = self.idle_target(block);
+                let governor = ((target + 60.0 - self.rpm) / 500.0).clamp(0.0, 0.30);
+                let effective = self.throttle.max(governor);
 
-        // Accessories, then bearing drag, then windage, then the throttle
-        // plate. Only the last of these depends on the pedal: it is the whole
-        // of engine braking, and without it a lift from the limiter takes the
-        // best part of a minute to come back to idle.
-        let (a, b, c) = self.load;
-        let omega = self.rpm * PI / 30.0;
-        let load = a + b * omega + c * omega * omega + (1.0 - effective) * self.pumping;
+                // The block solves torque for a speed, not for a throttle, so the pedal
+                // is applied here. See the module docs.
+                self.torque = block.mean_brake_torque(self.rpm);
+                let drive = if self.cutting() {
+                    0.0
+                } else {
+                    self.torque * (0.05 + 0.95 * effective)
+                };
 
-        let alpha = (drive - load) / self.inertia.max(1e-3);
-        let omega = (omega + alpha * dt).max(STALL_RPM * PI / 30.0);
-        self.rpm = omega * 30.0 / PI;
+                // Accessories, then bearing drag, then windage, then the throttle
+                // plate. Only the last of these depends on the pedal: it is the whole
+                // of engine braking, and without it a lift from the limiter takes the
+                // best part of a minute to come back to idle.
+                let (a, b, c) = self.load;
+                let omega = self.rpm * PI / 30.0;
+                let load = a + b * omega + c * omega * omega + (1.0 - effective) * self.pumping;
+
+                let alpha = (drive - load) / self.inertia.max(1e-3);
+                let omega = (omega + alpha * dt).max(STALL_RPM * PI / 30.0);
+                self.rpm = omega * 30.0 / PI;
+            }
+            DynoMode::RpmHold { target_rpm } => {
+                let slew = 1.0 - (-dt / 0.12).exp();
+                self.throttle += (self.throttle_target - self.throttle) * slew;
+
+                let effective = self.throttle;
+                self.torque = block.mean_brake_torque(self.rpm);
+                let drive = if self.cutting() {
+                    0.0
+                } else {
+                    self.torque * (0.05 + 0.95 * effective)
+                };
+
+                let (a, b, c) = self.load;
+                let omega = self.rpm * PI / 30.0;
+                let natural_load =
+                    a + b * omega + c * omega * omega + (1.0 - effective) * self.pumping;
+
+                // Closed-loop PI absorber:
+                let target_omega = target_rpm * PI / 30.0;
+                let error = omega - target_omega;
+                self.dyno_hold_integral = (self.dyno_hold_integral + error * dt).clamp(-50.0, 50.0);
+
+                let kp = self.inertia.max(0.1) * 35.0;
+                let ki = self.inertia.max(0.1) * 70.0;
+                let absorber =
+                    (drive - natural_load + kp * error + ki * self.dyno_hold_integral).max(0.0);
+                self.dyno_absorber_torque = absorber;
+
+                let total_load = natural_load + absorber;
+                let alpha = (drive - total_load) / self.inertia.max(1e-3);
+                let new_omega = (omega + alpha * dt).max(STALL_RPM * PI / 30.0);
+                self.rpm = new_omega * 30.0 / PI;
+            }
+            DynoMode::SweepPull {
+                start_rpm,
+                rate_rpm_s,
+            } => {
+                self.dyno_hold_integral = 0.0;
+
+                if self.active_pull.is_none() {
+                    let cf = sae_j1349_correction(
+                        block.environment.pressure,
+                        block.environment.temperature,
+                    );
+                    self.active_pull = Some(DynoRun::new(cf));
+                }
+
+                if self.rpm < start_rpm {
+                    self.throttle_target = 0.40;
+                    let slew = 1.0 - (-dt / 0.10).exp();
+                    self.throttle += (self.throttle_target - self.throttle) * slew;
+                    self.torque = block.mean_brake_torque(self.rpm);
+                    let drive = self.torque * (0.05 + 0.95 * self.throttle);
+                    let (a, b, c) = self.load;
+                    let omega = self.rpm * PI / 30.0;
+                    let natural_load = a + b * omega + c * omega * omega;
+                    let alpha = (drive - natural_load) / self.inertia.max(1e-3);
+                    let new_omega = (omega + alpha * dt).max(STALL_RPM * PI / 30.0);
+                    self.rpm = new_omega * 30.0 / PI;
+                    self.dyno_absorber_torque = 0.0;
+                } else {
+                    self.throttle = 1.0;
+                    self.throttle_target = 1.0;
+                    self.torque = block.mean_brake_torque(self.rpm);
+
+                    if let Some(pull) = self.active_pull.as_mut() {
+                        let should_record = match pull.points.last() {
+                            Some(last) => (self.rpm - last.rpm) >= 50.0,
+                            None => true,
+                        };
+                        if should_record {
+                            pull.record(self.rpm, self.torque);
+                        }
+                    }
+
+                    let omega_step = rate_rpm_s * (PI / 30.0) * dt;
+                    let omega = self.rpm * PI / 30.0 + omega_step;
+                    self.rpm = omega * 30.0 / PI;
+
+                    let (a, b, c) = self.load;
+                    let natural_load = a + b * omega + c * omega * omega;
+                    let inertial_torque = self.inertia * (rate_rpm_s * PI / 30.0);
+                    self.dyno_absorber_torque =
+                        (self.torque - natural_load - inertial_torque).max(0.0);
+
+                    if self.rpm >= self.redline {
+                        if let Some(mut pull) = self.active_pull.take() {
+                            pull.record(self.rpm, self.torque);
+                            self.last_pull = Some(pull);
+                        }
+                        self.dyno_mode = DynoMode::FreeRev;
+                        self.throttle = 0.0;
+                        self.throttle_target = 0.0;
+                        self.dyno_absorber_torque = 0.0;
+                    }
+                }
+            }
+            DynoMode::Motoring { target_rpm } => {
+                self.dyno_hold_integral = 0.0;
+                self.throttle = 0.0;
+                self.throttle_target = 0.0;
+
+                let rate = 800.0 * dt;
+                if self.rpm < target_rpm {
+                    self.rpm = (self.rpm + rate).min(target_rpm);
+                } else {
+                    self.rpm = (self.rpm - rate).max(target_rpm);
+                }
+
+                let peak_p = block.ring.peak_pressure();
+                let mps = block.geometry().mean_piston_speed(self.rpm);
+                let fmep = block
+                    .friction
+                    .fmep(peak_p, mps, block.thermal.oil_temperature());
+                let friction_tau = fmep * block.total_displacement() / (4.0 * PI);
+                let pumping_tau = self.pumping;
+                let motoring_tau = friction_tau + pumping_tau;
+
+                self.torque = -motoring_tau;
+                self.dyno_absorber_torque = -motoring_tau;
+            }
+        }
     }
 
     /// What the audio path is being asked for this frame.
     pub fn controls(&self) -> EngineControls {
         EngineControls {
             throttle: self.throttle.clamp(0.0, 1.0),
-            spark_cut: self.cutting(),
+            spark_cut: self.cutting() || matches!(self.dyno_mode, DynoMode::Motoring { .. }),
             exhaust_cutout: self.exhaust_cutout,
             anti_lag: self.anti_lag,
         }
@@ -2076,5 +2204,93 @@ mod tests {
                 preset.aperture_positions.block
             );
         }
+    }
+
+    #[test]
+    fn dyno_absorber_holds_target_rpm() {
+        let preset = EnginePreset::inline_four();
+        let mut block = preset.block(Environment::default());
+        let mut driveline = Driveline::new(&preset);
+        let target_rpm = 3_500.0;
+        driveline.dyno_mode = DynoMode::RpmHold { target_rpm };
+        driveline.throttle_target = 0.80; // 80 % throttle applied
+
+        let dt = 1.0 / 240.0;
+        for _ in 0..(240 * 3) {
+            driveline.update(&block, dt);
+            block.update(dt, driveline.rpm);
+        }
+
+        assert!(
+            (driveline.rpm - target_rpm).abs() < 50.0,
+            "rpm hold failed to lock target: {:.1} rpm vs target {:.1} rpm",
+            driveline.rpm,
+            target_rpm
+        );
+        assert!(
+            driveline.dyno_absorber_torque > 50.0,
+            "dyno absorber must be producing opposing torque to hold 80% throttle: {:.1} N m",
+            driveline.dyno_absorber_torque
+        );
+    }
+
+    #[test]
+    fn dyno_sweep_pull_records_clean_curve() {
+        let preset = EnginePreset::inline_four();
+        let mut block = preset.block(Environment::default());
+        let mut driveline = Driveline::new(&preset);
+        driveline.rpm = 2_000.0;
+        driveline.dyno_mode = DynoMode::SweepPull {
+            start_rpm: 2_000.0,
+            rate_rpm_s: 600.0,
+        };
+
+        let dt = 1.0 / 240.0;
+        while driveline.dyno_mode != DynoMode::FreeRev {
+            driveline.update(&block, dt);
+            block.update(dt, driveline.rpm);
+        }
+
+        let pull = driveline
+            .last_pull
+            .as_ref()
+            .expect("pull must be finalized in last_pull");
+        assert!(
+            !pull.points.is_empty(),
+            "dyno pull must contain recorded points"
+        );
+        let peak_t = pull.peak_torque.expect("must have peak torque");
+        let peak_p = pull.peak_power.expect("must have peak power");
+        assert!(
+            peak_t.torque > 100.0,
+            "peak torque must be plausible: {:.1} N m",
+            peak_t.torque
+        );
+        assert!(
+            peak_p.power_kw > 50.0,
+            "peak power must be plausible: {:.1} kW",
+            peak_p.power_kw
+        );
+        assert!(
+            peak_p.rpm >= peak_t.rpm,
+            "peak power rpm ({:.0}) must sit at or above peak torque rpm ({:.0})",
+            peak_p.rpm,
+            peak_t.rpm
+        );
+    }
+
+    #[test]
+    fn sae_j1349_correction_factors() {
+        // At standard reference (25 °C = 298.15 K, 99.0 kPa), CF must equal 1.0
+        let standard = sae_j1349_correction(99_000.0, 298.15);
+        assert!((standard - 1.0).abs() < 1e-6);
+
+        // Lower pressure (high altitude) reduces air density -> CF > 1.0 to correct back up
+        let high_altitude = sae_j1349_correction(85_000.0, 298.15);
+        assert!(high_altitude > 1.0);
+
+        // Hotter day reduces air density -> CF > 1.0
+        let hot_day = sae_j1349_correction(99_000.0, 315.0);
+        assert!(hot_day > 1.0);
     }
 }
