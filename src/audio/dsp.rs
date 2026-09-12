@@ -5192,16 +5192,22 @@ mod tests {
         let mut fast = loaded_snapshot();
         fast.rpm = 6_000.0;
         let quick = share_at(&fast);
-        // The margin used to be a factor of three and is now under two. The
-        // block did not change: the mix it is a share *of* did. An exhaust
-        // whose wall loss was a fiftieth of `alpha` rang its way to a level it
-        // has no business at, and it did so hardest at speed, where the orders
-        // sit in the pipe's own modes. Taking that inflation out lifts the
-        // block's share everywhere and lifts it most where the exhaust fell
-        // furthest. Recorded here rather than smoothed over, because the
-        // number is evidence about the exhaust and not about the block.
+        // The margin used to be a factor of three, then under two, and now
+        // measures 1.50. The block has not changed once: the mix it is a share
+        // *of* has, twice. First an exhaust whose wall loss was a fiftieth of
+        // `alpha` rang its way to a level it had no business at, hardest at
+        // speed where the orders sit in the pipe's own modes; taking that
+        // inflation out lifted the block's share. Then the exhaust got its
+        // midrange back — a wall loss calibrated against a measured pipe, and
+        // a valve loaded by the cylinder rather than by a hole — which is
+        // level the block is once again a share of, and it arrives at speed
+        // more than at idle for the same reason it left at speed.
+        //
+        // Recorded rather than smoothed over: the number is evidence about the
+        // exhaust and not about the block, and a margin quietly moved is a
+        // margin nobody can read the history of.
         assert!(
-            idle > 1.5 * quick,
+            idle > 1.4 * quick,
             "the block is no quieter at speed: {idle:.5} of the mix at idle \
              against {quick:.5} at 6000 rpm"
         );
