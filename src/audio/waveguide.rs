@@ -384,23 +384,14 @@ impl ViscothermalLoss {
 // Valve-end termination
 // ---------------------------------------------------------------------------
 
-/// Reflection coefficient of a shut exhaust valve [-].
-///
-/// In a real cylinder head, a closed exhaust valve seated against the head is
-/// not an ideal infinite-mass rigid plane: boundary-layer acoustic absorption
-/// in the port pocket, seat compliance, and carbon coating absorb sound energy,
-/// providing $|r| \approx 0.90$. Without this baseline dissipation, a closed
-/// runner at idle or low flow rings endlessly like a hollow metal tin can.
-pub const CLOSED_VALVE_REFLECTION: f32 = 0.95;
-
 /// Acoustic boundary condition at the exhaust valve end of a primary runner.
 ///
 /// Models the interface between the cylinder combustion chamber and the exhaust runner.
-/// When the exhaust valve is shut ($A_v = 0$), the boundary has reflection coefficient
-/// [`CLOSED_VALVE_REFLECTION`]. As the valve opens with effective area $A_v$, the
-/// reflection coefficient glides according to:
+/// When the exhaust valve is shut ($A_v = 0$), the boundary is acoustically rigid
+/// with pressure reflection coefficient $r = +1.0$. As the valve opens with effective
+/// area $A_v$, the reflection coefficient glides according to:
 ///
-/// $$r = \frac{A_p - A_v}{A_p + A_v} \cdot r_{\text{closed}}$$
+/// $$r = \frac{A_p - A_v}{A_p + A_v}$$
 ///
 /// allowing wave energy to transmit into the cylinder cavity. Blowdown excitation
 /// pulses are injected into the forward path at this boundary:
@@ -417,7 +408,7 @@ impl ValveTermination {
     pub fn new(pipe_area: f64) -> Self {
         Self {
             pipe_area: pipe_area.max(1e-7) as f32,
-            reflection: CLOSED_VALVE_REFLECTION,
+            reflection: 1.0,
         }
     }
 
@@ -426,9 +417,9 @@ impl ValveTermination {
         let av = effective_area.max(0.0) as f32;
         let ap = self.pipe_area;
         self.reflection = if av <= 1e-9 {
-            CLOSED_VALVE_REFLECTION
+            1.0
         } else {
-            (((ap - av) / (ap + av)) * CLOSED_VALVE_REFLECTION).clamp(-1.0, 1.0)
+            ((ap - av) / (ap + av)).clamp(-1.0, 1.0)
         };
     }
 
@@ -3354,23 +3345,5 @@ mod tests {
             high_open > high_closed * 2.0,
             "opening cutout bypass must raise high-order spectral content: open={high_open}, closed={high_closed}"
         );
-    }
-
-    #[test]
-    fn shut_exhaust_valve_has_acoustic_absorption() {
-        let area = 0.0012; // runner area ~ 40 mm diameter
-        let mut term = ValveTermination::new(area);
-        assert!((term.reflection() - CLOSED_VALVE_REFLECTION).abs() < 1e-6);
-
-        term.set_effective_area(0.0);
-        assert!((term.reflection() - CLOSED_VALVE_REFLECTION).abs() < 1e-6);
-
-        // Matching area: reflection drops to zero
-        term.set_effective_area(area);
-        assert!(term.reflection().abs() < 1e-6);
-
-        // Wide open into chamber: inverts with bounded dissipation
-        term.set_effective_area(area * 100.0);
-        assert!(term.reflection() < -0.85 && term.reflection() >= -CLOSED_VALVE_REFLECTION);
     }
 }
