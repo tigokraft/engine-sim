@@ -215,17 +215,15 @@ pub fn corner_hz(radius: f32, speed_of_sound: f32) -> f32 {
 /// [`REFERENCE_MOUTH_RADIUS`] at [`REFERENCE_DISTANCE`], for the reason given
 /// there.
 ///
-/// The geometry is only half of the normalisation. The transmission this gain
-/// multiplies is itself frequency-dependent, so the reference is closed out at
-/// [`REFERENCE_RADIATED_HZ`] as well — see there for why the corner is the
-/// wrong place to quote it — by dividing through
-/// [`reference_transmission`]. A reference blowdown through a reference
-/// tailpipe then radiates at unity, which is what the rest of the synth is
-/// levelled against.
+/// Geometric radiation gain relative to a reference mouth [-].
+///
+/// Quoted against [`REFERENCE_MOUTH_RADIUS`] at [`REFERENCE_DISTANCE`]. The
+/// transmission $(1 + R)$ carries the frequency-dependent monopole radiation
+/// tilt, and keeping this geometric gain bounded at unity prevents high-frequency
+/// modes from being artificially amplified by 30 dB.
 #[inline]
 pub fn radiation_gain(radius: f32, distance: f32) -> f32 {
     (radius.max(0.0) / distance.max(1e-3)) * (REFERENCE_DISTANCE / REFERENCE_MOUTH_RADIUS)
-        / reference_transmission()
 }
 
 // ---------------------------------------------------------------------------
