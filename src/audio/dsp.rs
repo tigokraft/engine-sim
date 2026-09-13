@@ -2537,15 +2537,15 @@ impl BackfireVoice {
         if self.severity <= 0.0 || self.cooldown > 0 {
             return None;
         }
-        // Up to ~28 events per second when fully primed.
-        let rate = 28.0 * self.severity;
+        // Up to ~80 events per second when fully primed for rapid firecracker cadence.
+        let rate = 80.0 * self.severity;
         let probability = rate * block as f32 / self.sample_rate;
         if noise.next_unit() >= probability {
             return None;
         }
-        // 35 ms refractory: fast enough to crackle, slow enough to stay discrete.
-        self.cooldown = (0.035 * self.sample_rate) as usize;
-        let scale = 0.55 + 0.75 * noise.next_unit();
+        // 12 ms refractory: allows rapid machine-gun stutter while staying discrete.
+        self.cooldown = (0.012 * self.sample_rate) as usize;
+        let scale = 0.8 + 1.2 * noise.next_unit();
         Some((
             self.severity * scale,
             // Pops in a pipe ring far longer than a blowdown crack does.
@@ -3344,16 +3344,16 @@ impl EngineSynth {
         self.backfire.tune(&self.config, &self.snapshot);
         if let Some((severity, decay)) = self.backfire.poll(&mut self.noise, CONTROL_BLOCK) {
             let bank = (self.noise.next_u32() as usize) % self.backfire_pulses.len();
-            let amplitude = severity * self.config.backfire_level as f32;
+            let amplitude = severity * self.config.backfire_level as f32 * 2.0;
             // Backfires combine an explosive positive expansion wave with
             // turbulent flame roar; sharing the runner and muffler gives them
             // the pipe's acoustic colour without reducing to a thin metallic click.
             self.backfire_pulses[bank].trigger(
                 self.config.sample_rate,
                 amplitude,
-                0.0012,
+                0.00018,
                 decay,
-                0.35,
+                0.80,
                 self.noise.next_unit(),
             );
         }
@@ -4777,7 +4777,7 @@ mod tests {
                 fired += 1;
             }
         }
-        assert!((10..=150).contains(&fired), "implausible pop rate: {fired}");
+        assert!((50..=450).contains(&fired), "implausible pop rate: {fired}");
 
         // Each condition on its own must produce nothing.
         for spoiler in [
@@ -4799,6 +4799,31 @@ mod tests {
             assert_eq!(voice.severity, 0.0);
             assert!(voice.poll(&mut noise, CONTROL_BLOCK).is_none());
         }
+    }
+
+    #[test]
+    fn backfire_pop_attack_is_sub_millisecond_shock() {
+        let mut pop = Pop::default();
+        // Attack of 0.18 ms is ~8.6 samples at 48 kHz.
+        pop.trigger(FS, 1.0, 0.00018, 0.010, 0.0, 0.0);
+        let mut peak_val = 0.0f32;
+        let mut peak_idx = 0;
+        for i in 0..100 {
+            let val = pop.process(0.0);
+            if val > peak_val {
+                peak_val = val;
+                peak_idx = i;
+            }
+        }
+        let rise_time_sec = peak_idx as f32 / FS;
+        assert!(
+            rise_time_sec < 0.0008,
+            "pop attack must be an explosive shock under 0.8 ms: {rise_time_sec:.6} s ({peak_idx} samples)"
+        );
+        assert!(
+            peak_val > 0.8,
+            "pop should reach near-unit normalized peak: {peak_val}"
+        );
     }
 
     #[test]
