@@ -19,10 +19,12 @@
 //!                           (primary-length | primary-diameter | collector-taper |
 //!                            tailpipe-length | tailpipe-diameter | crossover-position)
 //!   --sweep-steps <n>       Points in the sweep, log-spaced 0.5x to 2x of the preset (default: 5)
+//!   --mode                  Compare open-headers / straight-pipe / muffled on one engine
 //! ```
 //!
-//! `--sweep` prints its own report and exits; it does not render the dyno
-//! pull below. See docs/ENGINE_CONFIGURATION_GUIDE.md for a worked example.
+//! `--sweep` and `--mode` each print their own report and exit; they do not
+//! render the dyno pull below. See docs/ENGINE_CONFIGURATION_GUIDE.md for a
+//! worked example.
 
 use std::f32::consts::PI;
 use std::path::{Path, PathBuf};
@@ -639,6 +641,64 @@ fn run_sweep(preset: &EnginePreset, param: SweepParam, steps: usize) -> Result<(
     Ok(())
 }
 
+/// Runs open-headers, straight-pipe and muffled on one preset and tabulates
+/// how much of the top of the spectrum each mode leaves behind.
+///
+/// Shares of total energy, from [`orders::octave_bands`], not absolute
+/// levels: the three modes do not radiate the same overall loudness, and a
+/// share is what stays comparable once that is factored out.
+fn run_mode_comparison(preset: &EnginePreset) -> Result<()> {
+    println!("================================================================================");
+    println!("                        EXHAUST MODE COMPARISON");
+    println!("================================================================================");
+    println!("Engine        : {} ({})", preset.name, preset.spec());
+    println!();
+    println!(
+        "{:<14} | {:>9} | {:>9} | {:>9} | {:>9} | {:>10}",
+        "Mode", "2 kHz", "4 kHz", "8 kHz", "16 kHz", "Mean"
+    );
+    println!("--------------------------------------------------------------------------------");
+
+    type ModeTransform = fn(ExhaustSystem) -> ExhaustSystem;
+    let modes: [(&str, ModeTransform); 3] = [
+        ("muffled", |e| e),
+        ("straight-pipe", ExhaustSystem::into_straight_pipe),
+        ("open-headers", ExhaustSystem::into_open_headers),
+    ];
+
+    let mut highs = Vec::with_capacity(modes.len());
+    for (label, apply) in modes {
+        let mut p = preset.clone();
+        p.exhaust = apply(p.exhaust);
+        let script = calibration_sweep(&p);
+        let render = RenderPlan::new(&p, &script).render();
+        let bands = orders::octave_bands(&render.mono(), render.sample_rate);
+        // Indices 6..10 of the ISO table are 2, 4, 8 and 16 kHz.
+        let mean_high = (bands[6] + bands[7] + bands[8] + bands[9]) / 4.0;
+        println!(
+            "{label:<14} | {:>6.1} dB | {:>6.1} dB | {:>6.1} dB | {:>6.1} dB | {mean_high:>7.1} dB",
+            bands[6], bands[7], bands[8], bands[9]
+        );
+        highs.push((label, mean_high));
+    }
+
+    println!("--------------------------------------------------------------------------------");
+    if highs.windows(2).all(|w| w[1].1 > w[0].1) {
+        println!(
+            "High-frequency share rises muffled -> straight-pipe -> open-headers, as expected."
+        );
+    } else {
+        let summary = highs
+            .iter()
+            .map(|(label, hz)| format!("{label}={hz:.1} dB"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("NOTE: high-frequency share is not monotonically increasing ({summary}).");
+    }
+    println!("================================================================================\n");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     println!("================================================================================");
     println!("                ACOUSTIC DIAGNOSTIC & BENCHMARK TOOL                            ");
@@ -653,6 +713,7 @@ fn main() -> Result<()> {
     let mut master_gain = 0.70f32;
     let mut sweep_param: Option<String> = None;
     let mut sweep_steps = 5usize;
+    let mut mode_compare = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -705,6 +766,9 @@ fn main() -> Result<()> {
                     sweep_steps = val.parse().unwrap_or(5);
                 }
             }
+            "--mode" => {
+                mode_compare = true;
+            }
             _ => {}
         }
     }
@@ -730,9 +794,9 @@ fn main() -> Result<()> {
         }
     };
 
-    // 1b. `--sweep` is its own report: run it, print it, and exit before the
-    // normal dyno-pull render below, which does not need it and would
-    // otherwise force the exhaust into `--exhaust`'s mode first.
+    // 1b. `--sweep` and `--mode` are their own reports: run one, print it, and
+    // exit before the normal dyno-pull render below, which needs neither and
+    // would otherwise force the exhaust into `--exhaust`'s mode first.
     if let Some(name) = sweep_param {
         let param = SweepParam::parse(&name).ok_or_else(|| {
             anyhow::anyhow!(
@@ -741,6 +805,9 @@ fn main() -> Result<()> {
             )
         })?;
         return run_sweep(&preset, param, sweep_steps);
+    }
+    if mode_compare {
+        return run_mode_comparison(&preset);
     }
 
     // 2. Apply exhaust mode
