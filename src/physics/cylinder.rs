@@ -663,4 +663,38 @@ mod tests {
         approx(st.burned_fraction, 1.0, 1e-12);
         approx(wrap_cycle(-deg(90.0)).to_degrees(), 630.0, 1e-9);
     }
+
+    #[test]
+    fn inertia_torque_does_no_net_work_over_a_revolution() {
+        let g = GEOM().with_reciprocating_mass(0.5);
+        let omega = 300.0; // ~2865 rpm
+        let steps = 36_000; // 0.01 degree resolution
+        let dtheta = CYCLE_ANGLE / steps as f64;
+        let mut net = 0.0;
+        let mut peak: f64 = 0.0;
+        for i in 0..steps {
+            let theta = dtheta * i as f64;
+            let tau = g.inertia_torque(theta, omega);
+            net += tau * dtheta;
+            peak = peak.max(tau.abs());
+        }
+        assert!(
+            net.abs() <= peak * 1e-9,
+            "net work {net} should vanish against peak torque {peak}"
+        );
+    }
+
+    #[test]
+    fn inertia_torque_second_order_component_grows_with_omega_squared() {
+        // tau_i is exactly proportional to omega^2 in every harmonic, second
+        // order included: doubling the shaft speed must quadruple the whole
+        // waveform, sampled anywhere off a zero crossing.
+        let g = GEOM().with_reciprocating_mass(0.5);
+        for d in [15.0, 40.0, 100.0, 200.0] {
+            let theta = deg(d);
+            let low = g.inertia_torque(theta, 200.0);
+            let high = g.inertia_torque(theta, 400.0);
+            approx(high, low * 4.0, low.abs() * 1e-9 + 1e-12);
+        }
+    }
 }
