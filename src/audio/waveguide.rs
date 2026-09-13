@@ -2342,7 +2342,12 @@ impl ExhaustNetwork {
                 r,
                 stations.primary(i),
             );
-            prim.set_steepening(true);
+            // Off, and open question 7 in `docs/measurements/calibration.md`
+            // says what it costs to turn on: the primary's loop is nearly
+            // lossless, so a pulse goes round it thirty times and steepens on
+            // each pass, and the accumulation drowns the geometry the pipe is
+            // there to express.
+            prim.set_steepening(false);
             let valve = ValveTermination::new(sample_rate, spec.area);
             primaries.push(prim);
             valves.push(valve);

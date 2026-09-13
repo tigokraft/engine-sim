@@ -1218,26 +1218,40 @@ fn markdown(all: &[Calibrated]) -> String {
     );
     let _ = writeln!(
         out,
-        "7. **A shocked front is steepened but never dissipated.** The \
-         primaries now propagate on the gas dynamics rather than on linear \
-         acoustics: each point of the stored waveform is a characteristic \
-         travelling at `c(1 + (gamma+1)/(2 gamma) * p / P_0)`, and the pipe \
-         reads out the one that arrives first, so where a crest has overtaken \
-         the trough ahead of it the output steps rather than rises. Measured on \
-         a half-metre primary at 800 K, second harmonic against fundamental: \
-         0.0005 at 100 Pa, 0.024 at 5 kPa, 0.095 at 20 kPa, 0.32 at one \
-         atmosphere — an advance that grows with the pulse, which is what the \
-         old `factor * p` clamped to two samples never did. What is still \
-         missing is the other half of a shock. A real one loses energy across \
-         the jump, and that loss is the reason a blowdown does not stay a step \
-         all the way down the pipe; here the front is bounded only by the rule \
-         that the reader cannot return more than the line was given, and then \
-         attenuated by the wall loss, which is a viscothermal term and knows \
-         nothing about entropy. So a primary carrying a pressure ratio well \
-         over two holds its edge further down the pipe than it should. The \
-         Rankine-Hugoniot jump gives the missing term without a constant; \
-         fitting a decay to the edge instead would be the tone knob this stage \
-         exists to refuse. Open.\n"
+        "7. **The primaries steepen correctly and are not allowed to.** \
+         `WaveguidePipe` no longer advances a crest by a factor and clamps it. \
+         Each point of the stored waveform is a characteristic travelling at \
+         `c(1 + (gamma+1)/(2 gamma) p/P_0)`, the pipe reads out the one that \
+         arrives first, and where a crest has overtaken the trough ahead of it \
+         the output steps rather than rises; the front then pays the shock's \
+         own dissipation, `sigma = (gamma+1)/(2 gamma) D |dp| / P_0` past one \
+         being the sawtooth decay of a jump the section can no longer steepen. \
+         Measured on a half-metre primary at 800 K, second harmonic against \
+         fundamental: 0.0005 at 100 Pa, 0.024 at 5 kPa, 0.095 at 20 kPa, 0.32 \
+         at one atmosphere. Excited once and left alone in a 90 per cent \
+         reflecting loop it decays faster than the linear pipe does, so it is \
+         not the transposed-form mistake in another costume.\n\n\
+         It is switched off. Driven at the pressure a port actually launches — \
+         `c mdot / A`, 0.31 atmospheres at idle and 0.65 at the limiter across \
+         this catalogue, a third of the difference across the valve because a \
+         port is a restriction and not an open end — three of this \
+         repository's own guards fail. The band the primaries work in stops \
+         falling as they are stretched: 234.6, 259.8, 237.4 Hz over a \
+         half-again stretch, where it has to fall every step. The cam's grip \
+         on mid-band tilt falls from over ten decibels to five and a half. The \
+         limiter bounce stops standing out of a clean pull. The cause is open \
+         question 5: a primary's loop pays about 1.4 dB a round trip, so a \
+         pulse goes round it some thirty times and steepens on every one of \
+         them, and a nonlinearity accumulated thirty times is louder than the \
+         geometry it is supposed to be colouring. Four times the wall \
+         enhancement brings two of the three guards back, which is precisely \
+         the constant question 5 says has no derivation, so it is not taken. \
+         What this wants is either that derivation, or the nonlinearity \
+         applied to the launched pulse on its one-way run down the primary and \
+         not to the resonant field behind it — `beta` is proportional to `p` \
+         and the field is twenty decibels under the pulse, so steepening the \
+         one and not the other is a statement about where the gas is \
+         nonlinear rather than a knob. Open.\n"
     );
 
     for c in all {

@@ -387,10 +387,10 @@ pub const RECORDED: &[Fingerprint] = &[
             (8.0, -18.5),
             (8.5, -34.6),
             (9.0, -35.0),
-            (9.5, -38.1),
+            (9.5, -38.2),
             (10.0, -13.6),
         ],
-        resonances: &[2159.4, 1321.3, 3119.9],
+        resonances: &[2159.3, 1321.3, 3119.9],
         tilt_db_per_octave: -8.2,
     },
     Fingerprint {
@@ -422,7 +422,7 @@ pub const RECORDED: &[Fingerprint] = &[
             (11.5, -33.3),
             (12.0, -18.7),
         ],
-        resonances: &[1553.1, 1187.9, 274.9],
+        resonances: &[1553.1, 1188.3, 274.9],
         tilt_db_per_octave: -14.3,
     },
     Fingerprint {
