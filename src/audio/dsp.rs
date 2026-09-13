@@ -2718,6 +2718,24 @@ pub struct EngineSynth {
     bank_excitations: Vec<f32>,
     /// Pressure radiated from each bank's mouth this sample.
     radiated: Vec<f32>,
+    /// Broadband pressure each port's jet is launching this sample [Pa].
+    ///
+    /// Kept beside the blowdown excitation rather than added into it: they are
+    /// two different sources that happen to share a boundary, one a pulse the
+    /// cycle table draws and one a noise the flow makes, and folding them
+    /// together would leave nothing able to say which was which.
+    port_jets: Vec<f32>,
+    /// The two of them summed, which is what the port actually presents [Pa].
+    port_drive: Vec<f32>,
+    /// Shapes each port's own jet noise to the frequency it is loudest at.
+    ///
+    /// One per cylinder, because the two ports of a V8's two banks are at
+    /// different lifts at any instant and a jet's pitch is its velocity over
+    /// its gap. Retuned every sample: the gap goes from a slit to a hole and
+    /// back inside a valve event, and a control block is a fifth of one.
+    port_noise: Vec<OnePole>,
+    /// Last white sample each port's shaper differenced, one per cylinder [-].
+    port_noise_previous: Vec<f32>,
     /// Cross-sectional area of one exhaust primary [m^2].
     ///
     /// The area the port launches its wave into; see
@@ -2968,6 +2986,10 @@ impl EngineSynth {
             backfire_pulses: vec![PopPool::default(); config.bank_count],
             bank_excitations: vec![0.0; config.bank_count],
             radiated: vec![0.0; config.bank_count],
+            port_jets: vec![0.0; n_cyl],
+            port_drive: vec![0.0; n_cyl],
+            port_noise: vec![OnePole::new(fs, 4_000.0); n_cyl],
+            port_noise_previous: vec![0.0; n_cyl],
             primary_area: primary_area as f32,
             launch: Smoothed::new(1.0, fs, 0.500),
             launch_primed: false,
@@ -3496,8 +3518,17 @@ impl EngineSynth {
             }
         }
         let launch = self.launch.next_value();
+        let c_exhaust = crate::audio::filters::speed_of_sound(
+            self.exhaust_gamma.value(),
+            self.exhaust_gas_constant.value(),
+            self.exhaust_temperature.value(),
+        );
+        let port_density = crate::audio::waveguide::REFERENCE_PRESSURE_PA
+            / (self.exhaust_gas_constant.value() * self.exhaust_temperature.value().max(1.0));
+        let fs = self.config.sample_rate;
         if !turning {
             self.excitations.fill(0.0);
+            self.port_jets.fill(0.0);
             self.intake_excitations.fill(0.0);
             // A stopped engine has its valves wherever the crank left them, and
             // leaving the last frame's areas in place is as good an answer as
@@ -3576,6 +3607,52 @@ impl EngineSynth {
             self.cylinder_volumes[index] = self.cycle.cylinder_volume_at(cylinder, blend) as f64;
             self.exhaust_port_flows[index] = self.cycle.exhaust_flow_at(cylinder, blend) as f64;
 
+            // The port's own jet. Gas crossing a valve seat at a few hundred
+            // metres a second tears itself apart on the edge, and what that
+            // makes is broadband and goes down the runner with everything else.
+            // It is the exhaust's half of what the intake already gets from its
+            // throttle and its valves, and without it the pipe radiates a comb
+            // with nothing at all between the teeth.
+            let throat = crate::audio::waveguide::throat_velocity(
+                self.exhaust_port_flows[index] as f32,
+                self.exhaust_valve_areas[index] as f32,
+                port_density,
+                c_exhaust,
+            );
+            self.port_jets[index] = 0.0;
+            let jet = crate::audio::waveguide::jet_pressure_fluctuation_pa(
+                throat,
+                port_density,
+                c_exhaust,
+                self.exhaust_valve_areas[index] as f32,
+                self.primary_area,
+            );
+            if jet > 0.0 {
+                let hz = crate::audio::waveguide::jet_peak_hz(
+                    throat,
+                    self.exhaust_valve_areas[index] as f32,
+                );
+                // A jet's spectrum climbs to its Strouhal peak and falls away
+                // past it, so the noise is differenced on the way in for the
+                // rise and one-poled at the peak for the fall: six decibels an
+                // octave each side, which is the crudest shape that is still
+                // the right shape. A lowpass alone would put most of the energy
+                // below the peak, where the firings already are.
+                let white = self.noise.next_bipolar();
+                let step = white - self.port_noise_previous[index];
+                self.port_noise_previous[index] = white;
+                let shaper = &mut self.port_noise[index];
+                shaper.set_cutoff(fs, hz);
+                // Differenced white noise has variance 2 and autocorrelation
+                // -1 at one sample, so through a pole at `1 - a` it comes out
+                // with variance `2a^2 / (2 - a)`. Dividing that back out is
+                // what makes the law above an amplitude rather than a number
+                // that happens to come out near one.
+                let a = shaper.coefficient().max(1e-9);
+                let unity = (0.5 * (2.0 - a)).sqrt() / a;
+                self.port_jets[index] = jet * unity * shaper.process(step);
+            }
+
             // Induction is read at the bare cylinder phase. The retard and the
             // jitter are properties of *combustion* — how long the flame takes
             // to develop, and how much that varies — and a valve opening on the
@@ -3638,11 +3715,16 @@ impl EngineSynth {
             // Into the same pascals the cylinders' own excitations arrive in.
             *excitation = pool.process(&mut self.noise) * launch;
         }
-        self.network.step(
-            &self.excitations,
-            &self.bank_excitations,
-            &mut self.radiated,
-        );
+        for ((drive, pulse), jet) in self
+            .port_drive
+            .iter_mut()
+            .zip(self.excitations.iter())
+            .zip(self.port_jets.iter())
+        {
+            *drive = pulse + jet;
+        }
+        self.network
+            .step(&self.port_drive, &self.bank_excitations, &mut self.radiated);
         for (tp, &out) in self.tailpipe_pressures.iter_mut().zip(self.radiated.iter()) {
             *tp = out * (exhaust_level / launch);
         }

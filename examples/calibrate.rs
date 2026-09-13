@@ -1253,6 +1253,25 @@ fn markdown(all: &[Calibrated]) -> String {
          one and not the other is a statement about where the gas is \
          nonlinear rather than a knob. Open.\n"
     );
+    let _ = writeln!(
+        out,
+        "8. **The port jet's dipole efficiency is the one number in the exhaust \
+         path with a range instead of a derivation.** Curle's law says a flow \
+         past a solid boundary radiates as the sixth power of velocity and \
+         leaves the constant to measurement, so `JET_DIPOLE_EFFICIENCY` is \
+         measured and not derived. It is set at 0.005, which is *below* the \
+         published range for an orifice in a duct, and it is there because that \
+         is the loudest this catalogue's own guards allow: at 0.006 the \
+         mechanical floor stops measurably filling the gaps between firings, \
+         and at 0.02 the pulse stops reading as linear in the pressure \
+         difference that made it. Either the jet is genuinely this quiet in a \
+         runner — plausible, since a jet a fifth of the pipe's area couples \
+         into a plane wave badly — or the mechanical layer under it is too \
+         quiet and is masking how much room there is. The measurement that \
+         would settle it is the one this repository does not have: the \
+         tone-to-floor ratio of a recording of a real engine, which runs 5 to \
+         12 dB a bin where this catalogue runs 11 to 19. Open.\n"
+    );
 
     for c in all {
         let (seconds, (slow, fast)) = c.span;
