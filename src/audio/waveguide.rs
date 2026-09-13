@@ -3767,6 +3767,62 @@ mod tests {
     }
 
     #[test]
+    fn port_jet_noise_is_the_cube_of_throat_velocity() {
+        // Curle's dipole is a sixth power in radiated *power*, which is a cube
+        // in pressure. Doubling the velocity has to be eighteen decibels, not
+        // twelve — that is the whole difference between a chuff at each valve
+        // event and a hiss across the cycle.
+        let rho = 0.39;
+        let c = 600.0;
+        let area = 5.0e-4;
+        let pipe = std::f32::consts::PI * 0.020 * 0.020;
+        let at = |u: f32| jet_pressure_fluctuation_pa(u, rho, c, area, pipe);
+        let ratio = at(300.0) / at(150.0);
+        assert!(
+            (ratio - 8.0).abs() < 1e-3,
+            "doubling velocity must be eight times the pressure: {ratio}"
+        );
+        assert_eq!(
+            at(0.0),
+            0.0,
+            "a port with no flow through it makes no noise"
+        );
+    }
+
+    #[test]
+    fn a_port_that_chokes_stops_getting_louder() {
+        // The gap passes no more velocity past its sonic limit however much
+        // harder the cylinder pushes, so the noise has a ceiling and it is the
+        // gas that sets it.
+        let rho = 0.39;
+        let c = 600.0;
+        let area = 5.0e-4;
+        let sonic = throat_velocity(rho * area * c, area, rho, c);
+        let beyond = throat_velocity(rho * area * c * 4.0, area, rho, c);
+        assert!(
+            (sonic - c).abs() < 1e-3,
+            "the throat should be at Mach 1: {sonic}"
+        );
+        assert_eq!(sonic, beyond, "a choked throat cannot go faster");
+    }
+
+    #[test]
+    fn a_narrower_gap_hisses_higher() {
+        // St = f d / u. At one velocity the pitch is set by the gap alone, and
+        // it goes as one over the diameter, so a quarter of the area is twice
+        // the frequency.
+        let wide = jet_peak_hz(300.0, 4.0e-4);
+        let narrow = jet_peak_hz(300.0, 1.0e-4);
+        assert!(
+            ((narrow / wide) - 2.0).abs() < 1e-3,
+            "quartering the area must double the pitch: {wide:.0} Hz to {narrow:.0} Hz"
+        );
+        // And the absolute number is the Strouhal law, not a tuning.
+        let d = 2.0 * (4.0e-4f32 / std::f32::consts::PI).sqrt();
+        assert!((wide - JET_STROUHAL_NUMBER * 300.0 / d).abs() < 1e-3);
+    }
+
+    #[test]
     fn steepening_raises_high_orders_with_amplitude() {
         // A crest rides on its own induced flow through gas it has itself
         // heated, so it gains on the trough ahead of it and the front stands
