@@ -283,6 +283,14 @@ impl Listener {
         }
     }
 
+    /// Dyno or engine test cell listening position: 1.5 m from the engine with direct line of sight.
+    pub fn dyno() -> Self {
+        Self {
+            position: [1.2, 0.0, 0.8],
+            ear_spacing: LISTENER_EAR_SPACING,
+        }
+    }
+
     /// Left and right ear 3D positions `(left, right)` in world/vehicle coordinates [m].
     #[inline]
     pub fn ears(&self) -> ([f32; 3], [f32; 3]) {
@@ -311,6 +319,7 @@ pub struct AperturePath {
     left_ground_filter: OnePole,
     right_ground_filter: OnePole,
     pub ground_reflection: bool,
+    pub directivity: bool,
     /// Velocity vector of the aperture [m/s] (X right, Y forward, Z up).
     pub velocity: [f32; 3],
 }
@@ -335,6 +344,7 @@ impl AperturePath {
             left_ground_filter: OnePole::new(sample_rate, GROUND_ABSORPTION_CUTOFF_HZ),
             right_ground_filter: OnePole::new(sample_rate, GROUND_ABSORPTION_CUTOFF_HZ),
             ground_reflection: true,
+            directivity: true,
             velocity: [0.0, 0.0, 0.0],
         }
     }
@@ -342,6 +352,19 @@ impl AperturePath {
     /// Sets whether ground reflection interference is modelled.
     pub fn with_ground_reflection(mut self, enabled: bool) -> Self {
         self.ground_reflection = enabled;
+        self
+    }
+
+    /// Sets whether high-frequency aperture directivity shadowing is modelled.
+    pub fn with_directivity(mut self, enabled: bool) -> Self {
+        self.directivity = enabled;
+        self
+    }
+
+    /// Configures direct monitoring: bypasses ground reflection and off-axis shadowing.
+    pub fn with_direct_monitoring(mut self, direct: bool) -> Self {
+        self.ground_reflection = !direct;
+        self.directivity = !direct;
         self
     }
 
@@ -452,18 +475,24 @@ impl AperturePath {
         let del_left = self.left_delay.read(d_left);
         let del_right = self.right_delay.read(d_right);
 
-        let fc = self.aperture.corner_hz(SPEED_OF_SOUND_AIR);
-        self.left_directivity.set_cutoff(
-            self.sample_rate,
-            directivity_cutoff(angle_left, fc, self.sample_rate),
-        );
-        self.right_directivity.set_cutoff(
-            self.sample_rate,
-            directivity_cutoff(angle_right, fc, self.sample_rate),
-        );
+        let (dir_left, dir_right) = if self.directivity {
+            let fc = self.aperture.corner_hz(SPEED_OF_SOUND_AIR);
+            self.left_directivity.set_cutoff(
+                self.sample_rate,
+                directivity_cutoff(angle_left, fc, self.sample_rate),
+            );
+            self.right_directivity.set_cutoff(
+                self.sample_rate,
+                directivity_cutoff(angle_right, fc, self.sample_rate),
+            );
 
-        let dir_left = self.left_directivity.process(del_left);
-        let dir_right = self.right_directivity.process(del_right);
+            (
+                self.left_directivity.process(del_left),
+                self.right_directivity.process(del_right),
+            )
+        } else {
+            (del_left, del_right)
+        };
 
         self.left_air
             .set_cutoff(self.sample_rate, air_absorption_cutoff(r_left));
@@ -528,6 +557,15 @@ impl AperturePositions {
             tailpipes: vec![[0.40, -2.0, 0.32]],
             intake: [-0.2, 1.1, 0.60],
             block: [0.0, 0.5, 0.40],
+        }
+    }
+
+    /// Dyno bench layout where open headers discharge directly into the test cell.
+    pub fn dyno_headers() -> Self {
+        Self {
+            tailpipes: vec![[-0.50, 0.0, 0.40], [0.50, 0.0, 0.40]],
+            intake: [0.0, 0.5, 0.60],
+            block: [0.0, 0.0, 0.40],
         }
     }
 }
@@ -599,6 +637,25 @@ impl PropagationModel {
         }
         self.intake_path.update_motion(dt);
         self.block_path.update_motion(dt);
+    }
+
+    /// Configures direct monitoring (dyno / open-air / near-field),
+    /// which bypasses off-axis aperture directivity shadowing and ground comb filtering.
+    pub fn set_direct_monitoring(&mut self, direct: bool) {
+        for path in &mut self.tailpipe_paths {
+            path.ground_reflection = !direct;
+            path.directivity = !direct;
+        }
+        self.intake_path.ground_reflection = !direct;
+        self.intake_path.directivity = !direct;
+        self.block_path.ground_reflection = !direct;
+        self.block_path.directivity = !direct;
+    }
+
+    /// Builder for direct monitoring mode.
+    pub fn with_direct_monitoring(mut self, direct: bool) -> Self {
+        self.set_direct_monitoring(direct);
+        self
     }
 
     /// Propagates sound from all apertures to the listener's ears.
@@ -1114,5 +1171,24 @@ mod tests {
             high_mag < 0.35,
             "ground reflection must attenuate high frequencies to prevent comb ripple"
         );
+    }
+
+    #[test]
+    fn direct_monitoring_bypasses_ground_and_directivity() {
+        let sample_rate = 48_000.0;
+        let mut model = PropagationModel::new(
+            Listener::dyno(),
+            vec![Aperture::new([-0.5, 0.0, 0.4], 0.003, [0.0, -1.0, 0.0])],
+            Aperture::new([0.0, 0.5, 0.6], 0.004, [0.0, 1.0, 0.0]),
+            Aperture::new([0.0, 0.0, 0.4], 0.05, [0.0, 0.0, 1.0]),
+            sample_rate,
+        );
+        model.set_direct_monitoring(true);
+        for path in &model.tailpipe_paths {
+            assert!(!path.ground_reflection);
+            assert!(!path.directivity);
+        }
+        assert!(!model.intake_path.ground_reflection);
+        assert!(!model.intake_path.directivity);
     }
 }
