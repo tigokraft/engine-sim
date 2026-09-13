@@ -908,7 +908,7 @@ fn main() -> Result<()> {
     );
     for step in 0..steps {
         let (rpm, mut controls) = script.at(step as f64 * dt);
-        controls.exhaust_cutout = preset.exhaust.cutout;
+        controls.exhaust_cutout = preset.exhaust.cutout_fitted;
         block.update(dt, rpm);
         synth.set_snapshot(&source.sample(&block, rpm, dt, controls));
         synth.render(&mut chunk, CHANNELS);

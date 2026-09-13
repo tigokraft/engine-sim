@@ -268,7 +268,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.2, 0.054, 600.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.28, 0.042, 310.0); 4],
@@ -329,7 +329,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
                 tailpipe_flanged: false,
-                cutout: true,
+                cutout_fitted: true,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.38, 0.044, 310.0); 8],
@@ -387,7 +387,7 @@ impl EnginePreset {
                 silencers: vec![Silencer::Straight],
                 tailpipe: PipeSection::from_diameter(0.9, 0.065, 650.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.18, 0.048, 310.0); 8],
@@ -458,7 +458,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.1, 0.062, 650.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.22, 0.046, 310.0); 10],
@@ -521,7 +521,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.0, 0.055, 650.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.14, 0.042, 310.0); 12],
@@ -605,7 +605,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.0, 0.060, 700.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.20, 0.052, 320.0); 2],
@@ -661,7 +661,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.2, 0.060, 600.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.24, 0.042, 310.0); 4],
@@ -732,7 +732,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.4, 0.065, 600.0),
                 tailpipe_flanged: false,
-                cutout: true,
+                cutout_fitted: true,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.26, 0.044, 310.0); 8],
@@ -813,7 +813,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(0.35, 0.048, 620.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.18, 0.048, 310.0)],
@@ -937,7 +937,7 @@ impl EnginePreset {
                 ],
                 tailpipe: PipeSection::from_diameter(1.3, 0.055, 450.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.22, 0.040, 320.0); 4],
@@ -1000,7 +1000,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.6, 0.070, 600.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.30, 0.044, 310.0); 6],
@@ -1071,7 +1071,7 @@ impl EnginePreset {
                 silencers: vec![Silencer::Straight],
                 tailpipe: PipeSection::from_diameter(0.75, 0.062, 680.0),
                 tailpipe_flanged: true,
-                cutout: true,
+                cutout_fitted: true,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.16, 0.048, 310.0); 6],
@@ -1136,7 +1136,7 @@ impl EnginePreset {
                 silencers: vec![Silencer::Straight],
                 tailpipe: PipeSection::from_diameter(0.80, 0.055, 660.0),
                 tailpipe_flanged: true,
-                cutout: true,
+                cutout_fitted: true,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.18, 0.046, 310.0); 6],
@@ -1200,7 +1200,7 @@ impl EnginePreset {
                 silencers: vec![Silencer::Straight],
                 tailpipe: PipeSection::from_diameter(0.60, 0.066, 720.0),
                 tailpipe_flanged: false,
-                cutout: true,
+                cutout_fitted: true,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.24, 0.048, 310.0); 8],
@@ -1268,7 +1268,7 @@ impl EnginePreset {
                 silencers: vec![Silencer::Straight],
                 tailpipe: PipeSection::from_diameter(0.70, 0.068, 700.0),
                 tailpipe_flanged: true,
-                cutout: true,
+                cutout_fitted: true,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.15, 0.048, 310.0); 8],
@@ -1332,7 +1332,7 @@ impl EnginePreset {
                 silencers: vec![Silencer::Straight],
                 tailpipe: PipeSection::from_diameter(0.80, 0.062, 700.0),
                 tailpipe_flanged: true,
-                cutout: true,
+                cutout_fitted: true,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.18, 0.046, 310.0); 10],
@@ -1489,7 +1489,11 @@ pub struct Driveline {
     pub pumping: f64,
     /// Brake torque the block last reported at this speed [N m].
     pub torque: f64,
-    /// Whether the active exhaust cutout is open.
+    /// Whether the exhaust cutout is currently open.
+    ///
+    /// Live state, not fitment — defaults closed regardless of whether this
+    /// preset's [`ExhaustSystem::cutout_fitted`](crate::physics::plumbing::ExhaustSystem::cutout_fitted)
+    /// is set, so a car with a cutout valve does not drive around with it open.
     pub exhaust_cutout: bool,
     /// Whether anti-lag is enabled on lift.
     pub anti_lag: bool,
@@ -1520,7 +1524,7 @@ impl Driveline {
             load: preset.load,
             pumping: CLOSED_THROTTLE_PMEP * preset.displacement() / (4.0 * PI),
             torque: 0.0,
-            exhaust_cutout: preset.exhaust.cutout,
+            exhaust_cutout: preset.exhaust.cutout_fitted,
             anti_lag: preset.anti_lag,
             dyno_mode: DynoMode::FreeRev,
             dyno_absorber_torque: 0.0,
@@ -2013,8 +2017,8 @@ mod tests {
             "cross_plane_v8 should carry a Roots supercharger"
         );
         assert!(
-            v8.exhaust.cutout,
-            "cross_plane_v8 should have an active exhaust cutout"
+            v8.exhaust.cutout_fitted,
+            "cross_plane_v8 should have an exhaust cutout fitted"
         );
 
         let v10 = EnginePreset::v10();
@@ -2046,8 +2050,8 @@ mod tests {
 
         let tt_v8 = EnginePreset::twin_turbo_v8();
         assert!(
-            tt_v8.exhaust.cutout,
-            "twin_turbo_v8 should have an active exhaust cutout"
+            tt_v8.exhaust.cutout_fitted,
+            "twin_turbo_v8 should have an exhaust cutout fitted"
         );
         assert!(
             matches!(
@@ -2827,8 +2831,8 @@ mod tests {
                 engine.inertia
             );
             assert!(
-                engine.exhaust.cutout,
-                "race engine {} should have cutout enabled",
+                engine.exhaust.cutout_fitted,
+                "race engine {} should have a cutout fitted",
                 engine.name
             );
             assert_eq!(engine.limiter_mode, LimiterMode::RotatingStutter);

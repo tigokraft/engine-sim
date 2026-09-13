@@ -243,8 +243,10 @@ pub struct ExhaustConfig {
     pub tailpipe: PipeConfig,
     #[serde(default)]
     pub tailpipe_flanged: bool,
-    #[serde(default)]
-    pub cutout: bool,
+    /// On-disk key stays `cutout`: every `engines/*.toml` file already has
+    /// one, and it means fitment there exactly as it does on the Rust side.
+    #[serde(default, rename = "cutout")]
+    pub cutout_fitted: bool,
     /// Optional mode override: `"muffled"`, `"straight_pipe"`, or `"open_headers"`.
     #[serde(default)]
     pub mode: Option<String>,
@@ -551,7 +553,7 @@ impl EngineConfig {
             silencers,
             tailpipe,
             tailpipe_flanged: preset.exhaust.tailpipe_flanged,
-            cutout: preset.exhaust.cutout,
+            cutout_fitted: preset.exhaust.cutout_fitted,
             mode,
         };
 
@@ -884,7 +886,7 @@ impl EngineConfig {
             silencers,
             tailpipe,
             tailpipe_flanged: self.exhaust.tailpipe_flanged,
-            cutout: self.exhaust.cutout,
+            cutout_fitted: self.exhaust.cutout_fitted,
         };
 
         if let Some(mode) = &self.exhaust.mode {
@@ -1196,6 +1198,6 @@ mod tests {
         let built = config.to_preset();
         assert!(built.exhaust.is_open_headers());
         assert!(built.exhaust.silencers.is_empty());
-        assert!(built.exhaust.cutout);
+        assert!(built.exhaust.cutout_fitted);
     }
 }

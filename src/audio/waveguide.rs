@@ -2546,7 +2546,7 @@ impl ExhaustNetwork {
             // The mouth's reflection filter already holds part of the round
             // trip; leave it in the pipe as well and the tailpipe plays flat.
             tailpipe.set_boundary_phase_delay(mouth.phase_delay_samples());
-            tailpipe.set_steepening(exhaust.cutout || exhaust.is_open_headers());
+            tailpipe.set_steepening(exhaust.cutout_fitted || exhaust.is_open_headers());
             tailpipe.tune(gamma, r, stations.tailpipe);
             tailpipes.push(tailpipe);
             mouths.push(mouth);
@@ -2590,7 +2590,7 @@ impl ExhaustNetwork {
             pre_cross_down: vec![0.0; n_banks],
             collector_returns: vec![0.0; n_banks],
             chain_returns,
-            cutout_open: exhaust.cutout,
+            cutout_open: exhaust.cutout_fitted,
         }
     }
 
@@ -3512,7 +3512,7 @@ mod tests {
             silencers: vec![Silencer::Straight],
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
-            cutout: false,
+            cutout_fitted: false,
         };
 
         // A cross-plane V8's banks: cylinders 0, 2, 3, 7 on one, the rest on the other.
@@ -3920,7 +3920,7 @@ mod tests {
             ],
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
-            cutout: false,
+            cutout_fitted: false,
         };
 
         // 1. Back pressure must be strictly lower with cutout open than closed
@@ -3941,9 +3941,9 @@ mod tests {
             .collect();
 
         let snapshot = crate::audio::dsp::EngineSnapshot::default();
-        let run_and_measure_high_order_energy = |cutout: bool| -> f64 {
+        let run_and_measure_high_order_energy = |cutout_open: bool| -> f64 {
             let mut network = ExhaustNetwork::new(&exhaust, &cylinders, 1, FS, &snapshot);
-            network.set_cutout(cutout);
+            network.set_cutout(cutout_open);
 
             let mut high_energy = 0.0f64;
             let mut radiated = [0.0f32; 1];
@@ -3969,7 +3969,7 @@ mod tests {
 
         assert!(
             high_open > high_closed * 2.0,
-            "opening cutout bypass must raise high-order spectral content: open={high_open}, closed={high_closed}"
+            "opening the cutout bypass must raise high-order spectral content: open={high_open}, closed={high_closed}"
         );
     }
 
@@ -4039,7 +4039,7 @@ mod tests {
             silencers: vec![Silencer::Straight],
             tailpipe: PipeSection::from_diameter(tailpipe, diameter, 300.0),
             tailpipe_flanged: flanged,
-            cutout: false,
+            cutout_fitted: false,
         }
     }
 
@@ -4235,7 +4235,7 @@ mod tests {
             }],
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
-            cutout: false,
+            cutout_fitted: false,
         };
 
         let cylinders: Vec<crate::audio::dsp::CylinderTap> = (0..4)
