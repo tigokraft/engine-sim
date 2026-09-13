@@ -107,6 +107,23 @@ pub const RESONANCE_BAND_HZ: (f64, f64) = (50.0, 4_000.0);
 /// same figure.
 pub const TILT_BAND_HZ: (f64, f64) = (200.0, 12_000.0);
 
+/// How far an octave band's energy share may drift before it is a regression
+/// [dB].
+///
+/// A starting figure, not a derived one — unlike [`LEVEL_TOLERANCE_DB`] this
+/// quantity has no history of run-to-run scatter to measure yet, since this is
+/// the first stage that reads it. Two decibels is comfortably over the sub-dB
+/// noise a compiler or an architecture change can introduce and comfortably
+/// under the seven-to-eight decibel moves this plan exists to catch.
+pub const BAND_TOLERANCE_DB: f64 = 2.0;
+
+/// How far crest factor may drift before it is a regression [dB].
+///
+/// Also a starting figure. A decibel and a half is on the same order as
+/// [`LEVEL_TOLERANCE_DB`], and far under the twenty decibels the transients
+/// have been measured to have lost.
+pub const CREST_TOLERANCE_DB: f64 = 1.5;
+
 /// What one preset sounds like, as numbers.
 #[derive(Debug, Clone)]
 pub struct Fingerprint {
@@ -264,6 +281,30 @@ impl Measured {
                 self.tilt_db_per_octave - recorded.tilt_db_per_octave,
                 recorded.tilt_db_per_octave,
                 self.tilt_db_per_octave,
+            ));
+        }
+
+        for (i, (&was, &now)) in recorded
+            .octave_share
+            .iter()
+            .zip(self.octave_share.iter())
+            .enumerate()
+        {
+            if (now - was).abs() > BAND_TOLERANCE_DB {
+                drifted.push(format!(
+                    "the {} Hz band moved {:+.1} dB: {was:.1} dB to {now:.1} dB",
+                    orders::OCTAVE_CENTERS_HZ[i],
+                    now - was,
+                ));
+            }
+        }
+
+        if (self.crest_db - recorded.crest_db).abs() > CREST_TOLERANCE_DB {
+            drifted.push(format!(
+                "crest factor moved {:+.1} dB: {:.1} dB to {:.1} dB",
+                self.crest_db - recorded.crest_db,
+                recorded.crest_db,
+                self.crest_db,
             ));
         }
 
@@ -903,6 +944,62 @@ mod tests {
         assert!(lines[1].contains("order 4") && lines[1].contains("-3.0 dB"));
         assert!(lines[2].contains("resonance 2") && lines[2].contains("+12.5 %"));
         assert!(lines[3].contains("tilted"));
+    }
+
+    /// Stage T0's own additions to the comparator: a band or a crest factor
+    /// that moved by an arithmetic-sized amount stays silent, and one that
+    /// moved by the kind of amount this plan exists to catch is named.
+    #[test]
+    fn drift_names_the_band_and_crest_that_moved() {
+        let recorded = Fingerprint {
+            preset: "Test",
+            firing_order: 2.0,
+            balance: &[(2.0, 0.0)],
+            resonances: &[],
+            tilt_db_per_octave: -8.0,
+            octave_share: &[
+                -20.0, -18.0, -16.0, -14.0, -12.0, -10.0, -12.0, -14.0, -18.0, -22.0,
+            ],
+            crest_db: 14.0,
+        };
+        let mut quiet = Measured {
+            preset: "Test",
+            firing_order: 2.0,
+            balance: vec![(2.0, 0.0)],
+            resonances: vec![],
+            tilt_db_per_octave: -8.0,
+            octave_share: *recorded.octave_share,
+            crest_db: recorded.crest_db,
+        };
+
+        // A one-decibel nudge at 2 kHz (index 6) is ordinary noise.
+        quiet.octave_share[6] -= 1.0;
+        assert!(
+            quiet.drift(&recorded).is_empty(),
+            "a 1 dB move at 2 kHz read as drift: {:?}",
+            quiet.drift(&recorded)
+        );
+
+        // Three decibels there is not.
+        let mut loud = quiet.clone();
+        loud.octave_share[6] = recorded.octave_share[6] - 3.0;
+        let lines = loud.drift(&recorded);
+        assert_eq!(lines.len(), 1, "reported {lines:?}");
+        assert!(lines[0].contains("2000") && lines[0].contains("-3.0 dB"));
+
+        // The same shape of test for crest factor: silent under tolerance,
+        // named over it.
+        let mut hollow = quiet;
+        hollow.octave_share[6] = recorded.octave_share[6];
+        hollow.crest_db = recorded.crest_db - 1.0;
+        assert!(
+            hollow.drift(&recorded).is_empty(),
+            "a 1 dB crest move drifted"
+        );
+        hollow.crest_db = recorded.crest_db - 3.0;
+        let lines = hollow.drift(&recorded);
+        assert_eq!(lines.len(), 1, "reported {lines:?}");
+        assert!(lines[0].contains("crest factor") && lines[0].contains("-3.0 dB"));
     }
 
     /// A preset with no fingerprint is not regressed, so adding one to the
