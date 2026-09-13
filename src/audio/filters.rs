@@ -526,6 +526,32 @@ impl DelayLine {
         near + (far - near) * frac
     }
 
+    /// Reads `delay` samples back from the head using 3rd-order Lagrange interpolation
+    /// (stateless).
+    ///
+    /// The allpass read in [`DelayLine::read`] carries a filter state that is
+    /// only meaningful while the delay glides, so it cannot be used by a reader
+    /// whose position jumps — and a wave that has shocked has a read position
+    /// that jumps, because that is what a shock is. Lagrange-3 has no memory to
+    /// invalidate and is flat enough over the band that the jump costs no top.
+    #[inline(always)]
+    pub fn read_lagrange3(&self, delay: f32) -> f32 {
+        let d = delay.clamp(2.0, self.max_delay() - 2.0);
+        let n = d as usize;
+        let t = d - n as f32;
+        let len = self.buffer.len();
+        let tap = |j: usize| self.buffer[(self.write + len - j) & self.mask];
+        let s_m1 = tap(n - 1);
+        let s_0 = tap(n);
+        let s_1 = tap(n + 1);
+        let s_2 = tap(n + 2);
+        let l_m1 = -t * (t - 1.0) * (t - 2.0) / 6.0;
+        let l_0 = (t + 1.0) * (t - 1.0) * (t - 2.0) / 2.0;
+        let l_1 = -t * (t + 1.0) * (t - 2.0) / 2.0;
+        let l_2 = t * (t + 1.0) * (t - 1.0) / 6.0;
+        l_m1 * s_m1 + l_0 * s_0 + l_1 * s_1 + l_2 * s_2
+    }
+
     /// Reads `delay` samples back from the head using 1st-order Thiran allpass interpolation.
     ///
     /// Preserves full high-frequency energy with constant unity magnitude response
