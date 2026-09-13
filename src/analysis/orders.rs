@@ -1212,6 +1212,32 @@ pub fn octave_bands(samples: &[f32], sample_rate: f64) -> [f64; 10] {
     shares
 }
 
+/// Crest factor of a whole render, `20 log10(peak / rms)` [dB].
+///
+/// The one figure that tracks "hollow" when RMS does not: a signal whose
+/// transients have flattened can hold its RMS level while its peaks fall
+/// toward it, and a balance or a tilt reading — both taken from an *averaged*
+/// spectrum — cannot see that at all.
+pub fn crest_db(samples: &[f32]) -> f64 {
+    if samples.is_empty() {
+        return SILENCE_DB;
+    }
+    let mut peak = 0.0f64;
+    let mut sum_sq = 0.0f64;
+    for &s in samples {
+        let a = (s as f64).abs();
+        if a > peak {
+            peak = a;
+        }
+        sum_sq += a * a;
+    }
+    let rms = (sum_sq / samples.len() as f64).sqrt();
+    if rms <= 0.0 {
+        return SILENCE_DB;
+    }
+    db(peak / rms)
+}
+
 // ---------------------------------------------------------------------------
 // Resonance placement
 // ---------------------------------------------------------------------------
@@ -2198,5 +2224,41 @@ mod tests {
                 l - q
             );
         }
+    }
+
+    /// A square wave's peak equals its RMS; a sine's peak is `sqrt(2)` times
+    /// its RMS. At equal RMS the two differ by the analytic 3.01 dB.
+    #[test]
+    fn crest_factor_separates_a_square_wave_from_a_sine_by_three_db() {
+        let n = (2.0 * RATE) as usize;
+        let square: Vec<f32> = (0..n)
+            .map(|i| if i % 100 < 50 { 0.5 } else { -0.5 })
+            .collect();
+        let sine = tone(RATE / 100.0, 0.5, 2.0);
+
+        let square_crest = crest_db(&square);
+        let sine_crest = crest_db(&sine);
+        assert!(
+            (square_crest - 0.0).abs() < 0.05,
+            "a square wave's crest factor read {square_crest:.3} dB, not 0"
+        );
+        assert!(
+            ((sine_crest - square_crest) - 3.01).abs() < 0.1,
+            "the sine and square differed by {:.3} dB, not 3.01",
+            sine_crest - square_crest
+        );
+    }
+
+    /// Crest factor is a ratio of the render to itself, so a gain change must
+    /// not move it.
+    #[test]
+    fn crest_factor_does_not_move_with_output_gain() {
+        let quiet = crest_db(&tone(440.0, 0.25, 2.0));
+        let loud = crest_db(&tone(440.0, 0.5, 2.0));
+        assert!(
+            (quiet - loud).abs() < 1e-6,
+            "crest factor moved {:.6} dB on a 6 dB gain change",
+            loud - quiet
+        );
     }
 }
