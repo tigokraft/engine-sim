@@ -4989,6 +4989,64 @@ mod tests {
     }
 
     #[test]
+    fn backfire_pulse_has_no_energy_above_nyquist_bandlimit() {
+        // A steady stream of overlapping pops, rendered alone (no engine, no
+        // exhaust network), so any energy above the bandlimit is the pulse's
+        // own synthesis and nothing else.
+        let mut pool = PopPool::default();
+        let mut noise = Noise::new(3);
+        let n = 4 * 48_000;
+        let mut samples = Vec::with_capacity(n);
+        let mut cooldown = 0usize;
+        for _ in 0..n {
+            if cooldown == 0 {
+                pool.trigger(FS, 1.0, 0.00018, 0.010, 0.80, 0.0);
+                cooldown = (0.02 * FS) as usize;
+            } else {
+                cooldown -= 1;
+            }
+            samples.push(pool.process(&mut noise));
+        }
+
+        let spectrum = crate::analysis::orders::AverageSpectrum::of(&samples, FS as f64);
+        let passband = spectrum.db_at(3_000.0).unwrap();
+        let edge = spectrum.db_at(0.45 * FS as f64).unwrap();
+        let floor = spectrum.db_at(0.48 * FS as f64).unwrap();
+        assert!(
+            passband - edge > 60.0,
+            "expected the pulse's real content well clear of 0.45 * fs: passband {passband:.1} dB, edge {edge:.1} dB"
+        );
+        assert!(
+            (edge - floor).abs() < 1.0,
+            "expected 0.45 * fs to already sit at the render's own noise floor: edge {edge:.1} dB, floor {floor:.1} dB"
+        );
+    }
+
+    #[test]
+    fn backfire_ages_one_sample_apart_are_a_pure_delay() {
+        // Two pops a sample apart in `age` must differ by exactly one sample
+        // of delay and nothing else — no amplitude step from quantising to a
+        // control-rate grid, which is what sample-accurate triggering buys.
+        let mut younger = Pop::default();
+        let mut older = Pop::default();
+        younger.trigger(FS, 1.0, 0.00018, 0.010, 0.0, 3.0);
+        older.trigger(FS, 1.0, 0.00018, 0.010, 0.0, 4.0);
+
+        let samples: Vec<(f32, f32)> = (0..64)
+            .map(|_| (younger.process(0.0), older.process(0.0)))
+            .collect();
+        for i in 0..samples.len() - 1 {
+            let (_, older_now) = samples[i];
+            let (younger_next, _) = samples[i + 1];
+            assert!(
+                (older_now - younger_next).abs() < 1e-5,
+                "sample {i}: older pop ({older_now}) should equal the younger pop \
+                 one sample later ({younger_next}), not a quantised amplitude step"
+            );
+        }
+    }
+
+    #[test]
     fn control_block_is_shorter_than_v12_firing_interval() {
         // A V12 at 8000 rpm fires every 1.25 ms:
         // f_cycle = 8000 / 120 = 66.67 Hz -> 12 * 66.67 = 800 Hz -> T_fire = 1.25 ms.
