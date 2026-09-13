@@ -2487,11 +2487,16 @@ mod tests {
                 "at {rpm:.0} rpm the petrol four is not pipe-dominated: block \
                  {petrol_structure:.5} against pipe {petrol_pipe:.5}"
             );
-            // And the gap is not a rounding accident. Three times is the
-            // margin; it measures four and a half, consistently, across the
-            // range.
+            // And the gap is not a rounding accident. It used to measure four
+            // and a half, consistently, across the range; Stage T5 gave the
+            // inline-four's own expansion chamber a real loss term, which
+            // quietens exactly its pipe path and so narrows the gap — to as
+            // little as 2.8x at 3000 rpm — without touching the diesel side,
+            // which has no reactive chamber to lose energy from. 2.5x is
+            // comfortably under the new range and still an order away from
+            // "too much alike".
             assert!(
-                diesel_ratio > 3.0 * petrol_ratio,
+                diesel_ratio > 2.5 * petrol_ratio,
                 "at {rpm:.0} rpm the two engines radiate too much alike: diesel \
                  {diesel_ratio:.3} against petrol {petrol_ratio:.3}"
             );
