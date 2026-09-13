@@ -283,20 +283,28 @@ impl ExhaustSystem {
     }
 
     /// Converts this exhaust system into an open-headers configuration.
+    ///
+    /// Clearing the silencers and shortening the tailpipe already is open
+    /// headers; fitment is left exactly as it was rather than forced to
+    /// `true`, so a system with no cutout fitted does not gain one by having
+    /// its silencers taken off.
     pub fn into_open_headers(mut self) -> Self {
         let outlet_d = self.collector.outlet_diameter();
         self.silencers.clear();
         self.secondary.clear();
         self.crossover = Crossover::None;
         self.tailpipe = PipeSection::from_diameter(0.06, outlet_d, 800.0);
-        self.cutout_fitted = true;
         self
     }
 
     /// Converts this exhaust system into an unbaffled straight pipe system (no silencers).
+    ///
+    /// Clearing the silencer list already is the straight pipe; fitment is
+    /// left untouched. Setting it here as well used to make the mode
+    /// indistinguishable from a preset whose cutout was open to begin with —
+    /// the exact bug this system's `cutout_fitted` split exists to close.
     pub fn into_straight_pipe(mut self) -> Self {
         self.silencers.clear();
-        self.cutout_fitted = true;
         self
     }
 
@@ -691,7 +699,9 @@ mod tests {
         assert!(open.is_open_headers());
         assert!(open.silencers.is_empty());
         assert!(open.tailpipe.length <= 0.10);
-        assert!(open.cutout_fitted);
+        // Fitment is untouched by the conversion: this system had no cutout
+        // fitted, and clearing the silencers does not give it one.
+        assert!(!open.cutout_fitted);
     }
 
     #[test]
@@ -717,6 +727,9 @@ mod tests {
         assert!(!straight.is_open_headers());
         assert!(straight.silencers.is_empty());
         assert!((straight.tailpipe.length - 1.5).abs() < 1e-12);
-        assert!(straight.cutout_fitted);
+        // Fitment is untouched: clearing the silencer list is the straight
+        // pipe, and setting it here too would make this mode indistinguishable
+        // from a preset whose cutout was open from the start.
+        assert!(!straight.cutout_fitted);
     }
 }

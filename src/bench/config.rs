@@ -1198,6 +1198,8 @@ mod tests {
         let built = config.to_preset();
         assert!(built.exhaust.is_open_headers());
         assert!(built.exhaust.silencers.is_empty());
-        assert!(built.exhaust.cutout_fitted);
+        // The inline-four has no cutout fitted, and the open-headers
+        // conversion leaves fitment untouched rather than forcing it on.
+        assert!(!built.exhaust.cutout_fitted);
     }
 }
