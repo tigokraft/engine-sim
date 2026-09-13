@@ -130,6 +130,51 @@ impl CylinderGeometry {
         self.piston_area() * r * (s + r * s * c / radical)
     }
 
+    /// First derivative of piston displacement with crank angle [m/rad].
+    ///
+    /// ```text
+    /// x'(theta) = r sin theta + r^2 sin theta cos theta / sqrt(l^2 - r^2 sin^2 theta)
+    /// ```
+    ///
+    /// The exact derivative of [`CylinderGeometry::piston_position`], not the
+    /// small-angle `sin theta + (r/2l) sin 2theta` approximation — the closed
+    /// form is no harder to evaluate. It is the same expression already inside
+    /// [`CylinderGeometry::dvolume_dtheta`] (which is just `A * x'(theta)`) and
+    /// [`CylinderGeometry::piston_velocity`] (`omega * x'(theta)`); it is
+    /// broken out here because the inertia torque below needs `x'` and `x''`
+    /// together rather than folded into a volume rate or a velocity.
+    pub fn dposition_dtheta(&self, theta: f64) -> f64 {
+        let r = self.crank_radius();
+        let l = self.rod_length;
+        let (s, c) = theta.sin_cos();
+        let radical = (l * l - r * r * s * s).max(1e-12).sqrt();
+        r * (s + r * s * c / radical)
+    }
+
+    /// Second derivative of piston displacement with crank angle [m/rad^2].
+    ///
+    /// Differentiating `x'(theta) = r sin theta + r^2 sin theta cos theta / R`
+    /// with `R = sqrt(l^2 - r^2 sin^2 theta)` and, from the same expansion,
+    /// `dR/dtheta = -r^2 sin theta cos theta / R`, gives the closed form
+    ///
+    /// ```text
+    /// x''(theta) = r cos theta + r^2 cos(2 theta) / R
+    ///              + r^4 sin^2 theta cos^2 theta / R^3
+    /// ```
+    ///
+    /// Exact, not the `cos theta + (r/l) cos 2theta` two-term approximation:
+    /// the closed form for `x` is already sitting in this file, so there is no
+    /// reason to reach for the truncated series that approximates it.
+    pub fn d2position_dtheta2(&self, theta: f64) -> f64 {
+        let r = self.crank_radius();
+        let l = self.rod_length;
+        let (s, c) = theta.sin_cos();
+        let r2 = r * r;
+        let radical = (l * l - r2 * s * s).max(1e-12).sqrt();
+        let cos2theta = c * c - s * s;
+        r * c + r2 * cos2theta / radical + r2 * r2 * s * s * c * c / radical.powi(3)
+    }
+
     /// Piston velocity at a given shaft speed [m/s].
     pub fn piston_velocity(&self, theta: f64, omega: f64) -> f64 {
         let r = self.crank_radius();
@@ -414,6 +459,23 @@ mod tests {
         // dV/dtheta vanishes at both dead centres.
         approx(g.dvolume_dtheta(0.0), 0.0, 1e-15);
         approx(g.dvolume_dtheta(PI), 0.0, 1e-15);
+    }
+
+    #[test]
+    fn position_derivatives_match_central_differences_across_a_revolution() {
+        let g = GEOM();
+        let h = 1e-4;
+        for i in 0..360 {
+            let theta = deg(i as f64) + 0.001; // offset off the dead centres
+            let numeric_first =
+                (g.piston_position(theta + h) - g.piston_position(theta - h)) / (2.0 * h);
+            approx(g.dposition_dtheta(theta), numeric_first, 1e-6);
+
+            let numeric_second = (g.piston_position(theta + h) - 2.0 * g.piston_position(theta)
+                + g.piston_position(theta - h))
+                / (h * h);
+            approx(g.d2position_dtheta2(theta), numeric_second, 1e-6);
+        }
     }
 
     #[test]
