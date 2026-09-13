@@ -1287,10 +1287,11 @@ fn markdown(all: &[Calibrated]) -> String {
          produces boost, so there is no pressure ratio across the machine for \
          its loudness to be a fraction of, and there is no bypass to open when \
          the throttle shuts. The audible consequence is open question 2's other \
-         half — on the blown V8 at 4500 rpm the whine at order 8.4 is still \
-         among the three loudest things in the render and the firing order is \
-         not in the top seven, which is the sound of an inverter and not of an \
-         engine. It closes with the compressor model in Stage 13, not with a \
+         half. Held at 4500 rpm wide open, the blown V8's loudest single order \
+         is the whine at 8.4, three decibels clear of the next thing, and its \
+         firing order is not in the loudest ten at all. A smooth tone locked to \
+         a fixed multiple of shaft speed and rising with it is the sound of an \
+         inverter, not of an engine. It closes with the compressor model in Stage 13, not with a \
          number. Open.\n"
     );
 
