@@ -1138,6 +1138,10 @@ mod tests {
             ("engines/gt3_cup_992.toml", EnginePreset::gt3_cup_992()),
             ("engines/gt3_cup_997.toml", EnginePreset::gt3_cup_997()),
             ("engines/amg_gt3.toml", EnginePreset::amg_gt3()),
+            (
+                "engines/ferrari_458_gt3.toml",
+                EnginePreset::ferrari_458_gt3(),
+            ),
         ];
 
         for (path, preset) in &presets {

@@ -1202,6 +1202,70 @@ impl EnginePreset {
             limiter_cut: LimiterCut::Spark,
         }
     }
+
+    /// 4.5 litre Ferrari 458 Italia GT3 naturally aspirated flat-plane V8 race engine.
+    ///
+    /// Screaming to 9200 rpm with individual velocity stacks, 4-into-1 race
+    /// extractors with an X-pipe crossover, and lightweight internal components,
+    /// producing a pure high-frequency tenor howl.
+    pub fn ferrari_458_gt3() -> Self {
+        Self {
+            name: "Ferrari 458 Italia GT3",
+            note: "4.5L flat-plane V8 screaming to 9200 rpm: tuned 4-into-1 race extractors and pure tenor howl.",
+            model: CylinderModel {
+                geometry: CylinderGeometry::new(0.0940, 0.0810, 0.1420, 13.0),
+                valves: ValveTrain {
+                    intake: ValveEvent::new(deg(708.0), deg(278.0), 0.0128, 0.0410, 0.69),
+                    exhaust: ValveEvent::new(deg(482.0), deg(274.0), 0.0118, 0.0350, 0.66),
+                },
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    deg(345.0),
+                    deg(48.0),
+                    5.0,
+                    2.1,
+                    0.98,
+                )),
+                ..CylinderModel::default()
+            },
+            firing: FiringOrder::flat_plane_v8(),
+            induction: Induction::NaturallyAspirated,
+            mechanical: MechanicalSpec {
+                gear_whine: Some(ImpulsiveSpec::order(38.0, 0.28)),
+                timing_chain: Some(ImpulsiveSpec::order(24.0, 0.22)),
+                intake_valve: Some(ImpulsiveSpec::per_cylinder(0.55)),
+                ..MechanicalSpec::default()
+            },
+            exhaust: ExhaustSystem {
+                primaries: vec![PipeSection::from_diameter(0.40, 0.042, 910.0); 8],
+                collector: Collector::from_diameter(4, 0.068, 0.18),
+                secondary: vec![],
+                crossover: Crossover::XPipe { position: 0.70 },
+                silencers: vec![Silencer::Straight],
+                tailpipe: PipeSection::from_diameter(0.70, 0.068, 700.0),
+                tailpipe_flanged: true,
+                cutout: true,
+            },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.15, 0.048, 310.0); 8],
+                plenum_volume: 0.0,
+                throttle: ThrottleLayout::IndividualBodies { bore: 0.050 },
+                airbox: None,
+                snorkel: None,
+                trumpet_flanged: false,
+            },
+            block_mass: 170.0,
+            bore_spacing: 0.104,
+            redline: 9_200.0,
+            float_rpm: default_float_rpm(9_200.0),
+            idle: 1_100.0,
+            inertia: 0.17,
+            load: (4.5, 0.013, 4.8e-5),
+            aperture_positions: AperturePositions::mid_engine_dual(),
+            anti_lag: false,
+            limiter_mode: LimiterMode::RotatingStutter,
+            limiter_cut: LimiterCut::Spark,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
