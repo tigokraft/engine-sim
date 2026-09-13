@@ -399,12 +399,19 @@ impl EngineConfig {
             exhaust_lift: valves.exhaust.max_lift,
             exhaust_diameter: valves.exhaust.diameter,
             exhaust_discharge_coeff: valves.exhaust.discharge_coefficient,
-            // Only named when it differs from what `bore` alone would give,
-            // so round-tripping a preset that never set one does not clutter
-            // its file with a value that was always implicit.
-            reciprocating_mass: (cyl_geom.reciprocating_mass
-                != default_reciprocating_mass(cyl_geom.bore))
-            .then_some(cyl_geom.reciprocating_mass),
+            // Only named when it differs meaningfully from what `bore` alone
+            // would give, so round-tripping a preset that never set one does
+            // not clutter its file with a value that was always implicit. A
+            // relative tolerance rather than exact equality, because a bore
+            // that reached this geometry through a compile-time constant and
+            // one recomputed here at runtime can round `powi(3)` to different
+            // last bits of the same number.
+            reciprocating_mass: {
+                let default_mass = default_reciprocating_mass(cyl_geom.bore);
+                let differs = (cyl_geom.reciprocating_mass - default_mass).abs()
+                    > 1e-9 * default_mass.max(1e-12);
+                differs.then_some(cyl_geom.reciprocating_mass)
+            },
         };
 
         let combustion = match &preset.model.combustion {
