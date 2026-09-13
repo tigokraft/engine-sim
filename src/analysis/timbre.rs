@@ -47,7 +47,9 @@
 //! bit-identical between two runs of one build, so a level that moves by more
 //! than a decibel moved because the audio did.
 
-use crate::analysis::orders::{self, half_orders, AverageSpectrum, Peak, SILENCE_DB};
+use crate::analysis::orders::{
+    self, crest_db, half_orders, octave_bands, AverageSpectrum, Peak, SILENCE_DB,
+};
 use crate::analysis::render::RenderPlan;
 use crate::analysis::script;
 use crate::bench::EnginePreset;
@@ -121,6 +123,12 @@ pub struct Fingerprint {
     pub resonances: &'static [f64],
     /// Slope of the noise floor over [`TILT_BAND_HZ`] [dB/octave].
     pub tilt_db_per_octave: f64,
+    /// Energy share per octave band, 31.5 Hz through 16 kHz, relative to the
+    /// render's total energy [dB]. See [`orders::octave_bands`].
+    pub octave_share: &'static [f64; 10],
+    /// Crest factor of the whole render, `20 log10(peak / rms)` [dB]. See
+    /// [`orders::crest_db`].
+    pub crest_db: f64,
 }
 
 /// The same, freshly measured, with the strings owned by the measurement.
@@ -136,6 +144,10 @@ pub struct Measured {
     pub resonances: Vec<Peak>,
     /// Slope of the noise floor [dB/octave].
     pub tilt_db_per_octave: f64,
+    /// Energy share per octave band, 31.5 Hz through 16 kHz [dB].
+    pub octave_share: [f64; 10],
+    /// Crest factor of the whole render [dB].
+    pub crest_db: f64,
 }
 
 /// Renders one preset through the calibration sweep and reduces it to numbers.
@@ -176,6 +188,8 @@ pub fn measure(preset: &EnginePreset) -> Measured {
         tilt_db_per_octave: spectrum
             .tilt_db_per_octave(TILT_BAND_HZ.0, TILT_BAND_HZ.1)
             .unwrap_or(0.0),
+        octave_share: octave_bands(&mono, render.sample_rate),
+        crest_db: crest_db(&mono),
     }
 }
 
@@ -287,6 +301,15 @@ impl Measured {
             "        tilt_db_per_octave: {:.1},",
             self.tilt_db_per_octave
         );
+        let _ = write!(out, "        octave_share: &[");
+        for (i, share) in self.octave_share.iter().enumerate() {
+            if i % 5 == 0 {
+                let _ = write!(out, "\n            ");
+            }
+            let _ = write!(out, "{share:.1}, ");
+        }
+        let _ = writeln!(out, "\n        ],");
+        let _ = writeln!(out, "        crest_db: {:.1},", self.crest_db);
         let _ = writeln!(out, "    }},");
         out
     }
@@ -316,6 +339,10 @@ pub const RECORDED: &[Fingerprint] = &[
         ],
         resonances: &[1483.3, 216.3, 3597.9],
         tilt_db_per_octave: -9.3,
+        octave_share: &[
+            -8.3, -14.8, -13.6, -1.3, -17.6, -17.4, -26.8, -35.8, -41.6, -52.7,
+        ],
+        crest_db: 12.0,
     },
     Fingerprint {
         preset: "Cross-plane V8",
@@ -340,6 +367,10 @@ pub const RECORDED: &[Fingerprint] = &[
         ],
         resonances: &[1536.0, 3900.3, 83.6],
         tilt_db_per_octave: -10.9,
+        octave_share: &[
+            -18.3, -3.4, -8.2, -6.9, -9.2, -14.0, -27.6, -33.0, -44.1, -56.5,
+        ],
+        crest_db: 15.2,
     },
     Fingerprint {
         preset: "Flat-plane V8",
@@ -364,6 +395,10 @@ pub const RECORDED: &[Fingerprint] = &[
         ],
         resonances: &[943.8, 1416.0, 209.5],
         tilt_db_per_octave: -9.7,
+        octave_share: &[
+            -17.7, -6.9, -8.8, -4.0, -6.8, -16.9, -27.1, -36.5, -45.2, -53.6,
+        ],
+        crest_db: 13.9,
     },
     Fingerprint {
         preset: "V10",
@@ -392,6 +427,10 @@ pub const RECORDED: &[Fingerprint] = &[
         ],
         resonances: &[1321.3, 2079.9, 519.3],
         tilt_db_per_octave: -7.9,
+        octave_share: &[
+            -12.8, -9.1, -3.3, -13.9, -6.6, -16.0, -13.4, -25.8, -41.3, -52.1,
+        ],
+        crest_db: 15.9,
     },
     Fingerprint {
         preset: "V12",
@@ -424,6 +463,10 @@ pub const RECORDED: &[Fingerprint] = &[
         ],
         resonances: &[1552.9, 1192.7, 274.9],
         tilt_db_per_octave: -14.2,
+        octave_share: &[
+            -21.6, -11.9, -13.3, -2.6, -5.3, -15.4, -31.0, -40.0, -45.5, -55.5,
+        ],
+        crest_db: 12.0,
     },
     Fingerprint {
         preset: "2-Rotor Wankel",
@@ -440,6 +483,10 @@ pub const RECORDED: &[Fingerprint] = &[
         ],
         resonances: &[53.6, 1144.6, 1826.1],
         tilt_db_per_octave: -10.1,
+        octave_share: &[
+            -16.5, -4.4, -10.5, -3.3, -15.6, -15.8, -27.9, -37.8, -47.8, -60.4,
+        ],
+        crest_db: 14.4,
     },
     Fingerprint {
         preset: "Turbo Inline-4",
@@ -456,6 +503,10 @@ pub const RECORDED: &[Fingerprint] = &[
         ],
         resonances: &[1636.3, 50.4, 1149.5],
         tilt_db_per_octave: -8.1,
+        octave_share: &[
+            -11.6, -2.0, -12.3, -7.3, -16.3, -16.8, -26.4, -29.9, -27.7, -42.9,
+        ],
+        crest_db: 15.7,
     },
     Fingerprint {
         preset: "Twin-turbo V8",
@@ -480,6 +531,10 @@ pub const RECORDED: &[Fingerprint] = &[
         ],
         resonances: &[104.5, 1786.8, 1112.0],
         tilt_db_per_octave: -8.7,
+        octave_share: &[
+            -19.6, -8.1, -2.8, -6.8, -12.2, -15.1, -29.6, -26.8, -39.8, -59.3,
+        ],
+        crest_db: 15.4,
     },
     Fingerprint {
         preset: "Turbo Inline-6",
@@ -500,6 +555,10 @@ pub const RECORDED: &[Fingerprint] = &[
         ],
         resonances: &[148.7, 1407.7, 1025.0],
         tilt_db_per_octave: -9.7,
+        octave_share: &[
+            -15.4, -10.8, -1.7, -7.1, -20.6, -20.0, -27.6, -36.0, -50.6, -64.6,
+        ],
+        crest_db: 14.2,
     },
     Fingerprint {
         preset: "Turbodiesel I4",
@@ -516,6 +575,10 @@ pub const RECORDED: &[Fingerprint] = &[
         ],
         resonances: &[3592.5, 408.7, 2036.4],
         tilt_db_per_octave: -5.0,
+        octave_share: &[
+            -15.4, -9.2, -3.1, -11.7, -7.6, -12.1, -25.2, -15.4, -24.8, -47.9,
+        ],
+        crest_db: 14.2,
     },
     Fingerprint {
         preset: "Big Single",
@@ -523,6 +586,10 @@ pub const RECORDED: &[Fingerprint] = &[
         balance: &[(0.5, 0.0), (1.0, 10.9)],
         resonances: &[116.0, 2096.0, 1197.4],
         tilt_db_per_octave: -7.5,
+        octave_share: &[
+            -23.7, -12.6, -3.7, -10.0, -6.2, -8.7, -16.3, -20.6, -35.8, -46.6,
+        ],
+        crest_db: 18.4,
     },
 ];
 
@@ -777,6 +844,10 @@ mod tests {
             balance: &[(0.5, -45.0), (1.0, -12.0), (2.0, 0.0), (4.0, -8.0)],
             resonances: &[200.0, 800.0],
             tilt_db_per_octave: -8.0,
+            octave_share: &[
+                -20.0, -18.0, -16.0, -14.0, -12.0, -10.0, -12.0, -14.0, -18.0, -22.0,
+            ],
+            crest_db: 14.0,
         };
         let unchanged = Measured {
             preset: "Test",
@@ -795,6 +866,10 @@ mod tests {
                 },
             ],
             tilt_db_per_octave: -8.4,
+            octave_share: [
+                -20.3, -18.2, -16.1, -14.2, -12.3, -10.2, -12.4, -14.3, -18.4, -22.4,
+            ],
+            crest_db: 14.3,
         };
         assert!(
             unchanged.drift(&recorded).is_empty(),
