@@ -4,6 +4,7 @@ Canonical working agreement: [AGENTS.md](AGENTS.md).
 Implementation roadmap: [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md).
 Timbre roadmap: [docs/TIMBRE_PLAN.md](docs/TIMBRE_PLAN.md).
 Mechanism roadmap: [docs/MECHANISM_PLAN.md](docs/MECHANISM_PLAN.md).
+Turbo roadmap: [docs/TURBO_PLAN.md](docs/TURBO_PLAN.md).
 
 The rule below is repeated here in full because it is not optional.
 
