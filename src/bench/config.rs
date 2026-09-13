@@ -66,6 +66,10 @@ pub struct BlockConfig {
     pub limiter_mode: LimiterMode,
     #[serde(default = "default_limiter_cut")]
     pub limiter_cut: LimiterCut,
+    /// Valve float threshold speed override [rev/min]; absent lets it default
+    /// from redline via [`default_float_rpm`].
+    #[serde(default)]
+    pub float_rpm: Option<f64>,
 }
 
 fn default_limiter_mode() -> LimiterMode {
@@ -99,6 +103,10 @@ pub struct CylinderConfig {
     /// name one.
     #[serde(default)]
     pub reciprocating_mass: Option<f64>,
+    /// Valve float threshold speed override [rev/min]; absent lets it default
+    /// from redline via [`default_float_rpm`].
+    #[serde(default)]
+    pub float_rpm: Option<f64>,
 }
 
 fn default_intake_discharge() -> f64 {
@@ -310,6 +318,8 @@ pub struct WastegateConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct MechanicalConfig {
     #[serde(default)]
+    pub float_rpm: Option<f64>,
+    #[serde(default)]
     pub intake_valve: Option<ImpulsiveConfig>,
     #[serde(default)]
     pub exhaust_valve: Option<ImpulsiveConfig>,
@@ -382,6 +392,7 @@ impl EngineConfig {
             anti_lag: preset.anti_lag,
             limiter_mode: preset.limiter_mode,
             limiter_cut: preset.limiter_cut,
+            float_rpm: None,
         };
 
         let cyl_geom = &preset.model.geometry;
@@ -413,6 +424,12 @@ impl EngineConfig {
                 let differs = (cyl_geom.reciprocating_mass - default_mass).abs()
                     > 1e-9 * default_mass.max(1e-12);
                 differs.then_some(cyl_geom.reciprocating_mass)
+            },
+            float_rpm: {
+                let default_float = default_float_rpm(preset.redline);
+                let differs =
+                    (preset.float_rpm - default_float).abs() > 1e-9 * default_float.max(1e-12);
+                differs.then_some(preset.float_rpm)
             },
         };
 
@@ -609,6 +626,7 @@ impl EngineConfig {
         };
 
         let mechanical = MechanicalConfig {
+            float_rpm: None,
             intake_valve: preset
                 .mechanical
                 .intake_valve
@@ -1025,7 +1043,12 @@ impl EngineConfig {
             block_mass: self.block.mass,
             bore_spacing: self.block.bore_spacing,
             redline: self.block.redline,
-            float_rpm: default_float_rpm(self.block.redline),
+            float_rpm: self
+                .cylinder
+                .float_rpm
+                .or(self.block.float_rpm)
+                .or(self.mechanical.float_rpm)
+                .unwrap_or_else(|| default_float_rpm(self.block.redline)),
             idle: self.block.idle,
             inertia: self.block.inertia,
             load: (self.block.load[0], self.block.load[1], self.block.load[2]),
@@ -1135,6 +1158,7 @@ mod tests {
             assert_eq!(restored.name, preset.name);
             assert_eq!(restored.firing.len(), preset.firing.len());
             assert_eq!(restored.redline, preset.redline);
+            assert!((restored.float_rpm - preset.float_rpm).abs() < 1e-6);
             assert_eq!(restored.limiter_mode, preset.limiter_mode);
             assert_eq!(restored.limiter_cut, preset.limiter_cut);
             assert!(
@@ -1143,6 +1167,16 @@ mod tests {
                     < 1e-9
             );
         }
+    }
+
+    #[test]
+    fn engine_config_float_rpm_override_roundtrips() {
+        let mut preset = EnginePreset::inline_four();
+        preset.float_rpm = 8_200.0;
+        let toml_str = preset.to_toml().expect("failed to serialize preset");
+        assert!(toml_str.contains("float_rpm = 8200.0"));
+        let restored = EnginePreset::from_toml(&toml_str).expect("failed to deserialize preset");
+        assert_eq!(restored.float_rpm, 8_200.0);
     }
 
     #[test]
