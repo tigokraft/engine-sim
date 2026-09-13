@@ -4149,4 +4149,54 @@ mod tests {
              {f_short:.1} Hz to {f_long:.1} Hz, a ratio of {ratio:.3} rather than one half"
         );
     }
+
+    #[test]
+    fn unflanged_tailpipe_effective_length_matches_karal_flugge() {
+        // A tailpipe read through the full `ExhaustNetwork` — valve, junction,
+        // taper and the collector's one-sample return register, see that
+        // field's own doc comment — carries a little extra latency beside the
+        // mouth's, on the order of the "about 7 mm of pipe" the network
+        // documents for that register alone. That is shared by any tailpipe on
+        // this rig regardless of its flange, so building the *same* geometry
+        // flanged and unflanged and differencing the two measured peaks
+        // cancels it and leaves exactly the term this test is about: the
+        // 0.8216a and 0.6133a end corrections read back off where the peak
+        // actually landed, rather than asserted.
+        use crate::audio::radiation::{FLANGED_END_CORRECTION, UNFLANGED_END_CORRECTION};
+
+        const FS: f32 = 48_000.0;
+        const DIAMETER: f64 = 0.050;
+        const TAPER: f64 = 0.02;
+        const TAILPIPE: f64 = 0.35;
+        const L_PRIMARY: f64 = 0.60;
+        let radius = DIAMETER * 0.5;
+        let c = speed_of_sound(1.33, 287.0, 300.0);
+        let guess = c / (4.0 * (L_PRIMARY + TAPER + TAILPIPE) as f32);
+
+        let unflanged = single_pipe_flanged(L_PRIMARY, TAPER, TAILPIPE, DIAMETER, false);
+        let flanged = single_pipe_flanged(L_PRIMARY, TAPER, TAILPIPE, DIAMETER, true);
+
+        let f_unflanged = impulse_resonance_hz(&unflanged, FS, guess, 0.3);
+        let f_flanged = impulse_resonance_hz(&flanged, FS, guess, 0.3);
+
+        // A wider end correction is a longer effective pipe, and a longer pipe
+        // resonates lower: the flanged case must land under the unflanged one.
+        assert!(
+            f_flanged < f_unflanged,
+            "the flanged mouth ({f_flanged:.1} Hz) should resonate lower than the \
+             unflanged one ({f_unflanged:.1} Hz), not higher or the same"
+        );
+
+        let implied_gap = c / (4.0 * f_flanged) - c / (4.0 * f_unflanged);
+        let expected_gap = ((FLANGED_END_CORRECTION - UNFLANGED_END_CORRECTION) * radius) as f32;
+
+        let error = (implied_gap - expected_gap).abs() / expected_gap;
+        assert!(
+            error < 0.20,
+            "flanged vs unflanged moved the effective length by {implied_gap:.4} m; the \
+             Karal-Flugge constants ({FLANGED_END_CORRECTION} - {UNFLANGED_END_CORRECTION}) x \
+             {radius:.4} m radius predict {expected_gap:.4} m ({:.1} % off)",
+            error * 100.0
+        );
+    }
 }
