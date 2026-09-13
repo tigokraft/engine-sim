@@ -537,6 +537,18 @@ impl FiringOrder {
         Self::new(&[1, 5, 3, 6, 2, 4], &|_| 0)
     }
 
+    /// Boxer six (flat six), firing order 1-6-2-4-3-5 across two opposing banks.
+    ///
+    /// Cylinders 1-3 are bank 0 (left) and 4-6 are bank 1 (right). Over 720 degrees
+    /// of four-stroke cycle, six cylinders fire every 120 degrees overall, and
+    /// firings alternate strictly between banks: 1 (bank 0), 6 (bank 1), 2 (bank 0),
+    /// 4 (bank 1), 3 (bank 0), 5 (bank 1). Each bank therefore experiences an even
+    /// 240-degree pulse interval into its collector — the geometric reason a
+    /// Porsche flat-six sings in clean harmonic triads rather than burbling.
+    pub fn boxer_six() -> Self {
+        Self::new(&[1, 6, 2, 4, 3, 5], &|n| u8::from(n > 3))
+    }
+
     /// 90-degree V10, firing order 1-10-9-4-3-6-5-8-7-2.
     ///
     /// Ten cylinders over 720 degrees is a 72-degree firing interval, which a
