@@ -1272,6 +1272,27 @@ fn markdown(all: &[Calibrated]) -> String {
          tone-to-floor ratio of a recording of a real engine, which runs 5 to \
          12 dB a bin where this catalogue runs 11 to 19. Open.\n"
     );
+    let _ = writeln!(
+        out,
+        "9. **The blowers' loudness is derived, their level is not, and it \
+         cannot be until the solver makes boost.** A displacement blower's \
+         noise is its rotors handing pockets of gas to a discharge port, and a \
+         volume velocity across an aperture launches `c mdot / A` like every \
+         other aperture here, so both supercharger voices now scale with the \
+         induction mass flow the solver actually reports. That replaced a law \
+         that went as the square of crank speed times a throttle term, which \
+         had a blower spinning fast on a shut throttle at a third of full voice \
+         when a bypassed blower is pumping almost nothing. What did not change \
+         is the constant in front, and it cannot: nothing in the physics \
+         produces boost, so there is no pressure ratio across the machine for \
+         its loudness to be a fraction of, and there is no bypass to open when \
+         the throttle shuts. The audible consequence is open question 2's other \
+         half — on the blown V8 at 4500 rpm the whine at order 8.4 is still \
+         among the three loudest things in the render and the firing order is \
+         not in the top seven, which is the sound of an inverter and not of an \
+         engine. It closes with the compressor model in Stage 13, not with a \
+         number. Open.\n"
+    );
 
     for c in all {
         let (seconds, (slow, fast)) = c.span;

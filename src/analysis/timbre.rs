@@ -336,10 +336,10 @@ pub const RECORDED: &[Fingerprint] = &[
             (6.5, -7.7),
             (7.0, -27.2),
             (7.5, -27.1),
-            (8.0, -10.3),
+            (8.0, -10.4),
         ],
         resonances: &[1536.0, 3900.3, 83.6],
-        tilt_db_per_octave: -10.7,
+        tilt_db_per_octave: -10.9,
     },
     Fingerprint {
         preset: "Flat-plane V8",
@@ -390,8 +390,8 @@ pub const RECORDED: &[Fingerprint] = &[
             (9.5, -41.1),
             (10.0, -13.6),
         ],
-        resonances: &[2158.9, 1321.4, 2400.2],
-        tilt_db_per_octave: -8.0,
+        resonances: &[1321.3, 2079.9, 519.3],
+        tilt_db_per_octave: -7.9,
     },
     Fingerprint {
         preset: "V12",

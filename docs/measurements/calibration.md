@@ -11,9 +11,9 @@ Every figure below is *relative*: an order against the firing order, a measured 
 | Engine | Firing order | Order balance rms | Worst order | Crank nulls | Modes placed | Floor tilt |
 |---|---:|---:|---:|---:|---:|---:|
 | [Inline-4](#inline-4) | 2 | 13.2 dB | -18.6 dB on 4 | -20.6 dB on 1 | 2/2 of 11 | -9.3 dB/oct |
-| [Cross-plane V8](#cross-plane-v8) | 4 | 7.9 dB | -15.7 dB on 7.5 | -8.5 dB on 1, not enforced | 1/6 of 11 | -10.7 dB/oct |
+| [Cross-plane V8](#cross-plane-v8) | 4 | 7.9 dB | -15.8 dB on 7.5 | -8.5 dB on 1, not enforced | 1/6 of 11 | -10.9 dB/oct |
 | [Flat-plane V8](#flat-plane-v8) | 4 | 19.2 dB | -26.8 dB on 6 | -14.8 dB on 0.5, not enforced | 3/4 of 8 | -9.7 dB/oct |
-| [V10](#v10) | 5 | 16.4 dB | -27.9 dB on 8.5 | -3.7 dB on 0.5, not enforced | 2/4 of 10 | -8.0 dB/oct |
+| [V10](#v10) | 5 | 16.4 dB | -27.9 dB on 8.5 | -3.7 dB on 0.5, not enforced | 2/5 of 10 | -7.9 dB/oct |
 | [V12](#v12) | 6 | 12.4 dB | -18.6 dB on 12 | -11.5 dB on 0.5, not enforced | 4/6 of 10 | -14.2 dB/oct |
 | [2-Rotor Wankel](#2-rotor-wankel) | 2 | 10.5 dB | -14.8 dB on 4 | -24.2 dB on 0.5 | 3/3 of 9 | -10.1 dB/oct |
 | [Turbo Inline-4](#turbo-inline-4) | 2 | 2.8 dB | -4.0 dB on 4 | -13.7 dB on 1, not enforced | 2/5 of 11 | -8.1 dB/oct |
@@ -62,6 +62,8 @@ Recorded rather than closed, as Stage 16 requires: each of these is a disagreeme
 It is switched off. Driven at the pressure a port actually launches — `c mdot / A`, 0.31 atmospheres at idle and 0.65 at the limiter across this catalogue, a third of the difference across the valve because a port is a restriction and not an open end — three of this repository's own guards fail. The band the primaries work in stops falling as they are stretched: 234.6, 259.8, 237.4 Hz over a half-again stretch, where it has to fall every step. The cam's grip on mid-band tilt falls from over ten decibels to five and a half. The limiter bounce stops standing out of a clean pull. The cause is open question 5: a primary's loop pays about 1.4 dB a round trip, so a pulse goes round it some thirty times and steepens on every one of them, and a nonlinearity accumulated thirty times is louder than the geometry it is supposed to be colouring. Four times the wall enhancement brings two of the three guards back, which is precisely the constant question 5 says has no derivation, so it is not taken. What this wants is either that derivation, or the nonlinearity applied to the launched pulse on its one-way run down the primary and not to the resonant field behind it — `beta` is proportional to `p` and the field is twenty decibels under the pulse, so steepening the one and not the other is a statement about where the gas is nonlinear rather than a knob. Open.
 
 8. **The port jet's dipole efficiency is the one number in the exhaust path with a range instead of a derivation.** Curle's law says a flow past a solid boundary radiates as the sixth power of velocity and leaves the constant to measurement, so `JET_DIPOLE_EFFICIENCY` is measured and not derived. It is set at 0.005, which is *below* the published range for an orifice in a duct, and it is there because that is the loudest this catalogue's own guards allow: at 0.006 the mechanical floor stops measurably filling the gaps between firings, and at 0.02 the pulse stops reading as linear in the pressure difference that made it. Either the jet is genuinely this quiet in a runner — plausible, since a jet a fifth of the pipe's area couples into a plane wave badly — or the mechanical layer under it is too quiet and is masking how much room there is. The measurement that would settle it is the one this repository does not have: the tone-to-floor ratio of a recording of a real engine, which runs 5 to 12 dB a bin where this catalogue runs 11 to 19. Open.
+
+9. **The blowers' loudness is derived, their level is not, and it cannot be until the solver makes boost.** A displacement blower's noise is its rotors handing pockets of gas to a discharge port, and a volume velocity across an aperture launches `c mdot / A` like every other aperture here, so both supercharger voices now scale with the induction mass flow the solver actually reports. That replaced a law that went as the square of crank speed times a throttle term, which had a blower spinning fast on a shut throttle at a third of full voice when a bypassed blower is pumping almost nothing. What did not change is the constant in front, and it cannot: nothing in the physics produces boost, so there is no pressure ratio across the machine for its loudness to be a fraction of, and there is no bypass to open when the throttle shuts. The audible consequence is open question 2's other half — on the blown V8 at 4500 rpm the whine at order 8.4 is still among the three loudest things in the render and the firing order is not in the top seven, which is the sound of an inverter and not of an engine. It closes with the compressor model in Stage 13, not with a number. Open.
 
 
 ## Inline-4
@@ -161,10 +163,10 @@ Reference: the crank itself: 8 firings a cycle on 2 banks
 | 6 | null | -19.4 | — |
 | 6.5 | -3.7 | -7.7 | -4.0 |
 | 7 | null | -27.2 | — |
-| 7.5 | -11.4 | -27.1 | -15.7 |
-| 8 | +0.0 | -10.3 | -10.3 |
+| 7.5 | -11.4 | -27.1 | -15.8 |
+| 8 | +0.0 | -10.4 | -10.4 |
 
-Driven orders: rms **7.9 dB**, mean -4.9 dB, worst -15.7 dB on order 7.5 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -8.5 dB on order 1 (pass).
+Driven orders: rms **7.9 dB**, mean -4.9 dB, worst -15.8 dB on order 7.5 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -8.5 dB on order 1 (pass).
 
 ### Resonance placement
 
@@ -174,27 +176,27 @@ Driven orders: rms **7.9 dB**, mean -4.9 dB, worst -15.7 dB on order 7.5 (tolera
 | block, first bending mode | `mass law on 210 kg` | 74.1 | 83.6 | +12.9 % | -40.5 | 17.0 |  |
 | tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 611 x 0.986/(4 x (1.500 + 0.018))` | 99.1 | not found | — | — | — |  |
 | intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 4.8 L` | 140.3 | not found | — | — | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00445 s over 2.82 m` | 168.4 | 185.2 | +10.0 % | -47.1 | 9.3 | downstream run 2.82 m → 2.562 m |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00445 s over 2.82 m` | 168.4 | 185.2 | +10.0 % | -47.0 | 9.2 | downstream run 2.82 m → 2.561 m |
 | intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.380 + 0.018))` | 218.0 | 245.1 | +12.4 % | -48.6 | 9.2 | runner length 0.380 m → 0.354 m |
 | collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00445 s over 2.82 m` | 280.6 | not found | — | — | — |  |
 | exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 722 x 0.996/(4 x 0.568)` | 316.4 | not found | — | — | — |  |
-| expansion chamber, first pass band | `nc/2L = 1 x 680/(2 x 0.650)` | 523.1 | 408.1 | -22.0 % | -53.9 | 11.1 | chamber length 0.650 m, volume 22.1 L → 0.833 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 722 x 0.996/(4 x 0.568)` | 949.1 | 963.3 | +1.5 % | -61.9 | 12.2 | primary length 0.550 m → 0.542 m |
-| expansion chamber, second pass band | `nc/2L = 2 x 680/(2 x 0.650)` | 1046.3 | 1199.9 | +14.7 % | -64.3 | 11.5 | chamber length 0.650 m, volume 22.1 L → 0.567 m |
+| expansion chamber, first pass band | `nc/2L = 1 x 680/(2 x 0.650)` | 523.1 | 408.2 | -22.0 % | -53.6 | 11.3 | chamber length 0.650 m, volume 22.1 L → 0.833 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 722 x 0.996/(4 x 0.568)` | 949.1 | 905.7 | -4.6 % | -61.8 | 12.0 | primary length 0.550 m → 0.576 m |
+| expansion chamber, second pass band | `nc/2L = 2 x 680/(2 x 0.650)` | 1046.3 | 1199.9 | +14.7 % | -64.0 | 10.2 | chamber length 0.650 m, volume 22.1 L → 0.567 m |
 
 ### Peaks in the sweep average
 
 | Hz | dBFS | Prominence [dB] |
 |---:|---:|---:|
 | 83.6 | -40.5 | 17.0 |
-| 185.2 | -47.1 | 9.3 |
+| 185.2 | -47.0 | 9.2 |
 | 245.1 | -48.6 | 9.2 |
-| 408.1 | -53.9 | 11.1 |
-| 963.3 | -61.9 | 12.2 |
-| 1199.9 | -64.3 | 11.5 |
-| 1536.0 | -71.4 | 19.8 |
-| 2680.4 | -79.5 | 10.8 |
-| 2995.6 | -79.9 | 11.4 |
+| 408.2 | -53.6 | 11.3 |
+| 905.7 | -61.8 | 12.0 |
+| 1199.9 | -64.0 | 10.2 |
+| 1536.0 | -71.3 | 18.3 |
+| 2680.4 | -79.5 | 9.5 |
+| 2995.6 | -79.9 | 11.7 |
 | 3900.3 | -80.3 | 18.0 |
 | 4471.7 | -85.6 | 12.9 |
 | 4799.6 | -89.7 | 14.3 |
@@ -211,7 +213,7 @@ Driven orders: rms **7.9 dB**, mean -4.9 dB, worst -15.7 dB on order 7.5 (tolera
 | 21359.8 | -118.7 | 15.0 |
 | 22800.0 | -128.6 | 9.0 |
 
-Noise floor tilt over 200 Hz-12 kHz: **-10.7 dB/octave**.
+Noise floor tilt over 200 Hz-12 kHz: **-10.9 dB/octave**.
 
 
 ## Flat-plane V8
@@ -335,9 +337,9 @@ Driven orders: rms **16.4 dB**, mean -13.5 dB, worst -27.9 dB on order 8.5 (tole
 | collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00303 s over 1.92 m` | 247.9 | 264.9 | +6.9 % | -56.2 | 7.1 | downstream run 1.92 m → 1.796 m |
 | intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.220 + 0.019))` | 363.3 | not found | — | — | — |  |
 | collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00303 s over 1.92 m` | 413.1 | not found | — | — | — |  |
-| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 687 x 0.995/(4 x 0.376)` | 454.1 | 519.3 | +14.4 % | -52.5 | 11.3 | primary length 0.360 m → 0.315 m |
-| expansion chamber, first pass band | `nc/2L = 1 x 662/(2 x 0.400)` | 828.1 | not found | — | — | — |  |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 687 x 0.995/(4 x 0.376)` | 1362.2 | 1321.4 | -3.0 % | -63.2 | 14.9 | primary length 0.360 m → 0.371 m |
+| exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 687 x 0.995/(4 x 0.376)` | 454.1 | 519.3 | +14.4 % | -52.4 | 11.4 | primary length 0.360 m → 0.315 m |
+| expansion chamber, first pass band | `nc/2L = 1 x 662/(2 x 0.400)` | 828.1 | 960.8 | +16.0 % | -63.8 | 8.3 | chamber length 0.400 m, volume 8.5 L → 0.345 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 687 x 0.995/(4 x 0.376)` | 1362.2 | 1321.3 | -3.0 % | -62.5 | 15.1 | primary length 0.360 m → 0.371 m |
 | expansion chamber, second pass band | `nc/2L = 2 x 662/(2 x 0.400)` | 1656.2 | not found | — | — | — |  |
 
 ### Peaks in the sweep average
@@ -346,21 +348,21 @@ Driven orders: rms **16.4 dB**, mean -13.5 dB, worst -27.9 dB on order 8.5 (tole
 |---:|---:|---:|
 | 118.4 | -42.1 | 10.6 |
 | 264.9 | -56.2 | 7.1 |
-| 519.3 | -52.5 | 11.3 |
-| 1037.1 | -64.3 | 9.6 |
-| 1321.4 | -63.2 | 14.9 |
-| 2158.9 | -61.6 | 15.9 |
-| 2400.2 | -73.2 | 13.4 |
-| 3120.0 | -76.7 | 13.2 |
-| 3841.8 | -81.0 | 7.3 |
-| 4382.2 | -75.6 | 16.0 |
+| 519.3 | -52.4 | 11.4 |
+| 960.8 | -63.8 | 8.3 |
+| 1321.3 | -62.5 | 15.1 |
+| 2079.9 | -62.2 | 11.9 |
+| 2400.3 | -72.5 | 10.8 |
+| 3119.9 | -75.5 | 11.0 |
+| 3842.0 | -80.2 | 7.8 |
+| 4323.3 | -77.4 | 14.6 |
 | 6332.4 | -92.5 | 9.7 |
 | 7441.0 | -95.6 | 9.0 |
 | 8400.2 | -103.7 | 9.0 |
 | 10319.8 | -102.7 | 11.6 |
 | 10799.9 | -108.8 | 7.8 |
 | 11039.9 | -106.4 | 10.7 |
-| 12960.2 | -112.0 | 7.5 |
+| 12960.2 | -112.0 | 7.6 |
 | 13200.0 | -108.3 | 11.9 |
 | 15839.9 | -115.3 | 7.2 |
 | 16079.5 | -112.1 | 12.2 |
@@ -369,7 +371,7 @@ Driven orders: rms **16.4 dB**, mean -13.5 dB, worst -27.9 dB on order 8.5 (tole
 | 21119.8 | -116.2 | 12.5 |
 | 23279.7 | -125.6 | 22.0 |
 
-Noise floor tilt over 200 Hz-12 kHz: **-8.0 dB/octave**.
+Noise floor tilt over 200 Hz-12 kHz: **-7.9 dB/octave**.
 
 
 ## V12

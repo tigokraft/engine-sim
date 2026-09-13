@@ -390,7 +390,6 @@ impl Induction {
             voice: RootsVoicing {
                 belt_ratio: 2.1,
                 lobes: 4,
-                reference_rpm: 6_500.0,
                 level: 0.030,
             },
         }
@@ -406,7 +405,6 @@ impl Induction {
             voice: CentrifugalVoicing {
                 gear_ratio: 9.2,
                 order: 1.8,
-                reference_rpm: 6_800.0,
                 level: 0.024,
             },
             blow_off: None,

@@ -549,9 +549,12 @@ pub struct RootsVoicing {
     pub belt_ratio: f64,
     /// Number of lobes on each rotor (typically 3 or 4 for modern twin-screw / Eaton TVS).
     pub lobes: usize,
-    /// Crank speed at which the supercharger whine reaches full reference level [rev/min].
-    pub reference_rpm: f64,
     /// Level of the supercharger whine layer in the mix [-].
+    ///
+    /// Still a level and not a derivation: the solver produces no boost at all
+    /// (see [`Induction`](crate::audio::Induction)), so there is no pressure
+    /// ratio across this machine for its loudness to come from. What *is*
+    /// derived is how the loudness moves — see [`RootsVoice::tune`].
     pub level: f64,
 }
 
@@ -568,7 +571,6 @@ impl Default for RootsVoicing {
         Self {
             belt_ratio: 2.1,
             lobes: 4,
-            reference_rpm: 6_500.0,
             level: 0.030,
         }
     }
@@ -588,9 +590,9 @@ pub struct CentrifugalVoicing {
     pub gear_ratio: f64,
     /// Order of the compressor whine relative to impeller shaft speed [-].
     pub order: f64,
-    /// Engine speed at which the supercharger reaches full reference level [rev/min].
-    pub reference_rpm: f64,
     /// Level of the centrifugal supercharger in the mix [-].
+    ///
+    /// A level, for the same reason [`RootsVoicing::level`] is one.
     pub level: f64,
 }
 
@@ -607,7 +609,6 @@ impl Default for CentrifugalVoicing {
         Self {
             gear_ratio: 9.2,
             order: 1.8,
-            reference_rpm: 6_800.0,
             level: 0.024,
         }
     }
@@ -2234,17 +2235,27 @@ impl RootsVoice {
         }
     }
 
-    fn tune(&mut self, voicing: &RootsVoicing, rpm: f32, throttle: f32) {
+    /// Retunes to the shaft and the gas it is moving.
+    ///
+    /// The pitch is the crank order the pulley and the lobe count give. The
+    /// loudness is the *flow*: a displacement blower's noise is its rotors
+    /// handing pockets of gas to the discharge port, and a volume velocity $Q$
+    /// crossing an aperture launches $\rho c Q / A$, which in mass flow is
+    /// $c \dot m / A$ — linear, like every other aperture in this synth.
+    ///
+    /// It replaces a law that went as the square of *speed* times a throttle
+    /// term. Speed and throttle were standing in for flow, badly: a blower
+    /// spinning fast on a shut throttle is pumping almost nothing round a
+    /// bypass and should be almost silent, and that law had it at a third of
+    /// full voice. What is left undercided is the absolute level, and it stays
+    /// undecided until something in the solver produces boost.
+    fn tune(&mut self, voicing: &RootsVoicing, rpm: f32, intake_mass_flow: f32) {
         let crank_hz = (rpm / 60.0).max(0.0);
         let tone = crank_hz * voicing.order() as f32;
         // Anti-alias limit: keep 3rd harmonic below Nyquist.
         self.tone_hz.set_target(tone.min(0.15 * self.sample_rate));
-
-        let load = (rpm / voicing.reference_rpm as f32).clamp(0.0, 1.5);
-        // Acoustic power scales quadratically with speed, amplified under load as
-        // bypass valve shuts with throttle.
-        let throttle_factor = 0.30 + 0.70 * throttle.clamp(0.0, 1.0);
-        self.gain.set_target(load * load * throttle_factor);
+        self.gain
+            .set_target((intake_mass_flow / REFERENCE_INTAKE_FLOW).clamp(0.0, 1.5));
     }
 
     #[inline(always)]
@@ -2294,16 +2305,19 @@ impl CentrifugalVoice {
         }
     }
 
-    fn tune(&mut self, voicing: &CentrifugalVoicing, rpm: f32, throttle: f32) {
+    /// Retunes to the impeller and the gas it is moving.
+    ///
+    /// Belt-locked, so the pitch is a crank order like the Roots'. The loudness
+    /// is the flow through it, for the reason given at [`RootsVoice::tune`] —
+    /// an impeller passing no gas makes no noise however fast the belt is
+    /// turning it.
+    fn tune(&mut self, voicing: &CentrifugalVoicing, rpm: f32, intake_mass_flow: f32) {
         let crank_hz = (rpm / 60.0).max(0.0);
         let tone = crank_hz * voicing.crank_order() as f32;
         // Keep second harmonic below Nyquist.
         self.tone_hz.set_target(tone.min(0.22 * self.sample_rate));
-
-        let load = (rpm / voicing.reference_rpm as f32).clamp(0.0, 1.5);
-        // Centrifugal boost scales with impeller speed squared, amplified on throttle.
-        let throttle_factor = 0.35 + 0.65 * throttle.clamp(0.0, 1.0);
-        self.gain.set_target(load * load * throttle_factor);
+        self.gain
+            .set_target((intake_mass_flow / REFERENCE_INTAKE_FLOW).clamp(0.0, 1.5));
     }
 
     #[inline(always)]
@@ -3296,11 +3310,11 @@ impl EngineSynth {
         }
         if let Some(voicing) = self.config.roots {
             self.roots
-                .tune(&voicing, self.snapshot.rpm, self.snapshot.throttle);
+                .tune(&voicing, self.snapshot.rpm, self.intake_flow.value());
         }
         if let Some(voicing) = self.config.centrifugal {
             self.centrifugal
-                .tune(&voicing, self.snapshot.rpm, self.snapshot.throttle);
+                .tune(&voicing, self.snapshot.rpm, self.intake_flow.value());
         }
         if let Some(voicing) = self.config.blow_off {
             let ref_rpm = self
@@ -6119,13 +6133,12 @@ mod tests {
         let voicing = RootsVoicing {
             belt_ratio: 2.0,
             lobes: 4,
-            reference_rpm: 6_000.0,
             level: 0.05,
         };
         assert_eq!(voicing.order(), 8.0);
 
         let mut voice = RootsVoice::new(FS);
-        voice.tune(&voicing, 3_000.0, 1.0);
+        voice.tune(&voicing, 3_000.0, REFERENCE_INTAKE_FLOW);
         let crank_hz_1 = 3_000.0 / 60.0;
         let expected_hz_1 = crank_hz_1 * 8.0;
         assert!(
@@ -6135,7 +6148,7 @@ mod tests {
         );
 
         // Immediate step in RPM: tone target updates instantaneously without spool lag
-        voice.tune(&voicing, 6_000.0, 1.0);
+        voice.tune(&voicing, 6_000.0, REFERENCE_INTAKE_FLOW);
         let crank_hz_2 = 6_000.0 / 60.0;
         let expected_hz_2 = crank_hz_2 * 8.0;
         assert!(
@@ -6159,13 +6172,12 @@ mod tests {
         let voicing = CentrifugalVoicing {
             gear_ratio: 9.0,
             order: 1.5,
-            reference_rpm: 6_000.0,
             level: 0.04,
         };
         assert_eq!(voicing.crank_order(), 13.5);
 
         let mut voice = CentrifugalVoice::new(FS);
-        voice.tune(&voicing, 3_000.0, 1.0);
+        voice.tune(&voicing, 3_000.0, REFERENCE_INTAKE_FLOW);
         let crank_hz_1 = 3_000.0 / 60.0;
         let expected_hz_1 = crank_hz_1 * 13.5;
         assert!(
@@ -6175,7 +6187,7 @@ mod tests {
         );
 
         // Immediate step in RPM: tone target updates instantaneously without spool lag
-        voice.tune(&voicing, 6_000.0, 1.0);
+        voice.tune(&voicing, 6_000.0, REFERENCE_INTAKE_FLOW);
         let crank_hz_2 = 6_000.0 / 60.0;
         let expected_hz_2 = crank_hz_2 * 13.5;
         assert!(
