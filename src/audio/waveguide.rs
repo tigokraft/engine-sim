@@ -708,6 +708,95 @@ impl ValveTermination {
     }
 }
 
+/// Acoustic efficiency of the dipole a jet makes at an edge [-].
+///
+/// Curle's sixth-power law says a flow past a solid boundary radiates
+/// $W \propto \rho A u^6 / c^3$, and leaves the constant to measurement; in
+/// pressure that constant runs from about 0.03 to 0.1 for flow through an
+/// orifice. This is the one number in the exhaust path with a range rather than
+/// a derivation, and it is recorded as such — see the open questions in
+/// `docs/measurements/calibration.md`. What it is *not* is the near-field rule
+/// of thumb: the hydrodynamic pressure in a mixing layer is a tenth of the
+/// dynamic head, but that pressure does not propagate, and using it as though
+/// it did buries the firings under a hiss.
+pub const JET_DIPOLE_EFFICIENCY: f32 = 0.005;
+
+/// Strouhal number of a free jet's preferred mode [-]./// Strouhal number of a free jet's preferred mode [-].
+///
+/// $St = f d / u$. A jet sheds its large structures at about a fifth, so the
+/// noise a port makes is pitched by how fast the gas is going and how wide the
+/// gap it is going through — which is why a valve cracking open hisses high and
+/// a valve at full lift roars low, with no table anywhere saying so.
+pub const JET_STROUHAL_NUMBER: f32 = 0.20;
+
+/// Gas velocity through a valve's effective flow area [m/s].
+///
+/// $u = \dot m / \rho A_e$, limited to the local speed of sound because a
+/// throat chokes: past a pressure ratio of about 1.9 the gap passes no more
+/// velocity however much harder it is pushed, and the extra mass flow arrives
+/// as density instead.
+#[inline]
+pub fn throat_velocity(
+    mass_flow: f32,
+    effective_area: f32,
+    density: f32,
+    speed_of_sound: f32,
+) -> f32 {
+    if effective_area <= SEATED_AREA || density <= 0.0 {
+        return 0.0;
+    }
+    (mass_flow.abs() / (density * effective_area)).min(speed_of_sound)
+}
+
+/// Broadband pressure a port's own jet launches into the runner [Pa].
+///
+/// Curle's dipole, written for a wave in a duct. Radiated power
+/// $W = K \rho A u^6 / c^3$ into a duct carrying $p^2 A / \rho c$ gives
+///
+/// $$p = \sqrt{K} \, \frac{\rho u^3}{c} = \sqrt{K} \, \rho c u M^2,$$
+///
+/// a *cube* of velocity and not a square, which is why this is a chuff at each
+/// blowdown rather than a hiss across the cycle: at half the velocity it is
+/// eighteen decibels down, not twelve. It is the exhaust's half of what the
+/// intake already gets from its throttle plate and its valves — gas tearing
+/// itself apart on the way past an edge. Without it a pipe radiates a comb with
+/// nothing at all between the teeth, which is the one thing no recording of a
+/// real engine has ever looked like.
+#[inline]
+pub fn jet_pressure_fluctuation_pa(
+    velocity: f32,
+    density: f32,
+    speed_of_sound: f32,
+    effective_area: f32,
+    pipe_area: f32,
+) -> f32 {
+    let c = speed_of_sound.max(1.0);
+    // The source is the gap, not the pipe: the $A$ in the power law is the area
+    // the jet actually occupies, and a duct that carries the result away is
+    // wider than that, so what reaches the runner as a plane wave is down by
+    // the square root of the ratio. A valve barely off its seat couples badly
+    // as well as flowing little, which is most of why this is a crack at the
+    // valve event and not a wash under the whole cycle.
+    let coupling = (effective_area.max(0.0) / pipe_area.max(1e-9))
+        .min(1.0)
+        .sqrt();
+    JET_DIPOLE_EFFICIENCY * coupling * density * velocity * velocity * velocity / c
+}
+
+/// Frequency a jet through an aperture of `effective_area` is loudest at [Hz].
+///
+/// [`JET_STROUHAL_NUMBER`] times $u / d$, with $d$ the diameter of a circle of
+/// the same area. A valve just off its seat is a slit and screams; the same
+/// valve at full lift is a hole and roars.
+#[inline]
+pub fn jet_peak_hz(velocity: f32, effective_area: f32) -> f32 {
+    if effective_area <= SEATED_AREA {
+        return 0.0;
+    }
+    let diameter = 2.0 * (effective_area / std::f32::consts::PI).sqrt();
+    JET_STROUHAL_NUMBER * velocity / diameter
+}
+
 /// Coefficient of nonlinearity for a simple wave in an ideal gas [-].
 ///
 /// $$\frac{\gamma + 1}{2\gamma}$$
