@@ -2807,4 +2807,53 @@ mod tests {
             _ => panic!("expected SweepPull mode"),
         }
     }
+
+    #[test]
+    fn gt3_cup_collection_contains_valid_race_engines() {
+        let race_engines = EnginePreset::gt3_cup_collection();
+        assert_eq!(race_engines.len(), 5);
+
+        for engine in &race_engines {
+            assert!(
+                engine.redline >= 7_500.0,
+                "race engine {} redline too low: {}",
+                engine.name,
+                engine.redline
+            );
+            assert!(
+                engine.inertia <= 0.25,
+                "race engine {} inertia too high: {}",
+                engine.name,
+                engine.inertia
+            );
+            assert!(
+                engine.exhaust.cutout,
+                "race engine {} should have cutout enabled",
+                engine.name
+            );
+            assert_eq!(engine.limiter_mode, LimiterMode::RotatingStutter);
+            assert_eq!(engine.limiter_cut, LimiterCut::Spark);
+
+            let block = engine.block(Environment::default());
+            assert_eq!(block.firing.len(), engine.firing.len());
+            assert_eq!(block.ecu.redline, engine.redline);
+        }
+
+        // Check specifically the 911 GT3 Cup engines
+        let cup_992 = race_engines
+            .iter()
+            .find(|e| e.name.contains("992"))
+            .expect("992 cup");
+        assert_eq!(cup_992.firing.len(), 6);
+        assert!((cup_992.displacement() * 1e3 - 4.0).abs() < 0.1);
+        assert_eq!(cup_992.redline, 8_750.0);
+
+        let cup_997 = race_engines
+            .iter()
+            .find(|e| e.name.contains("997"))
+            .expect("997 cup");
+        assert_eq!(cup_997.firing.len(), 6);
+        assert!((cup_997.displacement() * 1e3 - 3.8).abs() < 0.1);
+        assert_eq!(cup_997.redline, 8_500.0);
+    }
 }
