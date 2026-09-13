@@ -4199,4 +4199,90 @@ mod tests {
             error * 100.0
         );
     }
+
+    #[test]
+    fn exhaust_modes_raise_high_order_content_monotonically() {
+        // Same shape of claim as `opening_the_cutout_raises_high_order_content`
+        // above, over the three exhaust modes instead of the cutout: muffled
+        // (a real silencer fitted, not `Silencer::Straight`, or this could not
+        // tell muffled from straight-pipe) should carry the least top-end,
+        // straight-pipe more, and open-headers — no tailpipe, no crossover to
+        // cross into — the most.
+        //
+        // `Silencer::Absorptive` rather than `ExpansionChamber`: Stage T5
+        // documents the reactive chamber as having no loss term yet — two
+        // lossless junctions around a cavity can only reflect and store, and
+        // measure *louder* than a straight pipe — while the packed absorptive
+        // body already carries `sabine_attenuation_db_per_m`. This test is
+        // about T4's claim, not T5's open one, so it reaches for the silencer
+        // that already attenuates.
+        use crate::physics::plumbing::{
+            Collector, Crossover, ExhaustSystem, PipeSection, Silencer,
+        };
+
+        const FS: f32 = 48_000.0;
+
+        let exhaust = ExhaustSystem {
+            primaries: vec![PipeSection::from_diameter(0.45, 0.040, 850.0); 4],
+            collector: Collector::from_diameter(4, 0.060, 0.15),
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![Silencer::Absorptive {
+                length: 0.45,
+                area: std::f64::consts::PI * 0.030 * 0.030,
+                packing_thickness: 0.035,
+                packing_absorption: 0.85,
+            }],
+            tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
+            tailpipe_flanged: false,
+            cutout: false,
+        };
+
+        let cylinders: Vec<crate::audio::dsp::CylinderTap> = (0..4)
+            .map(|i| crate::audio::dsp::CylinderTap {
+                evo_phase: i as f32 / 4.0,
+                bank: 0,
+            })
+            .collect();
+        let snapshot = crate::audio::dsp::EngineSnapshot::default();
+
+        // A handful of fixed probe tones (as `opening_the_cutout_...` above
+        // uses) works when the two configurations differ by a bypass, but a
+        // change of tailpipe length instead moves a whole comb of harmonics,
+        // and a few discrete probe points can land on or off that comb by
+        // luck rather than by how open the pipe is. `octave_bands` reads the
+        // energy actually captured across each whole band instead, which is
+        // what the bench's own `--mode` report uses for the same comparison.
+        let high_frequency_share = |exhaust: &ExhaustSystem| -> f64 {
+            let mut network = ExhaustNetwork::new(exhaust, &cylinders, 1, FS, &snapshot);
+            let mut radiated = [0.0f32; 1];
+            let bank_excitations = [0.0f32; 1];
+            let samples = 4 * FS as usize;
+            let mut response = Vec::with_capacity(samples);
+            for i in 0..samples {
+                let pulse = if i % 240 < 6 { 1.0 } else { 0.0 };
+                let excitations = [pulse, 0.0, 0.0, 0.0];
+                network.step(&excitations, &bank_excitations, &mut radiated);
+                response.push(radiated[0]);
+            }
+            let bands = crate::analysis::orders::octave_bands(&response, FS as f64);
+            // Indices 6..10 of the ISO table are 2, 4, 8 and 16 kHz.
+            (bands[6] + bands[7] + bands[8] + bands[9]) / 4.0
+        };
+
+        let muffled = high_frequency_share(&exhaust);
+        let straight = high_frequency_share(&exhaust.clone().into_straight_pipe());
+        let open = high_frequency_share(&exhaust.clone().into_open_headers());
+
+        assert!(
+            muffled < straight,
+            "muffled ({muffled:.1} dB) should carry less high-frequency share than \
+             straight-pipe ({straight:.1} dB)"
+        );
+        assert!(
+            straight < open,
+            "straight-pipe ({straight:.1} dB) should carry less high-frequency share than \
+             open-headers ({open:.1} dB)"
+        );
+    }
 }
