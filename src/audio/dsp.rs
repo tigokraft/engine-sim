@@ -5739,6 +5739,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reciprocating_shake_is_a_no_op_at_zero_mass() {
+        // Zero mass must make the whole shaking-force path disappear, not just
+        // happen to come out quiet for one geometry — so it is proven here by
+        // showing geometry stops mattering at all once mass is zero, which
+        // only holds if every per-cylinder force is exactly zero rather than
+        // merely small.
+        let render_with = |geometry: CylinderGeometry| {
+            let mut config = SynthConfig::cross_plane_v8(FS);
+            config.reciprocating = geometry;
+            let mut synth = EngineSynth::new(config);
+            synth.set_snapshot(&loaded_snapshot());
+            render(&mut synth, 48_000);
+            render(&mut synth, 48_000)
+        };
+
+        let zero_default = CylinderGeometry::default().with_reciprocating_mass(0.0);
+        let zero_other =
+            CylinderGeometry::new(0.060, 0.050, 0.090, 9.0).with_reciprocating_mass(0.0);
+        assert_eq!(
+            render_with(zero_default),
+            render_with(zero_other),
+            "a zeroed reciprocating mass should make geometry irrelevant to the mix"
+        );
+
+        let nonzero = CylinderGeometry::default();
+        assert_ne!(
+            render_with(zero_default),
+            render_with(nonzero),
+            "a non-zero reciprocating mass should audibly change the mix"
+        );
+    }
+
     // -- the valve boundary --------------------------------------------------
 
     /// Frequencies the valve boundary is probed at across the audio band.
