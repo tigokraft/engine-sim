@@ -6,7 +6,13 @@
 //! ```text
 //! cargo run --release --example diagnose_sound
 //! cargo run --release --example diagnose_sound -- --preset inline-4
+//! cargo run --release --example diagnose_sound -- --preset "flat-plane v8"
 //! ```
+//!
+//! `--preset` matches by substring against the catalogue's own names, the way
+//! `examples/measure.rs` does — case-insensitively, so `inline-4` and
+//! `flat-plane v8` both find their engine — and exits loudly on no match
+//! rather than silently rendering a different one.
 
 use std::f32::consts::PI;
 use std::path::Path;
@@ -62,7 +68,7 @@ fn band_energy(samples: &[f32], fs: f32, f_low: f32, f_high: f32) -> f32 {
 fn main() -> Result<()> {
     println!("=== ENGINE SIMULATOR ACOUSTIC DIAGNOSTICS ===");
 
-    let mut preset_name = "cross-plane-v8".to_string();
+    let mut preset_name = "cross-plane v8".to_string();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--preset" {
@@ -72,14 +78,10 @@ fn main() -> Result<()> {
         }
     }
 
-    let preset = match preset_name.as_str() {
-        "inline-4" | "inline-four" => EnginePreset::inline_four(),
-        "flat-plane-v8" => EnginePreset::flat_plane_v8(),
-        "v10" => EnginePreset::v10(),
-        "v12" => EnginePreset::v12(),
-        "2-rotor" | "2-rotor-wankel" => EnginePreset::two_rotor_wankel(),
-        _ => EnginePreset::cross_plane_v8(),
-    };
+    let preset = EnginePreset::find_by_name(&preset_name).unwrap_or_else(|| {
+        eprintln!("no engine in the catalogue matches {preset_name:?}");
+        std::process::exit(1);
+    });
 
     println!("Target Engine: {}", preset.name);
 

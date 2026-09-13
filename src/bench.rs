@@ -224,6 +224,22 @@ impl EnginePreset {
             .collect()
     }
 
+    /// Finds the catalogue preset whose name contains `query`, case-insensitively.
+    ///
+    /// The same substring rule `examples/measure.rs` filters the catalogue
+    /// with, exposed once so every caller matching a preset by name agrees on
+    /// what a name means, rather than each parsing it its own way — which is
+    /// how `examples/diagnose_sound.rs` used to fall silently through to the
+    /// cross-plane V8 on an unrecognised `--preset`. Returns `None` rather
+    /// than a default on no match, so a typo is a loud failure instead of a
+    /// render of the wrong engine.
+    pub fn find_by_name(query: &str) -> Option<EnginePreset> {
+        let query = query.to_lowercase();
+        Self::catalogue()
+            .into_iter()
+            .find(|p| p.name.to_lowercase().contains(&query))
+    }
+
     /// Curated collection of GT3 Cup and GT3 class race engines.
     ///
     /// Includes Porsche 911 GT3 Cup (Type 992 & Type 997.2 Mezger), Mercedes-AMG GT3 6.2L V8,
@@ -1912,6 +1928,18 @@ mod tests {
                 preset.name, preset.redline, driveline.rpm
             );
         }
+    }
+
+    #[test]
+    fn find_by_name_fails_loudly_on_an_unknown_preset() {
+        assert!(EnginePreset::find_by_name("not-a-real-engine").is_none());
+        assert!(EnginePreset::find_by_name("cross-plane v8").is_some());
+        // Case-insensitive, and a substring is enough — the same rule
+        // `examples/measure.rs` filters the catalogue with.
+        assert_eq!(
+            EnginePreset::find_by_name("INLINE-4").map(|p| p.name),
+            Some("Inline-4")
+        );
     }
 
     #[test]
