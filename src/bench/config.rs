@@ -422,7 +422,19 @@ impl EngineConfig {
 
         let firing = FiringConfig {
             sequence: preset.firing.sequence.clone(),
-            banks: preset.firing.cylinders.iter().map(|c| c.bank).collect(),
+            banks: preset
+                .firing
+                .sequence
+                .iter()
+                .map(|&num| {
+                    preset
+                        .firing
+                        .cylinders
+                        .iter()
+                        .find(|c| c.number == num)
+                        .map_or(0, |c| c.bank)
+                })
+                .collect(),
         };
 
         let primaries = preset
