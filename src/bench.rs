@@ -20,6 +20,9 @@
 //! exhaust temperature, induction flow, the manifold pressure the dashboard
 //! displays — is the solver's own output and is not scaled here.
 
+pub mod config;
+pub use config::EngineConfig;
+
 use std::f64::consts::PI;
 
 use crate::audio::{
