@@ -27,6 +27,15 @@ pub struct CylinderGeometry {
     pub rod_length: f64,
     /// Geometric compression ratio `(V_d + V_c) / V_c` [-].
     pub compression_ratio: f64,
+    /// Reciprocating mass: piston, rings, pin and about a third of the rod's
+    /// own mass, all of it lumped at the wrist pin the way every slider-crank
+    /// inertia treatment does [kg].
+    ///
+    /// Defaults from bore alone (see [`default_reciprocating_mass`]) so no
+    /// preset has to name it, and every caller that never sets it explicitly
+    /// still gets a physically reasonable slug rather than a zero that quietly
+    /// switches the inertia force and torque off.
+    pub reciprocating_mass: f64,
 }
 
 impl Default for CylinderGeometry {
@@ -36,13 +45,28 @@ impl Default for CylinderGeometry {
     }
 }
 
+/// Reciprocating mass from bore alone [kg].
+///
+/// `m ~ 620 * B^3` puts a 94 mm bore near 0.51 kg, the right neighbourhood for
+/// an aluminium piston plus rings, pin and a rod's-worth share — light enough
+/// that nobody has measured a real slug this way, heavy enough that the
+/// inertia force it produces sits in the right octave against the combustion
+/// drive it shares a mix with.
+pub fn default_reciprocating_mass(bore: f64) -> f64 {
+    620.0 * bore.powi(3)
+}
+
 impl CylinderGeometry {
     /// Builds a geometry, clamping each parameter into a physically meaningful
     /// range so a bad CLI argument degrades instead of producing NaNs.
     ///
     /// The rod is forced to stay longer than the crank radius: `l <= r` has no
     /// slider-crank solution and would put a negative argument under the square
-    /// root in [`CylinderGeometry::piston_position`].
+    /// root in [`CylinderGeometry::piston_position`]. Reciprocating mass is not
+    /// a parameter here — it defaults from `bore` via
+    /// [`default_reciprocating_mass`]; override it with
+    /// [`CylinderGeometry::with_reciprocating_mass`] when a preset wants to
+    /// name one explicitly.
     pub fn new(bore: f64, stroke: f64, rod_length: f64, compression_ratio: f64) -> Self {
         let bore = bore.max(1e-4);
         let stroke = stroke.max(1e-4);
@@ -53,7 +77,18 @@ impl CylinderGeometry {
             // 1.05 r is already an absurdly short rod; real engines run 1.5-2.2 r.
             rod_length: rod_length.max(crank_radius * 1.05),
             compression_ratio: compression_ratio.max(1.05),
+            reciprocating_mass: default_reciprocating_mass(bore),
         }
+    }
+
+    /// Overrides the reciprocating mass, clamping negative input to zero.
+    ///
+    /// Zero is a legitimate value, not a clamp floor to avoid: it is what
+    /// makes the whole inertia-force and inertia-torque path a no-op, which is
+    /// what every fingerprint recorded before this mass existed relies on.
+    pub fn with_reciprocating_mass(mut self, mass: f64) -> Self {
+        self.reciprocating_mass = mass.max(0.0);
+        self
     }
 
     /// Crank radius `r = S / 2` [m].
