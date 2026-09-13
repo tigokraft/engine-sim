@@ -519,8 +519,10 @@ pub struct ValveTermination {
     b2: f32,
     a1: f32,
     a2: f32,
-    z1: f32,
-    z2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
 }
 
 /// Effective area below which the valve counts as seated [m^2].
@@ -550,8 +552,10 @@ impl ValveTermination {
             b2: 0.0,
             a1: 0.0,
             a2: 0.0,
-            z1: 0.0,
-            z2: 0.0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
         };
         valve.tune(1.4, 287.0, 293.0);
         valve
@@ -668,8 +672,10 @@ impl ValveTermination {
 
     /// Clears the filter's memory and reseats the valve.
     pub fn reset(&mut self) {
-        self.z1 = 0.0;
-        self.z2 = 0.0;
+        self.x1 = 0.0;
+        self.x2 = 0.0;
+        self.y1 = 0.0;
+        self.y2 = 0.0;
         self.set_load(0.0, 1e-4, 0.0);
     }
 
@@ -678,13 +684,26 @@ impl ValveTermination {
     /// - `returning_wave`: backward wave arriving at the valve boundary ($p^-(0)$) [Pa].
     #[inline(always)]
     pub fn step(&mut self, excitation: f32, returning_wave: f32) -> f32 {
-        // Transposed direct form II: one multiply-add per coefficient and no
-        // history of the input, so a coefficient that moves between samples
-        // moves the filter rather than reinterpreting what it already stored.
+        // Direct form I, because these coefficients move every sample.
+        //
+        // A transposed form stores partial sums whose meaning is a function of
+        // the coefficients that made them, so changing a coefficient
+        // reinterprets the filter's memory as well as its response — and a
+        // reflection sits inside a feedback loop, where the energy that
+        // reinterpretation invents comes back round and is reinterpreted again.
+        // Measured on the intake tract at a shut throttle, where nothing else
+        // dissipates: the transposed form grew about a decibel a second with no
+        // excitation at all. Direct form I stores past inputs and past outputs,
+        // which are pressures either way and mean the same thing whatever the
+        // cam is doing.
         let x = returning_wave;
-        let y = self.b0 * x + self.z1;
-        self.z1 = self.b1 * x - self.a1 * y + self.z2;
-        self.z2 = self.b2 * x - self.a2 * y;
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
         excitation + y
     }
 }
