@@ -6281,6 +6281,243 @@ mod tests {
     }
 
     #[test]
+    fn valve_float_is_bit_zero_below_threshold() {
+        let sample_rate = FS;
+        let float_rpm = 7_000.0;
+        let spec_with_float = MechanicalSpec {
+            float_rpm: Some(float_rpm),
+            ..MechanicalSpec::default()
+        };
+        let spec_without_float = MechanicalSpec {
+            float_rpm: None,
+            ..MechanicalSpec::default()
+        };
+
+        let mut voice_float = MechanicalVoice::from_spec(&spec_with_float, sample_rate);
+        let mut voice_none = MechanicalVoice::from_spec(&spec_without_float, sample_rate);
+
+        // Test at several speeds below float_rpm, including right at float_rpm.
+        for rpm in [800.0, 3_000.0, 6_000.0, 6_999.0, 7_000.0] {
+            let snap = EngineSnapshot {
+                rpm,
+                friction_mep: REFERENCE_FMEP,
+                peak_cylinder_pressure: REFERENCE_PEAK_PRESSURE,
+                spark_cut: false,
+                ..EngineSnapshot::default()
+            };
+            let cycle_hz = (rpm / 120.0) as f32;
+
+            voice_float.tune(&snap, cycle_hz, 4);
+            voice_none.tune(&snap, cycle_hz, 4);
+
+            let mut noise_float = Noise::new(12345);
+            let mut noise_none = Noise::new(12345);
+
+            for _ in 0..1_000 {
+                let s_float = voice_float.process(&mut noise_float);
+                let s_none = voice_none.process(&mut noise_none);
+                assert_eq!(
+                    s_float.to_bits(),
+                    s_none.to_bits(),
+                    "float voice drifted at {rpm} rpm: {s_float} vs {s_none}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn valve_impact_level_rises_monotonically_above_threshold() {
+        let sample_rate = FS;
+        let float_rpm = 6_500.0;
+        let spec = MechanicalSpec {
+            float_rpm: Some(float_rpm),
+            ..MechanicalSpec::default()
+        };
+        let mut voice = MechanicalVoice::from_spec(&spec, sample_rate);
+
+        let mut prev_gain = 0.0f32;
+        let mut prev_freq = 0.0f32;
+
+        for overspeed in [0.0, 100.0, 250.0, 500.0, 1_000.0, 2_000.0] {
+            let rpm = float_rpm + overspeed;
+            let snap = EngineSnapshot {
+                rpm,
+                friction_mep: REFERENCE_FMEP,
+                peak_cylinder_pressure: REFERENCE_PEAK_PRESSURE,
+                spark_cut: false,
+                ..EngineSnapshot::default()
+            };
+            let cycle_hz = (rpm / 120.0) as f32;
+            voice.tune(&snap, cycle_hz, 4);
+
+            let intake = voice.intake_valve.as_ref().unwrap();
+            let cur_gain = intake.gain.target();
+            let cur_freq = intake.current_frequency;
+
+            if overspeed > 0.0 {
+                assert!(
+                    cur_gain > prev_gain,
+                    "target gain must rise monotonically above float_rpm: {cur_gain} <= {prev_gain}"
+                );
+                assert!(
+                    cur_freq > prev_freq,
+                    "resonant frequency must rise monotonically above float_rpm: {cur_freq} <= {prev_freq}"
+                );
+            }
+
+            prev_gain = cur_gain;
+            prev_freq = cur_freq;
+        }
+    }
+
+    #[test]
+    fn catalogue_fingerprints_unchanged_below_float() {
+        // Every preset in the catalogue specifies redline < float_rpm (by default float_rpm is 1.06 * redline).
+        // Since calibration sweeps and steady operation used for catalogue measurements stay at or below redline,
+        // the valve float impact schedule is completely inactive and does not perturb the voice.
+        let sample_rate = FS;
+        for preset in crate::bench::EnginePreset::catalogue() {
+            assert!(
+                preset.redline <= preset.float_rpm,
+                "preset {} redline {:.0} exceeds float_rpm {:.0}",
+                preset.name,
+                preset.redline,
+                preset.float_rpm
+            );
+
+            let spec_with_preset = MechanicalSpec {
+                float_rpm: Some(preset.float_rpm as f32),
+                ..MechanicalSpec::default()
+            };
+            let spec_without = MechanicalSpec {
+                float_rpm: None,
+                ..MechanicalSpec::default()
+            };
+
+            let mut v1 = MechanicalVoice::from_spec(&spec_with_preset, sample_rate);
+            let mut v2 = MechanicalVoice::from_spec(&spec_without, sample_rate);
+
+            let snap = EngineSnapshot {
+                rpm: preset.redline as f32,
+                friction_mep: REFERENCE_FMEP,
+                peak_cylinder_pressure: REFERENCE_PEAK_PRESSURE,
+                spark_cut: false,
+                ..EngineSnapshot::default()
+            };
+            let cycle_hz = (preset.redline / 120.0) as f32;
+            v1.tune(&snap, cycle_hz, preset.firing.len());
+            v2.tune(&snap, cycle_hz, preset.firing.len());
+
+            let mut noise1 = Noise::new(777);
+            let mut noise2 = Noise::new(777);
+            for _ in 0..500 {
+                assert_eq!(
+                    v1.process(&mut noise1).to_bits(),
+                    v2.process(&mut noise2).to_bits(),
+                    "preset {} valve voice output differed at redline",
+                    preset.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn limiter_bounce_float_band_appears_and_disappears_with_each_cut() {
+        // When an engine hits a limiter that allows overspeed excursions beyond float_rpm,
+        // energy in the valve impact band (e.g. 3 kHz to 8 kHz) rises sharply during the excursion
+        // and drops when cut intervention brings engine speed back below float_rpm.
+        let sample_rate = FS;
+        let float_rpm = 7_000.0;
+        let spec = MechanicalSpec {
+            intake_valve: Some(ImpulsiveSpec::per_cylinder(1.0)),
+            exhaust_valve: Some(ImpulsiveSpec::per_cylinder(1.0)),
+            piston_slap: None,
+            injector: None,
+            timing_chain: None,
+            gear_whine: None,
+            accessory: None,
+            float_rpm: Some(float_rpm),
+        };
+        let mut voice = MechanicalVoice::from_spec(&spec, sample_rate);
+        let mut noise = Noise::new(999);
+
+        // A bandpass filter centered around 4.5 kHz isolates the valve float impact band.
+        let filter_coeffs =
+            crate::audio::filters::BiquadCoeffs::bandpass(sample_rate, 4_500.0, 1.5);
+        let mut filter = crate::audio::filters::Biquad::new(filter_coeffs);
+
+        // Cycle through 3 limiter bounce cycles: below float -> overspeed excursion -> recovered below float
+        for cycle in 0..3 {
+            // Below float threshold (approaching limiter or cut recovery)
+            let snap_under = EngineSnapshot {
+                rpm: 6_900.0,
+                friction_mep: REFERENCE_FMEP,
+                peak_cylinder_pressure: REFERENCE_PEAK_PRESSURE,
+                spark_cut: false,
+                ..EngineSnapshot::default()
+            };
+            voice.tune(&snap_under, (6_900.0 / 120.0) as f32, 4);
+            // Let smoothers settle fully
+            for _ in 0..10_000 {
+                let s = voice.process(&mut noise);
+                filter.process(s);
+            }
+
+            let mut rms_under = 0.0f64;
+            for _ in 0..8_000 {
+                let s = filter.process(voice.process(&mut noise)) as f64;
+                rms_under += s * s;
+            }
+            rms_under = (rms_under / 8_000.0).sqrt();
+
+            // Overspeed excursion beyond float threshold (e.g. inertia bounce)
+            let snap_over = EngineSnapshot {
+                rpm: 7_600.0, // 600 rpm over float
+                friction_mep: REFERENCE_FMEP,
+                peak_cylinder_pressure: REFERENCE_PEAK_PRESSURE,
+                spark_cut: true,
+                ..EngineSnapshot::default()
+            };
+            voice.tune(&snap_over, (7_600.0 / 120.0) as f32, 4);
+            for _ in 0..10_000 {
+                let s = voice.process(&mut noise);
+                filter.process(s);
+            }
+
+            let mut rms_over = 0.0f64;
+            for _ in 0..8_000 {
+                let s = filter.process(voice.process(&mut noise)) as f64;
+                rms_over += s * s;
+            }
+            rms_over = (rms_over / 8_000.0).sqrt();
+
+            assert!(
+                rms_over > 1.5 * rms_under,
+                "cycle {cycle}: float band must rise sharply during overspeed excursion ({rms_over} vs {rms_under})"
+            );
+
+            // Cut intervenes, dropping engine back below float threshold
+            voice.tune(&snap_under, (6_900.0 / 120.0) as f32, 4);
+            for _ in 0..10_000 {
+                let s = voice.process(&mut noise);
+                filter.process(s);
+            }
+
+            let mut rms_recovered = 0.0f64;
+            for _ in 0..8_000 {
+                let s = filter.process(voice.process(&mut noise)) as f64;
+                rms_recovered += s * s;
+            }
+            rms_recovered = (rms_recovered / 8_000.0).sqrt();
+
+            assert!(
+                rms_recovered < rms_over * 0.75,
+                "cycle {cycle}: float band must disappear once speed drops below float ({rms_recovered} vs {rms_over})"
+            );
+        }
+    }
+
+    #[test]
     fn mono_and_multichannel_buffers_are_filled_completely() {
         for channels in [1usize, 2, 4] {
             let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
