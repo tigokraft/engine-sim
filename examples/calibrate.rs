@@ -1218,24 +1218,26 @@ fn markdown(all: &[Calibrated]) -> String {
     );
     let _ = writeln!(
         out,
-        "7. **Wave steepening is wired into the primaries and does nothing.** \
-         `WaveguidePipe::set_steepening` advances a crest by `factor * p * 2` \
-         samples and clamps that to two, with `factor` 0.20 and `p` the pipe's \
-         own normalised pressure — so anywhere above about five per cent of a \
-         blowdown the advance is pinned at two samples, constant across the \
-         whole pulse, and a constant delay does not steepen anything. Measured: \
-         setting the factor to zero outright moves crest factor by under a \
-         tenth of a decibel and every order by under half a decibel, at 1200, \
-         3000 and 6000 rpm alike. The plan calls this the mechanism behind a \
-         race engine sounding hard rather than merely loud, and the catalogue \
-         is not getting it. Scaling the advance from the gas instead — a crest \
-         gains `(gamma+1)/(2 gamma) * p / P_0` of the transit time, which is the \
-         simple-wave result and needs no constant — asks at blowdown for a crest \
-         that arrives before its own pulse was launched, so the clamp becomes \
-         the whole model and the clamp is a tone knob. What it wants is a \
-         formulation that steepens the *front* under a shock condition rather \
-         than phase-modulating the waveform sample by sample, which is a Stage \
-         10c rewrite and not a constant.\n"
+        "7. **A shocked front is steepened but never dissipated.** The \
+         primaries now propagate on the gas dynamics rather than on linear \
+         acoustics: each point of the stored waveform is a characteristic \
+         travelling at `c(1 + (gamma+1)/(2 gamma) * p / P_0)`, and the pipe \
+         reads out the one that arrives first, so where a crest has overtaken \
+         the trough ahead of it the output steps rather than rises. Measured on \
+         a half-metre primary at 800 K, second harmonic against fundamental: \
+         0.0005 at 100 Pa, 0.024 at 5 kPa, 0.095 at 20 kPa, 0.32 at one \
+         atmosphere — an advance that grows with the pulse, which is what the \
+         old `factor * p` clamped to two samples never did. What is still \
+         missing is the other half of a shock. A real one loses energy across \
+         the jump, and that loss is the reason a blowdown does not stay a step \
+         all the way down the pipe; here the front is bounded only by the rule \
+         that the reader cannot return more than the line was given, and then \
+         attenuated by the wall loss, which is a viscothermal term and knows \
+         nothing about entropy. So a primary carrying a pressure ratio well \
+         over two holds its edge further down the pipe than it should. The \
+         Rankine-Hugoniot jump gives the missing term without a constant; \
+         fitting a decay to the edge instead would be the tone knob this stage \
+         exists to refuse. Open.\n"
     );
 
     for c in all {

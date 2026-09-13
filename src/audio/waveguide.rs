@@ -708,6 +708,19 @@ impl ValveTermination {
     }
 }
 
+/// Coefficient of nonlinearity for a simple wave in an ideal gas [-].
+///
+/// $$\frac{\gamma + 1}{2\gamma}$$
+///
+/// A point of the waveform at overpressure $p$ travels at $c_0$ times
+/// $1 + \text{this} \cdot p / P_0$: the sum of the flow it induces
+/// ($u = p / \rho_0 c_0$) and the rise in sound speed through gas it has
+/// compressed ($c = c_0 + \frac{\gamma - 1}{2} u$). About 0.87 in exhaust gas.
+#[inline]
+pub fn nonlinearity(gamma: f32) -> f32 {
+    (gamma.max(1.01) + 1.0) / (2.0 * gamma.max(1.01))
+}
+
 // ---------------------------------------------------------------------------
 // Waveguide pipe
 // ---------------------------------------------------------------------------
@@ -737,7 +750,13 @@ pub struct WaveguidePipe {
     gamma: f32,
     gas_constant: f32,
     temperature: f32,
-    steepening: f32,
+    /// Whether this pipe propagates on the gas dynamics rather than on linear
+    /// acoustics; see [`WaveguidePipe::set_steepening`].
+    steepening: bool,
+    /// $\frac{\gamma+1}{2\gamma}$, the coefficient of nonlinearity for a
+    /// simple wave in this gas [-]. Cached because it is wanted every sample
+    /// and `gamma` moves at control rate.
+    nonlinearity: f32,
 }
 
 impl WaveguidePipe {
@@ -814,7 +833,8 @@ impl WaveguidePipe {
             gamma,
             gas_constant,
             temperature,
-            steepening: 0.0,
+            steepening: false,
+            nonlinearity: nonlinearity(gamma),
         }
     }
 
@@ -827,17 +847,32 @@ impl WaveguidePipe {
         self.tune(self.gamma, self.gas_constant, self.temperature);
     }
 
-    /// Sets the wave steepening factor down the pipe [-].
+    /// Declares that this pipe carries pulses large enough to steepen.
     ///
-    /// At large pulse amplitudes (blowdown pressure ratio > 2), pressure crests
-    /// travel faster than troughs ($c(p) \propto p^{(\gamma-1)/2\gamma}$), causing
-    /// the wavefront to steepen toward a shock.
-    pub fn set_steepening(&mut self, factor: f32) {
-        self.steepening = factor.clamp(0.0, 0.5);
+    /// A delay line moves every part of a wave at the same speed. A gas does
+    /// not: a point of the waveform at overpressure $p$ rides on the flow it
+    /// has itself induced and through gas it has itself heated, so it travels
+    /// at $c_0(1 + \beta)$ with
+    ///
+    /// $$\beta = \frac{\gamma + 1}{2\gamma} \frac{p}{P_0}$$
+    ///
+    /// which is the simple-wave result and carries no constant of its own. The
+    /// crest gains on the trough ahead of it, the front stands up, and once the
+    /// crest has caught that trough the front is a shock. That is the whole
+    /// difference between a pulse that is loud and one that is *hard*.
+    ///
+    /// It is a switch and not a depth because there is nothing to set: the gas
+    /// decides how much a given pulse steepens. What the switch buys is the
+    /// search in [`WaveguidePipe::read_outputs`], and it is worth its cost only
+    /// where the pressure ratio actually approaches the shock condition — the
+    /// primaries, at blowdown. Downstream of the collector the same pulse has
+    /// spread over the junction's volume and travels as linear acoustics.
+    pub fn set_steepening(&mut self, on: bool) {
+        self.steepening = on;
     }
 
-    /// Current wave steepening factor [-].
-    pub fn steepening(&self) -> f32 {
+    /// Whether this pipe propagates on the gas dynamics.
+    pub fn steepening(&self) -> bool {
         self.steepening
     }
 
@@ -846,6 +881,7 @@ impl WaveguidePipe {
         self.gamma = gamma;
         self.gas_constant = gas_constant;
         self.temperature = temperature;
+        self.nonlinearity = nonlinearity(gamma);
 
         let c = speed_of_sound(gamma, gas_constant, temperature);
         let rho = REFERENCE_PRESSURE_PA / (gas_constant * temperature.max(1.0));
@@ -1003,18 +1039,84 @@ impl WaveguidePipe {
         let d_fwd = self.forward_delay_samples.next_value();
         let d_bwd = self.backward_delay_samples.next_value();
         let raw0 = self.backward_line.read(d_bwd);
-        let raw1 = if self.steepening > 1e-6 {
-            let est = self.forward_line.read_linear(d_fwd);
-            // Amplitude-dependent delay shift: crests travel faster, shifting delay earlier.
-            // As high-amplitude pulses propagate down the primary, the wavefront steepens.
-            let shift = (self.steepening * est * 2.0).clamp(-2.0, 2.0);
-            self.forward_line.read(d_fwd - shift)
+        let raw1 = if self.steepening {
+            self.shocked_read(d_fwd)
         } else {
             self.forward_line.read(d_fwd)
         };
         let out0 = self.backward_loss.process(raw0);
         let out1 = self.forward_loss.process(raw1);
         (out0, out1)
+    }
+
+    /// Reads the downstream end of the pipe at the time the gas dynamics say the
+    /// wave arrives, rather than the one time linear acoustics gives all of it.
+    ///
+    /// Every point of the stored waveform is a characteristic. The one launched
+    /// $k$ samples after the point that would arrive now travels $\beta$ faster
+    /// and so arrives now as well if it can make up exactly those $k$ samples:
+    ///
+    /// $$k = D \frac{\beta}{1 + \beta}, \qquad
+    ///   \beta = \frac{\gamma + 1}{2\gamma} \frac{p}{P_0}$$
+    ///
+    /// which rearranges to a residual with no divide in it,
+    ///
+    /// $$h(k) = \frac{\gamma+1}{2\gamma} (D - k) \, p(k) - k P_0,$$
+    ///
+    /// zero exactly at a characteristic that arrives now. Where the front is
+    /// steep enough that crests overtake the troughs ahead of them, $h$ has
+    /// more than one zero: the waveform has become multivalued, which is the
+    /// analytic statement that it has shocked. The entropy condition picks the
+    /// characteristic that arrives *first*, so this takes the largest root, and
+    /// the output jumps from the flank to the crest in one sample — a step,
+    /// which is what a shock is. Behind it the roots march back down the decay,
+    /// so nothing is held and nothing is repeated.
+    ///
+    /// It cannot invent energy: every sample it returns is an interpolation
+    /// between samples already in the line, so the output can never exceed what
+    /// the pipe was given. That matters because this sits inside a feedback
+    /// loop, where anything that adds a little comes back round to add it again.
+    ///
+    /// The search runs out to the advance a crest one atmosphere over ambient
+    /// earns, $k_{max} = D\beta/(1+\beta)$ at $p = P_0$ — a pressure ratio of
+    /// two, which is the shock condition itself. A crest above that arrives at
+    /// the window edge instead of a root, and it costs nothing: past the shock
+    /// the front is already a step, and arriving earlier still does not make a
+    /// step steeper.
+    #[inline(always)]
+    fn shocked_read(&mut self, transit: f32) -> f32 {
+        let b = self.nonlinearity;
+        let span = (transit * b / (1.0 + b)).min(transit - 3.0);
+        if span < 1.0 {
+            return self.forward_line.read(transit);
+        }
+        let residual = |line: &DelayLine, k: f32| -> f32 {
+            b * (transit - k) * line.read_linear(transit - k) - k * REFERENCE_PRESSURE_PA
+        };
+        let steps = span as i32;
+        let mut k = steps;
+        let mut h_above = residual(&self.forward_line, k as f32);
+        // Nothing in the window is slow enough to have a root: the whole front
+        // is past the shock condition and arrives at the window edge.
+        let mut advance = span;
+        if h_above < 0.0 {
+            // The other edge is the fallback: a rarefaction deeper than the
+            // window resolves lags by at most this much.
+            advance = -(steps as f32);
+            while k > -steps {
+                let below = k - 1;
+                let h_below = residual(&self.forward_line, below as f32);
+                if h_below >= 0.0 {
+                    let denom = h_below - h_above;
+                    let frac = if denom > 1e-12 { h_below / denom } else { 0.0 };
+                    advance = below as f32 + frac;
+                    break;
+                }
+                h_above = h_below;
+                k = below;
+            }
+        }
+        self.forward_line.read_lagrange3(transit - advance)
     }
 
     /// Injects waves incident on the pipe boundaries into the travelling delay lines:
@@ -2195,7 +2297,7 @@ impl ExhaustNetwork {
                 r,
                 stations.primary(i),
             );
-            prim.set_steepening(0.20);
+            prim.set_steepening(true);
             let valve = ValveTermination::new(sample_rate, spec.area);
             primaries.push(prim);
             valves.push(valve);
@@ -3527,11 +3629,11 @@ mod tests {
 
     #[test]
     fn steepening_raises_high_orders_with_amplitude() {
-        // High-amplitude pulses in an exhaust primary travel faster at crests
-        // than at troughs, causing the waveform to steepen toward a shock.
-        // At a fixed fundamental frequency, steepening must cause high-order
-        // harmonic content to rise with pulse amplitude, while remaining
-        // completely absent (vanishingly small) at low amplitudes (quiet).
+        // A crest rides on its own induced flow through gas it has itself
+        // heated, so it gains on the trough ahead of it and the front stands
+        // up. At a fixed fundamental that shows as high-order content that
+        // grows with amplitude — and vanishes when the pulse is small, because
+        // beta is p / P_0 and a quiet wave has nothing to gain on.
         const FS: f32 = 48_000.0;
         const FREQ: f32 = 200.0; // 240 samples per cycle at 48 kHz
         const GAMMA: f32 = 1.35;
@@ -3541,7 +3643,7 @@ mod tests {
 
         let measure_harmonic_ratio = |amp: f32| -> f32 {
             let mut pipe = WaveguidePipe::new(0.5, area, FS, GAMMA, R, TEMPERATURE);
-            pipe.set_steepening(0.20);
+            pipe.set_steepening(true);
             pipe.snap_delays();
 
             let n_total = 4800; // 20 complete cycles
@@ -3572,20 +3674,19 @@ mod tests {
             (m_h2 / m_fund.max(1e-12)) as f32
         };
 
-        let ratio_quiet = measure_harmonic_ratio(0.001);
-        let ratio_loud = measure_harmonic_ratio(1.0);
+        // A hundred pascals is a loud noise and a thousandth of an atmosphere.
+        let ratio_quiet = measure_harmonic_ratio(100.0);
+        // A blowdown is a fair fraction of an atmosphere.
+        let ratio_loud = measure_harmonic_ratio(0.5 * REFERENCE_PRESSURE_PA);
 
-        // At low amplitude (quiet), wave steepening is absent (harmonic distortion < -80 dB)
         assert!(
-            ratio_quiet < 0.0001,
+            ratio_quiet < 0.001,
             "high orders should be absent at low amplitude: got {ratio_quiet}"
         );
-        // At high amplitude (loud), wave steepening significantly raises high-order content
         assert!(
-            ratio_loud > 0.003,
+            ratio_loud > 0.05,
             "high orders should rise with amplitude: got {ratio_loud}"
         );
-        // The harmonic content must scale up with amplitude
         assert!(
             ratio_loud > 50.0 * ratio_quiet,
             "high-order content must rise strongly with amplitude: loud={ratio_loud}, quiet={ratio_quiet}"

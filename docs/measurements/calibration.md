@@ -11,14 +11,14 @@ Every figure below is *relative*: an order against the firing order, a measured 
 | Engine | Firing order | Order balance rms | Worst order | Crank nulls | Modes placed | Floor tilt |
 |---|---:|---:|---:|---:|---:|---:|
 | [Inline-4](#inline-4) | 2 | 13.3 dB | -18.8 dB on 4 | -18.7 dB on 1 | 2/2 of 11 | -9.2 dB/oct |
-| [Cross-plane V8](#cross-plane-v8) | 4 | 8.2 dB | -15.1 dB on 7.5 | -8.7 dB on 1, not enforced | 1/5 of 11 | -10.5 dB/oct |
-| [Flat-plane V8](#flat-plane-v8) | 4 | 19.8 dB | -27.9 dB on 6 | -13.8 dB on 0.5, not enforced | 3/4 of 8 | -9.5 dB/oct |
-| [V10](#v10) | 5 | 16.5 dB | -29.0 dB on 8.5 | -5.3 dB on 0.5, not enforced | 2/4 of 10 | -8.2 dB/oct |
-| [V12](#v12) | 6 | 12.5 dB | -18.7 dB on 12 | -11.5 dB on 0.5, not enforced | 3/6 of 10 | -14.2 dB/oct |
-| [2-Rotor Wankel](#2-rotor-wankel) | 2 | 10.4 dB | -14.7 dB on 4 | -24.5 dB on 0.5 | 3/3 of 9 | -10.1 dB/oct |
-| [Turbo Inline-4](#turbo-inline-4) | 2 | 2.7 dB | -3.8 dB on 4 | -12.3 dB on 1, not enforced | 2/5 of 11 | -8.1 dB/oct |
-| [Twin-turbo V8](#twin-turbo-v8) | 4 | 10.8 dB | -23.3 dB on 7.5 | -14.9 dB on 1, not enforced | 4/7 of 11 | -8.7 dB/oct |
-| [Turbo Inline-6](#turbo-inline-6) | 3 | 12.0 dB | -17.0 dB on 6 | -22.8 dB on 1, not enforced | 3/3 of 10 | -9.7 dB/oct |
+| [Cross-plane V8](#cross-plane-v8) | 4 | 8.2 dB | -15.2 dB on 7.5 | -8.7 dB on 1, not enforced | 1/4 of 11 | -10.6 dB/oct |
+| [Flat-plane V8](#flat-plane-v8) | 4 | 19.7 dB | -27.7 dB on 6 | -13.8 dB on 0.5, not enforced | 3/4 of 8 | -9.7 dB/oct |
+| [V10](#v10) | 5 | 16.5 dB | -29.0 dB on 8.5 | -5.3 dB on 0.5, not enforced | 2/3 of 10 | -8.2 dB/oct |
+| [V12](#v12) | 6 | 12.4 dB | -18.7 dB on 12 | -11.5 dB on 0.5, not enforced | 3/6 of 10 | -14.3 dB/oct |
+| [2-Rotor Wankel](#2-rotor-wankel) | 2 | 10.4 dB | -14.7 dB on 4 | -24.5 dB on 0.5 | 3/3 of 9 | -10.2 dB/oct |
+| [Turbo Inline-4](#turbo-inline-4) | 2 | 2.7 dB | -3.8 dB on 4 | -12.4 dB on 1, not enforced | 2/5 of 11 | -8.1 dB/oct |
+| [Twin-turbo V8](#twin-turbo-v8) | 4 | 10.7 dB | -22.9 dB on 7.5 | -14.9 dB on 1, not enforced | 4/7 of 11 | -8.7 dB/oct |
+| [Turbo Inline-6](#turbo-inline-6) | 3 | 11.8 dB | -16.6 dB on 6 | -22.8 dB on 1, not enforced | 3/3 of 10 | -9.8 dB/oct |
 | [Turbodiesel I4](#turbodiesel-i4) | 2 | 11.9 dB | -16.8 dB on 4 | -9.2 dB on 1, not enforced | 1/4 of 12 | -5.0 dB/oct |
 | [Big Single](#big-single) | 0.5 | 7.3 dB | +10.3 dB on 1 | — | 6/6 of 9 | -7.5 dB/oct |
 
@@ -57,7 +57,7 @@ Recorded rather than closed, as Stage 16 requires: each of these is a disagreeme
 
 6. **Several predicted modes leave no peak at all.** The turbodiesel is the extreme — it radiates through its block rather than its pipe, so the exhaust chain barely reaches the listener and five of its twelve predicted modes are absent rather than misplaced. Absence is the honest report: a peak found more than 25 % from a prediction is a different mode, not that one in the wrong place.
 
-7. **Wave steepening is wired into the primaries and does nothing.** `WaveguidePipe::set_steepening` advances a crest by `factor * p * 2` samples and clamps that to two, with `factor` 0.20 and `p` the pipe's own normalised pressure — so anywhere above about five per cent of a blowdown the advance is pinned at two samples, constant across the whole pulse, and a constant delay does not steepen anything. Measured: setting the factor to zero outright moves crest factor by under a tenth of a decibel and every order by under half a decibel, at 1200, 3000 and 6000 rpm alike. The plan calls this the mechanism behind a race engine sounding hard rather than merely loud, and the catalogue is not getting it. Scaling the advance from the gas instead — a crest gains `(gamma+1)/(2 gamma) * p / P_0` of the transit time, which is the simple-wave result and needs no constant — asks at blowdown for a crest that arrives before its own pulse was launched, so the clamp becomes the whole model and the clamp is a tone knob. What it wants is a formulation that steepens the *front* under a shock condition rather than phase-modulating the waveform sample by sample, which is a Stage 10c rewrite and not a constant.
+7. **A shocked front is steepened but never dissipated.** The primaries now propagate on the gas dynamics rather than on linear acoustics: each point of the stored waveform is a characteristic travelling at `c(1 + (gamma+1)/(2 gamma) * p / P_0)`, and the pipe reads out the one that arrives first, so where a crest has overtaken the trough ahead of it the output steps rather than rises. Measured on a half-metre primary at 800 K, second harmonic against fundamental: 0.0005 at 100 Pa, 0.024 at 5 kPa, 0.095 at 20 kPa, 0.32 at one atmosphere — an advance that grows with the pulse, which is what the old `factor * p` clamped to two samples never did. What is still missing is the other half of a shock. A real one loses energy across the jump, and that loss is the reason a blowdown does not stay a step all the way down the pipe; here the front is bounded only by the rule that the reader cannot return more than the line was given, and then attenuated by the wall loss, which is a viscothermal term and knows nothing about entropy. So a primary carrying a pressure ratio well over two holds its edge further down the pipe than it should. The Rankine-Hugoniot jump gives the missing term without a constant; fitting a decay to the edge instead would be the tone knob this stage exists to refuse. Open.
 
 
 ## Inline-4
@@ -76,7 +76,7 @@ Reference: the crank itself: 4 firings a cycle on 1 bank
 | 1 | null | -18.7 | — |
 | 1.5 | null | -39.7 | — |
 | **2** | +0.0 | +0.0 | +0.0 |
-| 2.5 | null | -38.2 | — |
+| 2.5 | null | -38.1 | — |
 | 3 | null | -36.1 | — |
 | 3.5 | null | -42.3 | — |
 | 4 | +0.0 | -18.8 | -18.8 |
@@ -91,7 +91,7 @@ Driven orders: rms **13.3 dB**, mean -9.4 dB, worst -18.8 dB on order 4 (toleran
 | block, first bending mode | `mass law on 110 kg` | 102.3 | not found | — | — | — |  |
 | tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 622 x 0.951/(4 x (1.200 + 0.017))` | 121.6 | not found | — | — | — |  |
 | intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 2.2 L` | 162.1 | not found | — | — | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00330 s over 2.12 m` | 227.2 | 216.4 | -4.8 % | -37.0 | 20.0 | downstream run 2.12 m → 2.222 m |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00330 s over 2.12 m` | 227.2 | 216.4 | -4.8 % | -37.0 | 20.1 | downstream run 2.12 m → 2.223 m |
 | intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.280 + 0.017))` | 292.0 | not found | — | — | — |  |
 | collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00330 s over 2.12 m` | 378.7 | not found | — | — | — |  |
 | exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 724 x 0.983/(4 x 0.416)` | 428.2 | not found | — | — | — |  |
@@ -104,29 +104,29 @@ Driven orders: rms **13.3 dB**, mean -9.4 dB, worst -18.8 dB on order 4 (toleran
 | Hz | dBFS | Prominence [dB] |
 |---:|---:|---:|
 | 34.8 | -40.9 | 18.1 |
-| 216.4 | -37.0 | 20.0 |
-| 958.5 | -59.8 | 12.1 |
+| 216.4 | -37.0 | 20.1 |
+| 958.6 | -59.7 | 12.2 |
 | 1483.3 | -68.5 | 21.3 |
-| 1759.4 | -71.2 | 8.0 |
-| 2160.9 | -78.0 | 9.4 |
+| 2160.9 | -78.0 | 9.5 |
 | 2519.8 | -86.2 | 8.1 |
 | 2878.2 | -84.3 | 13.3 |
 | 3308.4 | -86.9 | 8.3 |
 | 3598.1 | -81.2 | 18.0 |
-| 3824.9 | -85.7 | 9.0 |
-| 4065.7 | -86.0 | 9.0 |
-| 4702.9 | -85.6 | 10.8 |
-| 5593.7 | -87.0 | 8.8 |
-| 6344.9 | -88.0 | 14.7 |
-| 6614.3 | -89.7 | 8.8 |
+| 3824.9 | -85.7 | 8.9 |
+| 4065.7 | -86.0 | 8.9 |
+| 4548.6 | -84.6 | 10.8 |
+| 5593.9 | -87.0 | 8.8 |
+| 6345.2 | -88.0 | 14.7 |
+| 6614.3 | -89.6 | 8.9 |
 | 7439.0 | -94.6 | 9.0 |
-| 8383.9 | -101.7 | 9.3 |
+| 8383.9 | -101.8 | 9.3 |
 | 9042.5 | -107.3 | 8.3 |
 | 11279.9 | -103.3 | 15.9 |
 | 12000.3 | -104.4 | 9.9 |
-| 14776.9 | -117.2 | 8.9 |
-| 15175.5 | -117.3 | 11.5 |
-| 17864.7 | -110.1 | 21.3 |
+| 14776.8 | -117.2 | 8.9 |
+| 15175.7 | -117.3 | 11.7 |
+| 17864.6 | -110.2 | 21.2 |
+| 22278.2 | -121.2 | 8.3 |
 
 Noise floor tilt over 200 Hz-12 kHz: **-9.2 dB/octave**.
 
@@ -153,14 +153,14 @@ Reference: the crank itself: 8 firings a cycle on 2 banks
 | **4** | +0.0 | +0.0 | +0.0 |
 | 4.5 | -11.4 | -25.6 | -14.3 |
 | 5 | null | -27.0 | — |
-| 5.5 | -3.7 | -9.8 | -6.1 |
-| 6 | null | -18.7 | — |
+| 5.5 | -3.7 | -9.3 | -5.6 |
+| 6 | null | -19.0 | — |
 | 6.5 | -3.7 | -7.4 | -3.7 |
 | 7 | null | -28.5 | — |
-| 7.5 | -11.4 | -26.4 | -15.1 |
+| 7.5 | -11.4 | -26.5 | -15.2 |
 | 8 | +0.0 | -10.2 | -10.2 |
 
-Driven orders: rms **8.2 dB**, mean -5.2 dB, worst -15.1 dB on order 7.5 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -8.7 dB on order 1 (pass).
+Driven orders: rms **8.2 dB**, mean -5.1 dB, worst -15.2 dB on order 7.5 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -8.7 dB on order 1 (pass).
 
 ### Resonance placement
 
@@ -171,43 +171,43 @@ Driven orders: rms **8.2 dB**, mean -5.2 dB, worst -15.1 dB on order 7.5 (tolera
 | tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 611 x 0.986/(4 x (1.500 + 0.018))` | 99.1 | not found | — | — | — |  |
 | intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 4.8 L` | 140.3 | not found | — | — | — |  |
 | collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00445 s over 2.82 m` | 168.4 | not found | — | — | — |  |
-| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.380 + 0.018))` | 218.0 | 245.1 | +12.4 % | -48.6 | 9.3 | runner length 0.380 m → 0.354 m |
+| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.380 + 0.018))` | 218.0 | not found | — | — | — |  |
 | collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00445 s over 2.82 m` | 280.6 | not found | — | — | — |  |
 | exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 722 x 0.996/(4 x 0.568)` | 316.4 | not found | — | — | — |  |
-| expansion chamber, first pass band | `nc/2L = 1 x 680/(2 x 0.650)` | 523.1 | 409.0 | -21.8 % | -53.8 | 11.1 | chamber length 0.650 m, volume 22.1 L → 0.831 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 722 x 0.996/(4 x 0.568)` | 949.1 | 905.6 | -4.6 % | -61.8 | 11.4 | primary length 0.550 m → 0.576 m |
-| expansion chamber, second pass band | `nc/2L = 2 x 680/(2 x 0.650)` | 1046.3 | 1200.0 | +14.7 % | -64.2 | 11.7 | chamber length 0.650 m, volume 22.1 L → 0.567 m |
+| expansion chamber, first pass band | `nc/2L = 1 x 680/(2 x 0.650)` | 523.1 | 409.2 | -21.8 % | -53.8 | 11.0 | chamber length 0.650 m, volume 22.1 L → 0.831 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 722 x 0.996/(4 x 0.568)` | 949.1 | 963.5 | +1.5 % | -61.9 | 11.4 | primary length 0.550 m → 0.542 m |
+| expansion chamber, second pass band | `nc/2L = 2 x 680/(2 x 0.650)` | 1046.3 | 1199.9 | +14.7 % | -64.3 | 11.6 | chamber length 0.650 m, volume 22.1 L → 0.567 m |
 
 ### Peaks in the sweep average
 
 | Hz | dBFS | Prominence [dB] |
 |---:|---:|---:|
 | 84.3 | -40.8 | 16.6 |
-| 245.1 | -48.6 | 9.3 |
-| 409.0 | -53.8 | 11.1 |
-| 637.6 | -55.6 | 9.3 |
-| 905.6 | -61.8 | 11.4 |
-| 1200.0 | -64.2 | 11.7 |
-| 1535.9 | -71.4 | 19.9 |
-| 2678.8 | -79.3 | 11.5 |
-| 2996.2 | -80.0 | 10.6 |
-| 3900.6 | -80.2 | 18.0 |
-| 4471.3 | -85.7 | 12.4 |
-| 4799.6 | -89.8 | 14.2 |
-| 5114.7 | -94.6 | 9.8 |
-| 5712.1 | -93.1 | 15.1 |
-| 8449.2 | -101.0 | 13.6 |
-| 8999.4 | -102.6 | 11.0 |
-| 9600.0 | -103.2 | 13.5 |
-| 11724.7 | -112.5 | 11.2 |
-| 11999.9 | -114.5 | 10.5 |
-| 12281.9 | -110.9 | 9.9 |
-| 13199.7 | -109.0 | 19.1 |
-| 16800.2 | -114.3 | 15.8 |
-| 18637.5 | -123.8 | 10.2 |
-| 21359.6 | -118.6 | 17.2 |
+| 409.2 | -53.8 | 11.0 |
+| 963.5 | -61.9 | 11.4 |
+| 1199.9 | -64.3 | 11.6 |
+| 1535.9 | -71.4 | 19.8 |
+| 2679.6 | -79.5 | 10.5 |
+| 2996.2 | -80.0 | 11.3 |
+| 3900.6 | -80.2 | 17.9 |
+| 4471.4 | -85.7 | 12.5 |
+| 4799.6 | -89.8 | 14.3 |
+| 5114.8 | -94.6 | 9.7 |
+| 5712.1 | -93.2 | 15.3 |
+| 8449.0 | -101.0 | 14.3 |
+| 8999.5 | -102.8 | 11.0 |
+| 9600.0 | -103.2 | 13.3 |
+| 11724.7 | -112.6 | 11.5 |
+| 11999.9 | -115.3 | 10.0 |
+| 12281.9 | -110.9 | 10.0 |
+| 13199.6 | -109.0 | 19.4 |
+| 15600.0 | -117.5 | 9.6 |
+| 16800.1 | -114.4 | 16.2 |
+| 18637.4 | -123.8 | 10.5 |
+| 21359.6 | -118.8 | 17.6 |
+| 21599.6 | -120.5 | 9.7 |
 
-Noise floor tilt over 200 Hz-12 kHz: **-10.5 dB/octave**.
+Noise floor tilt over 200 Hz-12 kHz: **-10.6 dB/octave**.
 
 
 ## Flat-plane V8
@@ -225,7 +225,7 @@ Reference: the crank itself: 8 firings a cycle on 2 banks
 | 0.5 | null | -13.8 | — |
 | 1 | null | -16.7 | — |
 | 1.5 | null | -21.9 | — |
-| 2 | +0.0 | -24.9 | -24.9 |
+| 2 | +0.0 | -24.8 | -24.8 |
 | 2.5 | null | -28.6 | — |
 | 3 | null | -26.3 | — |
 | 3.5 | null | -28.1 | — |
@@ -233,13 +233,13 @@ Reference: the crank itself: 8 firings a cycle on 2 banks
 | 4.5 | null | -34.1 | — |
 | 5 | null | -26.7 | — |
 | 5.5 | null | -30.2 | — |
-| 6 | +0.0 | -27.9 | -27.9 |
-| 6.5 | null | -34.1 | — |
+| 6 | +0.0 | -27.7 | -27.7 |
+| 6.5 | null | -34.2 | — |
 | 7 | null | -36.3 | — |
-| 7.5 | null | -48.7 | — |
+| 7.5 | null | -48.3 | — |
 | 8 | +0.0 | -12.7 | -12.7 |
 
-Driven orders: rms **19.8 dB**, mean -16.4 dB, worst -27.9 dB on order 6 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -13.8 dB on order 0.5 (pass).
+Driven orders: rms **19.7 dB**, mean -16.3 dB, worst -27.7 dB on order 6 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -13.8 dB on order 0.5 (pass).
 
 ### Resonance placement
 
@@ -247,43 +247,43 @@ Driven orders: rms **19.8 dB**, mean -16.4 dB, worst -27.9 dB on order 6 (tolera
 |---|---|---:|---:|---:|---:|---:|---|
 | block, first bending mode | `mass law on 180 kg` | 80.0 | not found | — | — | — |  |
 | tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 649 x 0.985/(4 x (0.900 + 0.020))` | 173.7 | not found | — | — | — |  |
-| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00142 s over 0.92 m` | 176.4 | 210.5 | +19.3 % | -39.2 | 14.2 | downstream run 0.92 m → 0.771 m |
+| collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00142 s over 0.92 m` | 176.4 | 209.4 | +18.7 % | -39.0 | 14.7 | downstream run 0.92 m → 0.775 m |
 | exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 710 x 0.993/(4 x 0.437)` | 403.2 | not found | — | — | — |  |
 | intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.180 + 0.015))` | 445.8 | not found | — | — | — |  |
 | collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00142 s over 0.92 m` | 529.3 | 527.6 | -0.3 % | -46.2 | 14.4 | downstream run 0.92 m → 0.923 m |
-| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00142 s over 0.92 m` | 882.1 | 944.2 | +7.0 % | -57.0 | 17.6 | downstream run 0.92 m → 0.859 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 710 x 0.993/(4 x 0.437)` | 1209.5 | 1253.4 | +3.6 % | -67.7 | 8.3 | primary length 0.420 m → 0.405 m |
+| collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00142 s over 0.92 m` | 882.1 | 943.8 | +7.0 % | -56.9 | 17.7 | downstream run 0.92 m → 0.860 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 710 x 0.993/(4 x 0.437)` | 1209.5 | 1253.3 | +3.6 % | -67.7 | 8.4 | primary length 0.420 m → 0.405 m |
 
 ### Peaks in the sweep average
 
 | Hz | dBFS | Prominence [dB] |
 |---:|---:|---:|
-| 210.5 | -39.2 | 14.2 |
+| 209.4 | -39.0 | 14.7 |
 | 527.6 | -46.2 | 14.4 |
-| 944.2 | -57.0 | 17.6 |
-| 1253.4 | -67.7 | 8.3 |
-| 1415.8 | -67.9 | 16.2 |
-| 1592.2 | -71.6 | 11.2 |
+| 943.8 | -56.9 | 17.7 |
+| 1253.3 | -67.7 | 8.4 |
+| 1415.8 | -68.0 | 16.0 |
+| 1592.7 | -71.7 | 11.2 |
 | 2160.2 | -75.2 | 10.9 |
-| 2880.0 | -82.2 | 7.7 |
-| 3333.8 | -82.6 | 10.0 |
-| 4078.2 | -88.1 | 9.3 |
-| 4799.8 | -89.2 | 15.4 |
-| 5519.8 | -91.5 | 9.3 |
-| 6959.7 | -93.9 | 18.4 |
-| 8160.0 | -103.8 | 9.7 |
-| 9445.9 | -98.6 | 14.2 |
-| 11906.5 | -104.3 | 9.3 |
-| 13440.4 | -111.4 | 8.6 |
-| 15015.1 | -108.5 | 10.6 |
-| 16113.0 | -108.0 | 18.6 |
-| 18719.8 | -115.0 | 9.8 |
-| 20098.3 | -115.2 | 8.8 |
-| 21427.6 | -112.8 | 14.8 |
-| 22495.0 | -117.4 | 9.1 |
-| 23280.7 | -128.0 | 8.9 |
+| 2880.1 | -82.2 | 8.2 |
+| 4079.2 | -88.4 | 8.8 |
+| 4799.8 | -89.5 | 15.3 |
+| 5520.0 | -92.1 | 9.4 |
+| 6959.9 | -93.9 | 18.8 |
+| 8160.0 | -103.9 | 10.1 |
+| 9338.9 | -100.4 | 13.1 |
+| 10799.8 | -109.2 | 8.1 |
+| 12000.2 | -107.0 | 9.4 |
+| 13440.1 | -112.1 | 12.9 |
+| 15599.8 | -120.4 | 8.1 |
+| 16079.5 | -113.8 | 13.9 |
+| 17760.0 | -118.3 | 7.8 |
+| 18000.2 | -120.5 | 8.1 |
+| 18720.1 | -116.5 | 12.4 |
+| 21360.2 | -118.2 | 12.5 |
+| 23279.4 | -131.0 | 11.4 |
 
-Noise floor tilt over 200 Hz-12 kHz: **-9.5 dB/octave**.
+Noise floor tilt over 200 Hz-12 kHz: **-9.7 dB/octave**.
 
 
 ## V10
@@ -300,24 +300,24 @@ Reference: the crank itself: 10 firings a cycle on 2 banks
 |---:|---:|---:|---:|
 | 0.5 | -22.3 | -5.3 | — |
 | 1 | -8.4 | -10.2 | -1.8 |
-| 1.5 | -5.6 | -15.6 | -9.9 |
+| 1.5 | -5.6 | -15.5 | -9.9 |
 | 2 | -12.6 | -19.8 | — |
 | 2.5 | -14.0 | -22.1 | — |
 | 3 | -12.6 | -16.2 | — |
-| 3.5 | -5.6 | -13.6 | -8.0 |
+| 3.5 | -5.6 | -13.5 | -7.9 |
 | 4 | -8.4 | -17.0 | -8.6 |
-| 4.5 | -22.3 | -34.2 | — |
+| 4.5 | -22.3 | -34.1 | — |
 | **5** | +0.0 | +0.0 | +0.0 |
-| 5.5 | -22.3 | -32.1 | — |
+| 5.5 | -22.3 | -32.2 | — |
 | 6 | -8.4 | -25.4 | -17.0 |
-| 6.5 | -5.6 | -26.8 | -21.2 |
-| 7 | -12.6 | -25.9 | — |
-| 7.5 | -14.0 | -28.9 | — |
+| 6.5 | -5.6 | -26.7 | -21.1 |
+| 7 | -12.6 | -25.6 | — |
+| 7.5 | -14.0 | -28.5 | — |
 | 8 | -12.6 | -18.5 | — |
 | 8.5 | -5.6 | -34.6 | -29.0 |
-| 9 | -8.4 | -34.9 | -26.5 |
-| 9.5 | -22.3 | -38.0 | — |
-| 10 | +0.0 | -13.7 | -13.7 |
+| 9 | -8.4 | -35.0 | -26.6 |
+| 9.5 | -22.3 | -38.1 | — |
+| 10 | +0.0 | -13.6 | -13.6 |
 
 Driven orders: rms **16.5 dB**, mean -13.6 dB, worst -29.0 dB on order 8.5 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -5.3 dB on order 0.5 (pass).
 
@@ -327,43 +327,43 @@ Driven orders: rms **16.5 dB**, mean -13.6 dB, worst -29.0 dB on order 8.5 (tole
 |---|---|---:|---:|---:|---:|---:|---|
 | block, first bending mode | `mass law on 220 kg` | 72.4 | not found | — | — | — |  |
 | collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00303 s over 1.92 m` | 82.6 | not found | — | — | — |  |
-| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 623 x 0.982/(4 x (1.100 + 0.019))` | 136.6 | 117.9 | -13.7 % | -41.5 | 12.5 | tailpipe length 1.100 m, mouth radius 0.031 m → 1.297 m |
+| tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 623 x 0.982/(4 x (1.100 + 0.019))` | 136.6 | 117.9 | -13.7 % | -41.5 | 12.6 | tailpipe length 1.100 m, mouth radius 0.031 m → 1.297 m |
 | collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00303 s over 1.92 m` | 247.9 | not found | — | — | — |  |
 | intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.220 + 0.019))` | 363.3 | not found | — | — | — |  |
 | collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00303 s over 1.92 m` | 413.1 | not found | — | — | — |  |
 | exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 687 x 0.995/(4 x 0.376)` | 454.1 | 498.5 | +9.8 % | -52.4 | 11.2 | primary length 0.360 m → 0.328 m |
-| expansion chamber, first pass band | `nc/2L = 1 x 662/(2 x 0.400)` | 828.1 | 720.2 | -13.0 % | -68.7 | 8.0 | chamber length 0.400 m, volume 8.5 L → 0.460 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 687 x 0.995/(4 x 0.376)` | 1362.2 | 1321.3 | -3.0 % | -63.2 | 14.7 | primary length 0.360 m → 0.371 m |
+| expansion chamber, first pass band | `nc/2L = 1 x 662/(2 x 0.400)` | 828.1 | not found | — | — | — |  |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 687 x 0.995/(4 x 0.376)` | 1362.2 | 1321.3 | -3.0 % | -63.2 | 14.8 | primary length 0.360 m → 0.371 m |
 | expansion chamber, second pass band | `nc/2L = 2 x 662/(2 x 0.400)` | 1656.2 | not found | — | — | — |  |
 
 ### Peaks in the sweep average
 
 | Hz | dBFS | Prominence [dB] |
 |---:|---:|---:|
-| 117.9 | -41.5 | 12.5 |
+| 117.9 | -41.5 | 12.6 |
 | 498.5 | -52.4 | 11.2 |
-| 720.2 | -68.7 | 8.0 |
 | 1036.3 | -64.5 | 9.6 |
-| 1321.3 | -63.2 | 14.7 |
-| 2159.3 | -61.6 | 16.0 |
-| 2400.2 | -73.3 | 13.2 |
+| 1321.3 | -63.2 | 14.8 |
+| 2159.4 | -61.6 | 16.0 |
+| 2400.2 | -73.3 | 13.0 |
 | 3119.9 | -76.9 | 13.3 |
-| 4365.1 | -75.6 | 15.8 |
-| 6334.0 | -93.1 | 10.1 |
-| 7440.2 | -95.3 | 9.3 |
-| 8400.1 | -104.0 | 8.9 |
-| 10320.0 | -102.4 | 11.2 |
-| 10800.0 | -108.8 | 7.9 |
-| 11040.0 | -107.1 | 10.3 |
-| 12960.3 | -112.2 | 8.4 |
-| 13200.0 | -109.0 | 12.4 |
-| 13920.8 | -110.0 | 8.1 |
-| 15359.9 | -112.8 | 7.7 |
-| 16079.9 | -113.0 | 12.9 |
-| 18240.2 | -116.2 | 7.8 |
-| 18960.0 | -114.5 | 12.0 |
-| 21119.9 | -116.8 | 12.8 |
-| 23279.1 | -126.4 | 23.0 |
+| 4376.7 | -75.6 | 15.9 |
+| 6333.8 | -93.1 | 9.9 |
+| 7440.2 | -95.4 | 9.5 |
+| 8400.1 | -104.0 | 9.8 |
+| 10320.0 | -102.5 | 11.4 |
+| 10800.0 | -109.1 | 8.3 |
+| 11039.9 | -107.4 | 11.2 |
+| 12960.2 | -112.5 | 8.8 |
+| 13200.0 | -109.3 | 12.7 |
+| 13921.0 | -110.1 | 8.7 |
+| 16079.8 | -113.4 | 13.2 |
+| 17760.1 | -120.2 | 8.5 |
+| 18240.2 | -116.6 | 13.6 |
+| 18960.1 | -115.2 | 8.1 |
+| 20400.1 | -121.4 | 10.8 |
+| 21120.0 | -116.9 | 14.1 |
+| 23279.9 | -128.9 | 23.5 |
 
 Noise floor tilt over 200 Hz-12 kHz: **-8.2 dB/octave**.
 
@@ -396,16 +396,16 @@ Reference: the crank itself: 12 firings a cycle on 2 banks
 | 7 | null | -32.2 | — |
 | 7.5 | null | -34.4 | — |
 | 8 | null | -31.6 | — |
-| 8.5 | null | -40.7 | — |
-| 9 | +0.0 | -12.2 | -12.2 |
+| 8.5 | null | -40.5 | — |
+| 9 | +0.0 | -11.8 | -11.8 |
 | 9.5 | null | -44.6 | — |
-| 10 | null | -37.4 | — |
-| 10.5 | null | -42.6 | — |
-| 11 | null | -39.8 | — |
+| 10 | null | -37.1 | — |
+| 10.5 | null | -42.5 | — |
+| 11 | null | -39.9 | — |
 | 11.5 | null | -33.3 | — |
 | 12 | +0.0 | -18.7 | -18.7 |
 
-Driven orders: rms **12.5 dB**, mean -4.9 dB, worst -18.7 dB on order 12 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -11.5 dB on order 0.5 (pass).
+Driven orders: rms **12.4 dB**, mean -4.8 dB, worst -18.7 dB on order 12 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -11.5 dB on order 0.5 (pass).
 
 ### Resonance placement
 
@@ -414,44 +414,44 @@ Driven orders: rms **12.5 dB**, mean -4.9 dB, worst -18.7 dB on order 12 (tolera
 | block, first bending mode | `mass law on 260 kg` | 66.6 | 64.8 | -2.7 % | -47.4 | 7.0 |  |
 | collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00209 s over 1.37 m` | 119.9 | not found | — | — | — |  |
 | tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 648 x 0.946/(4 x (1.000 + 0.017))` | 150.7 | not found | — | — | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00209 s over 1.37 m` | 359.6 | 274.9 | -23.5 % | -40.3 | 14.6 | downstream run 1.37 m → 1.788 m |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00209 s over 1.37 m` | 359.6 | 274.9 | -23.5 % | -40.2 | 14.6 | downstream run 1.37 m → 1.788 m |
 | intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.140 + 0.017))` | 552.0 | 480.6 | -12.9 % | -54.5 | 8.1 | runner length 0.140 m → 0.181 m |
 | exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 714 x 0.989/(4 x 0.314)` | 561.6 | not found | — | — | — |  |
 | collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00209 s over 1.37 m` | 599.3 | not found | — | — | — |  |
-| expansion chamber, first pass band | `nc/2L = 1 x 678/(2 x 0.350)` | 969.1 | 1194.8 | +23.3 % | -60.5 | 17.7 | chamber length 0.350 m, volume 2.5 L → 0.284 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 714 x 0.989/(4 x 0.314)` | 1684.7 | 1553.2 | -7.8 % | -72.5 | 18.6 | primary length 0.300 m → 0.325 m |
-| expansion chamber, second pass band | `nc/2L = 2 x 678/(2 x 0.350)` | 1938.2 | 1889.7 | -2.5 % | -77.4 | 11.6 | chamber length 0.350 m, volume 2.5 L → 0.359 m |
+| expansion chamber, first pass band | `nc/2L = 1 x 678/(2 x 0.350)` | 969.1 | 1187.9 | +22.6 % | -60.3 | 18.1 | chamber length 0.350 m, volume 2.5 L → 0.286 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 714 x 0.989/(4 x 0.314)` | 1684.7 | 1553.1 | -7.8 % | -72.4 | 18.7 | primary length 0.300 m → 0.325 m |
+| expansion chamber, second pass band | `nc/2L = 2 x 678/(2 x 0.350)` | 1938.2 | 1889.7 | -2.5 % | -77.2 | 11.8 | chamber length 0.350 m, volume 2.5 L → 0.359 m |
 
 ### Peaks in the sweep average
 
 | Hz | dBFS | Prominence [dB] |
 |---:|---:|---:|
 | 64.8 | -47.4 | 7.0 |
-| 274.9 | -40.3 | 14.6 |
+| 274.9 | -40.2 | 14.6 |
 | 480.6 | -54.5 | 8.1 |
-| 1194.8 | -60.5 | 17.7 |
-| 1553.2 | -72.5 | 18.6 |
-| 1889.7 | -77.4 | 11.6 |
-| 2086.2 | -79.8 | 7.6 |
-| 2437.1 | -85.2 | 8.1 |
-| 2940.6 | -88.6 | 5.9 |
-| 3599.9 | -87.5 | 10.3 |
-| 4080.3 | -92.1 | 5.3 |
-| 4559.5 | -94.5 | 5.2 |
-| 4799.7 | -92.8 | 11.3 |
-| 5279.8 | -102.4 | 7.5 |
-| 6955.7 | -95.7 | 12.1 |
-| 8160.3 | -104.1 | 7.2 |
-| 9070.5 | -100.9 | 10.4 |
-| 13201.8 | -110.7 | 15.7 |
-| 15656.4 | -113.3 | 8.5 |
-| 17520.0 | -117.4 | 6.2 |
-| 17760.8 | -117.2 | 7.1 |
-| 18720.4 | -119.6 | 5.9 |
-| 20966.3 | -120.9 | 8.6 |
-| 21879.6 | -121.6 | 5.9 |
+| 1187.9 | -60.3 | 18.1 |
+| 1553.1 | -72.4 | 18.7 |
+| 1889.7 | -77.2 | 11.8 |
+| 2085.9 | -79.7 | 7.6 |
+| 2436.5 | -85.0 | 8.3 |
+| 2931.5 | -88.7 | 6.0 |
+| 3599.9 | -87.6 | 10.2 |
+| 4080.3 | -92.1 | 5.4 |
+| 4799.7 | -92.9 | 11.3 |
+| 5279.9 | -102.5 | 7.4 |
+| 7113.1 | -95.9 | 11.9 |
+| 7920.8 | -107.4 | 5.6 |
+| 8160.1 | -104.7 | 7.4 |
+| 9170.8 | -100.7 | 11.1 |
+| 13200.5 | -111.2 | 17.0 |
+| 16323.4 | -114.6 | 9.3 |
+| 17519.8 | -119.2 | 7.2 |
+| 17760.2 | -120.7 | 6.1 |
+| 18000.0 | -123.9 | 5.7 |
+| 18959.7 | -119.2 | 9.1 |
+| 21839.8 | -123.3 | 9.1 |
 
-Noise floor tilt over 200 Hz-12 kHz: **-14.2 dB/octave**.
+Noise floor tilt over 200 Hz-12 kHz: **-14.3 dB/octave**.
 
 
 ## 2-Rotor Wankel
@@ -470,12 +470,12 @@ Reference: the crank itself: 4 firings a cycle on 1 bank
 | 1 | null | -24.8 | — |
 | 1.5 | null | -34.3 | — |
 | **2** | +0.0 | +0.0 | +0.0 |
-| 2.5 | null | -35.7 | — |
+| 2.5 | null | -35.6 | — |
 | 3 | null | -33.5 | — |
-| 3.5 | null | — | — |
+| 3.5 | null | -64.9 | — |
 | 4 | +0.0 | -14.7 | -14.7 |
 
-Driven orders: rms **10.4 dB**, mean -7.3 dB, worst -14.7 dB on order 4 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -24.5 dB on order 0.5 (pass).
+Driven orders: rms **10.4 dB**, mean -7.4 dB, worst -14.7 dB on order 4 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -24.5 dB on order 0.5 (pass).
 
 ### Resonance placement
 
@@ -486,41 +486,41 @@ Driven orders: rms **10.4 dB**, mean -7.3 dB, worst -14.7 dB on order 4 (toleran
 | tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 646 x 0.949/(4 x (1.000 + 0.018))` | 150.5 | not found | — | — | — |  |
 | exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 706 x 0.991/(4 x 0.620)` | 282.3 | not found | — | — | — |  |
 | collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00232 s over 1.52 m` | 323.5 | not found | — | — | — |  |
-| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.200 + 0.016))` | 401.9 | 385.4 | -4.1 % | -50.6 | 8.4 | runner length 0.200 m → 0.225 m |
+| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.200 + 0.016))` | 401.9 | 385.3 | -4.1 % | -50.6 | 8.1 | runner length 0.200 m → 0.225 m |
 | collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00232 s over 1.52 m` | 539.2 | not found | — | — | — |  |
-| absorptive silencer, first pass band | `c/2L = 674/(2 x 0.500)` | 674.0 | 640.4 | -5.0 % | -49.6 | 12.8 | silencer length 0.500 m → 0.526 m |
-| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 706 x 0.991/(4 x 0.620)` | 847.0 | 800.1 | -5.5 % | -50.6 | 9.1 | primary length 0.600 m → 0.635 m |
+| absorptive silencer, first pass band | `c/2L = 674/(2 x 0.500)` | 674.0 | 640.4 | -5.0 % | -49.4 | 12.9 | silencer length 0.500 m → 0.526 m |
+| exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 706 x 0.991/(4 x 0.620)` | 847.0 | 800.1 | -5.5 % | -50.5 | 9.1 | primary length 0.600 m → 0.635 m |
 
 ### Peaks in the sweep average
 
 | Hz | dBFS | Prominence [dB] |
 |---:|---:|---:|
-| 53.2 | -31.1 | 25.2 |
-| 208.7 | -31.7 | 12.6 |
-| 385.4 | -50.6 | 8.4 |
-| 640.4 | -49.6 | 12.8 |
-| 800.1 | -50.6 | 9.1 |
-| 960.6 | -53.9 | 8.0 |
-| 1145.0 | -50.1 | 14.5 |
-| 1567.4 | -65.9 | 6.2 |
-| 1827.0 | -63.9 | 15.4 |
+| 53.1 | -31.1 | 25.2 |
+| 208.7 | -31.7 | 12.7 |
+| 385.3 | -50.6 | 8.1 |
+| 640.4 | -49.4 | 12.9 |
+| 800.1 | -50.5 | 9.1 |
+| 960.5 | -54.0 | 8.0 |
+| 1145.2 | -50.1 | 14.5 |
+| 1566.8 | -65.9 | 6.2 |
+| 1826.4 | -63.7 | 15.5 |
 | 2772.4 | -75.0 | 12.7 |
-| 3449.8 | -77.0 | 12.6 |
-| 4080.0 | -81.5 | 9.3 |
-| 4693.0 | -84.6 | 6.4 |
-| 5520.7 | -87.9 | 7.5 |
-| 6240.0 | -92.5 | 5.3 |
-| 6480.5 | -88.6 | 8.6 |
-| 8160.0 | -103.4 | 8.8 |
-| 9119.5 | -102.3 | 8.6 |
-| 9600.1 | -101.0 | 13.4 |
-| 10559.4 | -101.5 | 6.0 |
-| 13679.9 | -106.4 | 9.2 |
-| 14400.2 | -111.1 | 6.8 |
-| 16800.3 | -108.5 | 10.6 |
-| 20880.0 | -111.5 | 14.3 |
+| 3449.7 | -77.1 | 12.5 |
+| 4079.9 | -81.8 | 9.0 |
+| 4767.3 | -84.7 | 7.0 |
+| 5389.9 | -87.4 | 7.7 |
+| 6480.5 | -89.2 | 8.5 |
+| 8160.1 | -103.7 | 8.8 |
+| 9119.5 | -102.4 | 8.8 |
+| 9600.0 | -101.2 | 13.0 |
+| 10559.6 | -101.9 | 6.1 |
+| 13200.5 | -108.3 | 5.9 |
+| 13679.9 | -106.4 | 9.5 |
+| 14399.9 | -111.2 | 6.7 |
+| 16799.8 | -109.0 | 11.6 |
+| 20879.9 | -112.0 | 14.0 |
 
-Noise floor tilt over 200 Hz-12 kHz: **-10.1 dB/octave**.
+Noise floor tilt over 200 Hz-12 kHz: **-10.2 dB/octave**.
 
 
 ## Turbo Inline-4
@@ -536,15 +536,15 @@ Reference: the crank itself: 4 firings a cycle on 1 bank
 | Order | Reference | Synth | Delta |
 |---:|---:|---:|---:|
 | 0.5 | null | -17.1 | — |
-| 1 | null | -12.3 | — |
+| 1 | null | -12.4 | — |
 | 1.5 | null | -26.9 | — |
 | **2** | +0.0 | +0.0 | +0.0 |
 | 2.5 | null | -28.2 | — |
 | 3 | null | -21.3 | — |
-| 3.5 | null | -49.4 | — |
+| 3.5 | null | -49.5 | — |
 | 4 | +0.0 | -3.8 | -3.8 |
 
-Driven orders: rms **2.7 dB**, mean -1.9 dB, worst -3.8 dB on order 4 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -12.3 dB on order 1 (pass).
+Driven orders: rms **2.7 dB**, mean -1.9 dB, worst -3.8 dB on order 4 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -12.4 dB on order 1 (pass).
 
 ### Resonance placement
 
@@ -558,7 +558,7 @@ Driven orders: rms **2.7 dB**, mean -1.9 dB, worst -3.8 dB on order 4 (tolerance
 | intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.240 + 0.017))` | 337.4 | not found | — | — | — |  |
 | collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00247 s over 1.62 m` | 505.7 | 479.4 | -5.2 % | -58.2 | 8.0 | downstream run 1.62 m → 1.707 m |
 | exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 748 x 0.998/(4 x 0.366)` | 510.5 | not found | — | — | — |  |
-| expansion chamber, first pass band | `nc/2L = 1 x 692/(2 x 0.400)` | 865.6 | 719.1 | -16.9 % | -57.8 | 11.5 | chamber length 0.400 m, volume 3.1 L → 0.482 m |
+| expansion chamber, first pass band | `nc/2L = 1 x 692/(2 x 0.400)` | 865.6 | 719.0 | -16.9 % | -57.8 | 11.5 | chamber length 0.400 m, volume 3.1 L → 0.482 m |
 | exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 748 x 0.998/(4 x 0.366)` | 1531.6 | 1149.5 | -24.9 % | -54.4 | 19.4 | primary length 0.350 m → 0.466 m |
 | expansion chamber, second pass band | `nc/2L = 2 x 692/(2 x 0.400)` | 1731.2 | 1636.2 | -5.5 % | -63.2 | 25.8 | chamber length 0.400 m, volume 3.1 L → 0.423 m |
 
@@ -569,27 +569,27 @@ Driven orders: rms **2.7 dB**, mean -1.9 dB, worst -3.8 dB on order 4 (tolerance
 | 50.4 | -33.0 | 25.1 |
 | 250.7 | -41.2 | 9.3 |
 | 479.4 | -58.2 | 8.0 |
-| 719.1 | -57.8 | 11.5 |
+| 719.0 | -57.8 | 11.5 |
 | 1149.5 | -54.4 | 19.4 |
 | 1636.2 | -63.2 | 25.8 |
 | 2520.4 | -81.0 | 10.3 |
 | 3585.7 | -75.4 | 11.5 |
 | 4187.2 | -74.5 | 15.9 |
 | 4736.5 | -76.1 | 11.8 |
-| 6481.2 | -71.5 | 19.7 |
+| 6481.2 | -71.5 | 19.6 |
 | 8376.6 | -97.5 | 9.8 |
 | 8915.0 | -93.9 | 9.3 |
-| 9473.9 | -88.0 | 8.3 |
-| 10047.7 | -86.2 | 21.3 |
-| 13127.0 | -85.9 | 23.2 |
-| 14040.0 | -110.2 | 7.6 |
+| 9473.8 | -88.0 | 8.3 |
+| 10047.6 | -86.2 | 21.4 |
+| 13127.1 | -85.9 | 24.0 |
+| 14039.9 | -110.2 | 8.0 |
 | 14639.5 | -113.0 | 10.9 |
-| 14962.8 | -113.4 | 11.2 |
-| 15720.3 | -111.5 | 10.0 |
-| 17280.4 | -109.0 | 23.2 |
-| 18721.2 | -112.0 | 7.9 |
-| 21322.6 | -117.4 | 8.9 |
-| 22088.2 | -117.5 | 9.9 |
+| 14962.7 | -113.4 | 11.2 |
+| 15720.4 | -111.6 | 10.2 |
+| 17280.4 | -109.2 | 23.1 |
+| 18721.2 | -112.4 | 8.9 |
+| 21322.7 | -117.5 | 9.3 |
+| 22088.7 | -117.7 | 10.4 |
 
 Noise floor tilt over 200 Hz-12 kHz: **-8.1 dB/octave**.
 
@@ -609,21 +609,21 @@ Reference: the crank itself: 8 firings a cycle on 2 banks
 | 0.5 | -11.4 | -14.9 | -3.5 |
 | 1 | null | -14.9 | — |
 | 1.5 | -3.7 | +0.4 | +4.1 |
-| 2 | null | -21.5 | — |
+| 2 | null | -21.4 | — |
 | 2.5 | -3.7 | -1.6 | +2.1 |
-| 3 | null | -33.8 | — |
-| 3.5 | -11.4 | -14.9 | -3.6 |
+| 3 | null | -33.6 | — |
+| 3.5 | -11.4 | -14.9 | -3.5 |
 | **4** | +0.0 | +0.0 | +0.0 |
-| 4.5 | -11.4 | -31.4 | -20.0 |
-| 5 | null | -27.7 | — |
-| 5.5 | -3.7 | -14.8 | -11.1 |
-| 6 | null | -35.7 | — |
-| 6.5 | -3.7 | -6.8 | -3.1 |
+| 4.5 | -11.4 | -31.4 | -20.1 |
+| 5 | null | -27.8 | — |
+| 5.5 | -3.7 | -14.7 | -11.0 |
+| 6 | null | -35.6 | — |
+| 6.5 | -3.7 | -7.1 | -3.4 |
 | 7 | null | -30.7 | — |
-| 7.5 | -11.4 | -34.7 | -23.3 |
-| 8 | +0.0 | -7.2 | -7.2 |
+| 7.5 | -11.4 | -34.2 | -22.9 |
+| 8 | +0.0 | -7.1 | -7.1 |
 
-Driven orders: rms **10.8 dB**, mean -6.6 dB, worst -23.3 dB on order 7.5 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -14.9 dB on order 1 (pass).
+Driven orders: rms **10.7 dB**, mean -6.5 dB, worst -22.9 dB on order 7.5 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -14.9 dB on order 1 (pass).
 
 ### Resonance placement
 
@@ -633,42 +633,42 @@ Driven orders: rms **10.8 dB**, mean -6.6 dB, worst -23.3 dB on order 7.5 (toler
 | block, first bending mode | `mass law on 235 kg` | 70.0 | not found | — | — | — |  |
 | tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 600 x 0.990/(4 x (1.400 + 0.020))` | 104.5 | 104.4 | -0.1 % | -35.8 | 21.5 | tailpipe length 1.400 m, mouth radius 0.033 m → 1.421 m |
 | intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 4.5 L` | 173.8 | not found | — | — | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00408 s over 2.52 m` | 183.7 | 207.2 | +12.8 % | -41.4 | 11.9 | downstream run 2.52 m → 2.233 m |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00408 s over 2.52 m` | 183.7 | 207.3 | +12.9 % | -41.4 | 11.8 | downstream run 2.52 m → 2.233 m |
 | collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00408 s over 2.52 m` | 306.1 | 291.1 | -4.9 % | -48.1 | 8.9 | downstream run 2.52 m → 2.650 m |
 | intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.260 + 0.018))` | 312.1 | not found | — | — | — |  |
 | exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 692 x 0.996/(4 x 0.468)` | 367.9 | 370.5 | +0.7 % | -49.7 | 15.5 | primary length 0.450 m → 0.447 m |
-| expansion chamber, first pass band | `nc/2L = 1 x 658/(2 x 0.550)` | 597.7 | 730.0 | +22.1 % | -54.2 | 12.1 | chamber length 0.550 m, volume 13.1 L → 0.450 m |
+| expansion chamber, first pass band | `nc/2L = 1 x 658/(2 x 0.550)` | 597.7 | 730.1 | +22.1 % | -54.3 | 12.1 | chamber length 0.550 m, volume 13.1 L → 0.450 m |
 | exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 692 x 0.996/(4 x 0.468)` | 1103.8 | 1111.9 | +0.7 % | -60.5 | 17.8 | primary length 0.450 m → 0.447 m |
-| expansion chamber, second pass band | `nc/2L = 2 x 658/(2 x 0.550)` | 1195.5 | 910.5 | -23.8 % | -53.7 | 17.0 | chamber length 0.550 m, volume 13.1 L → 0.722 m |
+| expansion chamber, second pass band | `nc/2L = 2 x 658/(2 x 0.550)` | 1195.5 | 910.5 | -23.8 % | -53.6 | 17.1 | chamber length 0.550 m, volume 13.1 L → 0.722 m |
 
 ### Peaks in the sweep average
 
 | Hz | dBFS | Prominence [dB] |
 |---:|---:|---:|
 | 104.4 | -35.8 | 21.5 |
-| 207.2 | -41.4 | 11.9 |
+| 207.3 | -41.4 | 11.8 |
 | 291.1 | -48.1 | 8.9 |
 | 370.5 | -49.7 | 15.5 |
-| 730.0 | -54.2 | 12.1 |
-| 910.5 | -53.7 | 17.0 |
+| 730.1 | -54.3 | 12.1 |
+| 910.5 | -53.6 | 17.1 |
 | 1111.9 | -60.5 | 17.8 |
-| 1545.6 | -72.3 | 10.9 |
-| 1787.0 | -71.2 | 19.2 |
+| 1545.4 | -72.2 | 11.1 |
+| 1786.9 | -71.1 | 19.3 |
 | 2075.4 | -77.4 | 7.6 |
-| 2495.7 | -79.0 | 6.9 |
-| 2997.8 | -76.5 | 6.9 |
+| 2495.2 | -78.9 | 6.9 |
+| 2997.8 | -76.5 | 6.8 |
 | 3615.2 | -73.4 | 13.5 |
-| 4215.5 | -73.3 | 10.3 |
-| 4765.9 | -76.6 | 11.9 |
-| 5279.8 | -97.2 | 7.2 |
-| 6667.3 | -89.6 | 14.5 |
-| 7815.5 | -91.4 | 6.3 |
-| 9478.4 | -88.6 | 18.5 |
-| 11694.5 | -115.5 | 7.4 |
-| 13199.6 | -111.8 | 15.3 |
-| 17279.3 | -116.2 | 10.7 |
-| 20639.8 | -120.0 | 13.5 |
-| 22160.8 | -126.3 | 6.1 |
+| 4215.7 | -73.4 | 10.3 |
+| 4766.0 | -76.6 | 11.9 |
+| 5279.8 | -97.3 | 7.2 |
+| 6667.7 | -89.7 | 14.5 |
+| 7815.5 | -91.5 | 6.4 |
+| 9478.2 | -88.6 | 19.5 |
+| 11694.4 | -115.5 | 7.6 |
+| 13200.0 | -112.1 | 15.5 |
+| 13792.2 | -112.2 | 6.0 |
+| 17279.3 | -116.4 | 12.2 |
+| 20640.4 | -120.3 | 13.9 |
 
 Noise floor tilt over 200 Hz-12 kHz: **-8.7 dB/octave**.
 
@@ -685,7 +685,7 @@ Reference: the crank itself: 6 firings a cycle on 1 bank
 
 | Order | Reference | Synth | Delta |
 |---:|---:|---:|---:|
-| 0.5 | null | -22.9 | — |
+| 0.5 | null | -23.0 | — |
 | 1 | null | -22.8 | — |
 | 1.5 | null | -24.5 | — |
 | 2 | null | -26.7 | — |
@@ -696,9 +696,9 @@ Reference: the crank itself: 6 firings a cycle on 1 bank
 | 4.5 | null | -32.0 | — |
 | 5 | null | -28.6 | — |
 | 5.5 | null | — | — |
-| 6 | +0.0 | -17.0 | -17.0 |
+| 6 | +0.0 | -16.6 | -16.6 |
 
-Driven orders: rms **12.0 dB**, mean -8.5 dB, worst -17.0 dB on order 6 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -22.8 dB on order 1 (pass).
+Driven orders: rms **11.8 dB**, mean -8.3 dB, worst -16.6 dB on order 6 (tolerance 8 dB, pass). Orders the crank cannot drive are marked `null` and are held under -12 dB instead of compared: loudest -22.8 dB on order 1 (pass).
 
 ### Resonance placement
 
@@ -707,7 +707,7 @@ Driven orders: rms **12.0 dB**, mean -8.5 dB, worst -17.0 dB on order 6 (toleran
 | collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00361 s over 2.22 m` | 69.2 | not found | — | — | — |  |
 | block, first bending mode | `mass law on 195 kg` | 76.9 | not found | — | — | — |  |
 | tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 604 x 0.991/(4 x (1.600 + 0.021))` | 92.2 | not found | — | — | — |  |
-| intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 3.5 L` | 159.4 | 148.7 | -6.7 % | -32.4 | 24.2 |  |
+| intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 3.5 L` | 159.4 | 148.6 | -6.8 % | -32.4 | 24.2 |  |
 | collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00361 s over 2.22 m` | 207.5 | not found | — | — | — |  |
 | intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.300 + 0.018))` | 272.9 | 269.1 | -1.4 % | -39.0 | 11.1 | runner length 0.300 m → 0.323 m |
 | collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00361 s over 2.22 m` | 345.9 | not found | — | — | — |  |
@@ -719,32 +719,32 @@ Driven orders: rms **12.0 dB**, mean -8.5 dB, worst -17.0 dB on order 6 (toleran
 
 | Hz | dBFS | Prominence [dB] |
 |---:|---:|---:|
-| 148.7 | -32.4 | 24.2 |
+| 148.6 | -32.4 | 24.2 |
 | 269.1 | -39.0 | 11.1 |
 | 1025.0 | -53.6 | 19.4 |
 | 1407.6 | -64.1 | 22.9 |
 | 1727.9 | -69.2 | 13.4 |
-| 2825.8 | -67.4 | 18.5 |
+| 2825.7 | -67.4 | 18.4 |
 | 3513.9 | -84.2 | 9.9 |
-| 4888.2 | -86.7 | 13.6 |
+| 4888.2 | -86.7 | 13.5 |
 | 5555.7 | -83.3 | 17.4 |
-| 5999.8 | -94.3 | 13.6 |
-| 6960.3 | -100.9 | 9.5 |
-| 7680.3 | -105.0 | 11.6 |
-| 8399.9 | -109.6 | 12.5 |
-| 9055.9 | -107.1 | 11.7 |
-| 10799.8 | -105.0 | 26.5 |
-| 11175.4 | -111.3 | 10.6 |
-| 11460.0 | -111.0 | 11.5 |
-| 13199.9 | -114.1 | 10.5 |
-| 14640.1 | -116.3 | 17.8 |
-| 15360.2 | -115.1 | 14.3 |
-| 17759.9 | -122.1 | 11.0 |
-| 20160.5 | -120.8 | 13.6 |
-| 20879.5 | -123.5 | 11.7 |
+| 5999.8 | -94.4 | 13.9 |
+| 6960.3 | -100.9 | 10.1 |
+| 7680.3 | -105.0 | 11.8 |
+| 8399.9 | -109.6 | 12.3 |
+| 9055.9 | -107.1 | 11.9 |
+| 10799.8 | -105.0 | 26.9 |
+| 11175.6 | -111.5 | 11.0 |
+| 11460.0 | -111.0 | 12.0 |
+| 13199.9 | -114.1 | 11.0 |
+| 14640.1 | -116.3 | 17.9 |
+| 15360.2 | -115.1 | 14.4 |
+| 17759.8 | -122.2 | 12.1 |
+| 20160.6 | -120.8 | 14.3 |
+| 20879.5 | -123.4 | 11.8 |
 | 21920.7 | -122.0 | 17.1 |
 
-Noise floor tilt over 200 Hz-12 kHz: **-9.7 dB/octave**.
+Noise floor tilt over 200 Hz-12 kHz: **-9.8 dB/octave**.
 
 
 ## Turbodiesel I4
@@ -777,7 +777,7 @@ Driven orders: rms **11.9 dB**, mean -8.4 dB, worst -16.8 dB on order 4 (toleran
 | collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00539 s over 2.87 m` | 46.4 | not found | — | — | — |  |
 | block, first bending mode | `mass law on 190 kg` | 77.9 | not found | — | — | — |  |
 | tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 511 x 0.995/(4 x (1.300 + 0.017))` | 96.5 | not found | — | — | — |  |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00539 s over 2.87 m` | 139.1 | 119.7 | -14.0 % | -45.9 | 12.0 | downstream run 2.87 m → 3.332 m |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00539 s over 2.87 m` | 139.1 | 119.6 | -14.0 % | -45.9 | 12.0 | downstream run 2.87 m → 3.333 m |
 | intake plenum, helmholtz | `(c/2pi)sqrt(A/VL) with V = 2.8 L` | 153.7 | not found | — | — | — |  |
 | collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00539 s over 2.87 m` | 231.8 | not found | — | — | — |  |
 | intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.220 + 0.016))` | 367.1 | 408.9 | +11.4 % | -50.9 | 22.6 | runner length 0.220 m → 0.212 m |
@@ -791,17 +791,17 @@ Driven orders: rms **11.9 dB**, mean -8.4 dB, worst -16.8 dB on order 4 (toleran
 
 | Hz | dBFS | Prominence [dB] |
 |---:|---:|---:|
-| 119.7 | -45.9 | 12.0 |
+| 119.6 | -45.9 | 12.0 |
 | 408.9 | -50.9 | 22.6 |
 | 849.2 | -57.8 | 14.1 |
-| 961.3 | -66.9 | 8.0 |
+| 982.2 | -66.8 | 8.1 |
 | 1096.7 | -67.2 | 10.4 |
 | 1598.7 | -77.9 | 14.2 |
 | 2036.6 | -76.2 | 15.7 |
 | 3043.0 | -73.9 | 11.5 |
 | 3592.5 | -69.9 | 14.4 |
-| 4187.6 | -68.9 | 22.4 |
-| 4747.6 | -72.9 | 16.3 |
+| 4187.6 | -68.9 | 22.5 |
+| 4747.6 | -72.9 | 16.4 |
 | 5696.1 | -91.4 | 8.1 |
 | 5824.8 | -90.4 | 11.1 |
 | 5954.9 | -91.8 | 8.3 |
@@ -811,7 +811,7 @@ Driven orders: rms **11.9 dB**, mean -8.4 dB, worst -16.8 dB on order 4 (toleran
 | 8375.5 | -93.9 | 10.8 |
 | 8846.8 | -88.7 | 8.9 |
 | 10003.8 | -82.6 | 26.4 |
-| 12109.1 | -112.2 | 9.3 |
+| 12109.0 | -112.2 | 9.3 |
 | 13211.8 | -107.1 | 16.2 |
 | 16899.6 | -112.2 | 24.3 |
 | 20543.9 | -117.3 | 10.3 |
@@ -843,9 +843,9 @@ Driven orders: rms **7.3 dB**, mean +5.2 dB, worst +10.3 dB on order 1 (toleranc
 | block, first bending mode | `mass law on 45 kg` | 120.0 | 115.6 | -3.7 % | -31.8 | 20.8 |  |
 | collector to mouth, quarter wave | `1/4T with T = sum(L/c) = 0.00096 s over 0.72 m` | 259.1 | not found | — | — | — |  |
 | exhaust primary, quarter wave | `c(1-M^2)/4(L+d) = 1 x 808 x 1.000/(4 x 0.637)` | 317.1 | 299.5 | -5.5 % | -40.1 | 12.9 | primary length 0.620 m → 0.656 m |
-| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.180 + 0.020))` | 434.6 | 422.0 | -2.9 % | -41.8 | 9.6 | runner length 0.180 m → 0.206 m |
+| intake runner, ram quarter wave | `c/4(L+d) = 347/(4 x (0.180 + 0.020))` | 434.6 | 422.0 | -2.9 % | -41.9 | 9.6 | runner length 0.180 m → 0.206 m |
 | tailpipe, quarter wave | `c(1-M^2)/4(L+d) = 735 x 1.000/(4 x (0.350 + 0.015))` | 503.6 | 479.4 | -4.8 % | -40.5 | 13.1 | tailpipe length 0.350 m, mouth radius 0.024 m → 0.383 m |
-| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00096 s over 0.72 m` | 777.4 | 778.1 | +0.1 % | -42.0 | 9.9 | downstream run 0.72 m → 0.724 m |
+| collector to mouth, third mode | `3/4T with T = sum(L/c) = 0.00096 s over 0.72 m` | 777.4 | 778.2 | +0.1 % | -42.0 | 9.9 | downstream run 0.72 m → 0.724 m |
 | exhaust primary, third mode | `3c(1-M^2)/4(L+d) = 3 x 808 x 1.000/(4 x 0.637)` | 951.2 | not found | — | — | — |  |
 | absorptive silencer, first pass band | `c/2L = 769/(2 x 0.360)` | 1067.6 | not found | — | — | — |  |
 | collector to mouth, fifth mode | `5/4T with T = sum(L/c) = 0.00096 s over 0.72 m` | 1295.6 | 1197.4 | -7.6 % | -52.8 | 14.0 | downstream run 0.72 m → 0.784 m |
@@ -857,27 +857,27 @@ Driven orders: rms **7.3 dB**, mean +5.2 dB, worst +10.3 dB on order 1 (toleranc
 | 115.6 | -31.8 | 20.8 |
 | 299.5 | -40.1 | 12.9 |
 | 358.4 | -43.3 | 8.1 |
-| 422.0 | -41.8 | 9.6 |
+| 422.0 | -41.9 | 9.6 |
 | 479.4 | -40.5 | 13.1 |
 | 538.6 | -40.7 | 8.7 |
-| 778.1 | -42.0 | 9.9 |
+| 778.2 | -42.0 | 9.9 |
 | 1197.4 | -52.8 | 14.0 |
-| 1916.1 | -57.4 | 8.9 |
+| 1916.1 | -57.4 | 9.0 |
 | 2034.4 | -55.3 | 8.8 |
-| 2096.1 | -54.3 | 17.6 |
-| 2155.6 | -55.9 | 10.9 |
-| 2874.6 | -56.9 | 9.9 |
-| 4401.4 | -72.1 | 7.9 |
+| 2096.0 | -54.3 | 17.6 |
+| 2155.5 | -55.9 | 11.0 |
+| 2874.7 | -56.9 | 9.9 |
+| 4401.7 | -72.1 | 7.7 |
 | 5277.4 | -71.3 | 14.4 |
-| 7250.6 | -84.9 | 7.4 |
-| 7851.5 | -82.5 | 8.1 |
-| 8762.8 | -80.9 | 11.6 |
-| 11092.9 | -85.4 | 10.4 |
-| 13066.8 | -91.4 | 8.7 |
-| 15613.1 | -94.1 | 13.6 |
-| 18138.2 | -95.9 | 14.0 |
-| 20668.0 | -98.7 | 10.3 |
-| 22480.5 | -104.9 | 10.8 |
+| 7250.1 | -84.9 | 7.6 |
+| 7851.5 | -82.5 | 8.2 |
+| 8762.5 | -80.8 | 11.9 |
+| 11092.8 | -85.4 | 10.6 |
+| 13066.5 | -91.5 | 9.3 |
+| 15597.4 | -94.3 | 13.1 |
+| 18138.8 | -96.0 | 14.7 |
+| 20668.1 | -98.8 | 13.1 |
+| 22480.3 | -105.0 | 14.0 |
 
 Noise floor tilt over 200 Hz-12 kHz: **-7.5 dB/octave**.
 
