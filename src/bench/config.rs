@@ -1137,6 +1137,7 @@ mod tests {
             ("engines/big_single.toml", EnginePreset::big_single()),
             ("engines/gt3_cup_992.toml", EnginePreset::gt3_cup_992()),
             ("engines/gt3_cup_997.toml", EnginePreset::gt3_cup_997()),
+            ("engines/amg_gt3.toml", EnginePreset::amg_gt3()),
         ];
 
         for (path, preset) in &presets {

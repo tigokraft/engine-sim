@@ -1134,6 +1134,74 @@ impl EnginePreset {
             limiter_cut: LimiterCut::Spark,
         }
     }
+
+    /// 6.2 litre Mercedes-AMG GT3 naturally aspirated cross-plane V8 race engine.
+    ///
+    /// The high-displacement M159 race engine with dry-sump lubrication and
+    /// open side-exit race exhaust headers dumping ahead of the doors, delivering
+    /// visceral cross-plane V8 thunder.
+    pub fn amg_gt3() -> Self {
+        Self {
+            name: "Mercedes-AMG GT3",
+            note: "6.2L M159 cross-plane V8: earth-shaking low-frequency thunder through open side-pipes.",
+            model: CylinderModel {
+                geometry: CylinderGeometry::new(0.1022, 0.0946, 0.1530, 12.0),
+                valves: ValveTrain {
+                    intake: ValveEvent::new(deg(702.0), deg(268.0), 0.0120, 0.0420, 0.68),
+                    exhaust: ValveEvent::new(deg(488.0), deg(264.0), 0.0110, 0.0360, 0.65),
+                },
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    deg(342.0),
+                    deg(52.0),
+                    5.0,
+                    2.0,
+                    0.98,
+                )),
+                ..CylinderModel::default()
+            },
+            firing: FiringOrder::cross_plane_v8(),
+            induction: Induction::NaturallyAspirated,
+            mechanical: MechanicalSpec {
+                gear_whine: Some(ImpulsiveSpec::order(36.0, 0.26)),
+                timing_chain: Some(ImpulsiveSpec::order(24.0, 0.22)),
+                piston_slap: Some(ImpulsiveSpec::per_cylinder(0.45)),
+                ..MechanicalSpec::default()
+            },
+            exhaust: ExhaustSystem {
+                primaries: vec![PipeSection::from_diameter(0.50, 0.046, 920.0); 8],
+                collector: Collector::from_diameter(4, 0.065, 0.16),
+                secondary: vec![],
+                crossover: Crossover::None,
+                silencers: vec![Silencer::Straight],
+                tailpipe: PipeSection::from_diameter(0.60, 0.065, 720.0),
+                tailpipe_flanged: false,
+                cutout: true,
+            },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.24, 0.048, 310.0); 8],
+                plenum_volume: 5.0e-3,
+                throttle: ThrottleLayout::Single { bore: 0.082 },
+                airbox: Some(PipeSection::from_diameter(0.18, 0.090, 300.0)),
+                snorkel: Some(PipeSection::from_diameter(0.35, 0.085, 300.0)),
+                trumpet_flanged: true,
+            },
+            block_mass: 205.0,
+            bore_spacing: 0.1118,
+            redline: 7_500.0,
+            float_rpm: default_float_rpm(7_500.0),
+            idle: 950.0,
+            inertia: 0.24,
+            load: (5.5, 0.018, 1.1e-4),
+            aperture_positions: AperturePositions {
+                tailpipes: vec![[-0.95, -0.40, 0.28], [0.95, -0.40, 0.28]],
+                intake: [0.0, 1.40, 0.65],
+                block: [0.0, 0.70, 0.45],
+            },
+            anti_lag: false,
+            limiter_mode: LimiterMode::RotatingStutter,
+            limiter_cut: LimiterCut::Spark,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
