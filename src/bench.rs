@@ -219,6 +219,26 @@ impl EnginePreset {
             .collect()
     }
 
+    /// Curated collection of GT3 Cup and GT3 class race engines.
+    ///
+    /// Includes Porsche 911 GT3 Cup (Type 992 & Type 997.2 Mezger), Mercedes-AMG GT3 6.2L V8,
+    /// Ferrari 458 Italia GT3 4.5L Flat-Plane V8, and Audi R8 LMS GT3 5.2L V10.
+    pub fn gt3_cup_collection() -> Vec<EnginePreset> {
+        type PresetSource = (&'static str, fn() -> EnginePreset);
+        let race_files: [PresetSource; 5] = [
+            ("engines/gt3_cup_992.toml", Self::gt3_cup_992),
+            ("engines/gt3_cup_997.toml", Self::gt3_cup_997),
+            ("engines/amg_gt3.toml", Self::amg_gt3),
+            ("engines/ferrari_458_gt3.toml", Self::ferrari_458_gt3),
+            ("engines/r8_lms_gt3.toml", Self::r8_lms_gt3),
+        ];
+
+        race_files
+            .into_iter()
+            .map(|(path, fallback)| Self::from_file(path).unwrap_or_else(|_| fallback()))
+            .collect()
+    }
+
     /// 2.0 litre inline four.
     pub fn inline_four() -> Self {
         Self {
