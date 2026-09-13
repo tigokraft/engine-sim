@@ -23,7 +23,7 @@ use crate::physics::thermodynamics::STOICH_AFR;
 pub const MAX_CYLINDERS: usize = 16;
 
 /// Limiter cut mechanism.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LimiterCut {
     /// No cut active.
     None,
@@ -34,7 +34,7 @@ pub enum LimiterCut {
 }
 
 /// Rev limiter intervention strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LimiterMode {
     /// Hard cut: all cylinders cut simultaneously at or above redline.
     HardCut,
@@ -257,6 +257,18 @@ impl EngineControlUnit {
     /// Builder enabling or disabling anti-lag system.
     pub fn with_anti_lag(mut self, enabled: bool) -> Self {
         self.anti_lag = enabled;
+        self
+    }
+
+    /// Builder setting the rev limiter mode (HardCut, SoftCut, RotatingStutter).
+    pub fn with_limiter_mode(mut self, mode: LimiterMode) -> Self {
+        self.limiter_mode = mode;
+        self
+    }
+
+    /// Builder setting the rev limiter cut type (Spark, Fuel, None).
+    pub fn with_limiter_cut_type(mut self, cut_type: LimiterCut) -> Self {
+        self.limiter_cut_type = cut_type;
         self
     }
 
@@ -937,5 +949,14 @@ mod tests {
             wot_adv > 10.0,
             "WOT advance must be positive: got {wot_adv} deg"
         );
+    }
+
+    #[test]
+    fn builder_configures_limiter_mode_and_cut_type() {
+        let ecu = EngineControlUnit::new(7_500.0)
+            .with_limiter_mode(LimiterMode::RotatingStutter)
+            .with_limiter_cut_type(LimiterCut::Spark);
+        assert_eq!(ecu.limiter_mode, LimiterMode::RotatingStutter);
+        assert_eq!(ecu.limiter_cut_type, LimiterCut::Spark);
     }
 }
