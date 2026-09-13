@@ -1135,6 +1135,7 @@ mod tests {
                 EnginePreset::turbo_diesel_four(),
             ),
             ("engines/big_single.toml", EnginePreset::big_single()),
+            ("engines/gt3_cup_992.toml", EnginePreset::gt3_cup_992()),
         ];
 
         for (path, preset) in &presets {
