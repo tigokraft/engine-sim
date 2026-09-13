@@ -4001,4 +4001,121 @@ mod tests {
         network.set_cutout(true);
         assert!(network.tailpipes[0].steepening());
     }
+
+    /// Builds a single-cylinder exhaust that is, acoustically, one
+    /// uninterrupted pipe: a collector with one inlet whose outlet area
+    /// matches the primary's leaves nothing for the junction to reflect, so
+    /// the primary, the collector's taper and the tailpipe scatter as though
+    /// they were cut from the same tube. Closed at the valve (unset, so
+    /// [`ValveTermination`] reflects at unity — see its `new`), open at the
+    /// mouth. That is Stage T4's "single pipe with no silencers and no
+    /// collector": the only boundaries left are the two ends.
+    fn single_pipe(
+        l_primary: f64,
+        taper: f64,
+        tailpipe: f64,
+        diameter: f64,
+    ) -> crate::physics::plumbing::ExhaustSystem {
+        single_pipe_flanged(l_primary, taper, tailpipe, diameter, false)
+    }
+
+    /// As [`single_pipe`], but with the mouth's flange choice exposed.
+    fn single_pipe_flanged(
+        l_primary: f64,
+        taper: f64,
+        tailpipe: f64,
+        diameter: f64,
+        flanged: bool,
+    ) -> crate::physics::plumbing::ExhaustSystem {
+        use crate::physics::plumbing::{
+            Collector, Crossover, ExhaustSystem, PipeSection, Silencer,
+        };
+        let area = std::f64::consts::PI * (diameter * 0.5).powi(2);
+        ExhaustSystem {
+            primaries: vec![PipeSection::from_diameter(l_primary, diameter, 300.0)],
+            collector: Collector::new(1, area, taper),
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![Silencer::Straight],
+            tailpipe: PipeSection::from_diameter(tailpipe, diameter, 300.0),
+            tailpipe_flanged: flanged,
+            cutout: false,
+        }
+    }
+
+    /// The strongest resonance a single impulse rings up in a network's
+    /// radiated output, scanned by Goertzel projection near `guess_hz`.
+    ///
+    /// One impulse excites every mode of the pipe at once; scanning the
+    /// projection of the resulting ring-down onto each candidate frequency and
+    /// keeping the largest finds where the energy actually piled up, which for
+    /// an undamped-ish closed-open pipe is its quarter-wave fundamental.
+    fn impulse_resonance_hz(
+        exhaust: &crate::physics::plumbing::ExhaustSystem,
+        fs: f32,
+        guess_hz: f32,
+        search_fraction: f32,
+    ) -> f32 {
+        let cylinders = vec![crate::audio::dsp::CylinderTap {
+            evo_phase: 0.0,
+            bank: 0,
+        }];
+        let snapshot = crate::audio::dsp::EngineSnapshot::default();
+        let mut network = ExhaustNetwork::new(exhaust, &cylinders, 1, fs, &snapshot);
+
+        let capture = 4 * fs as usize; // 4 s: hundreds of round trips, 0.25 Hz Goertzel resolution
+        let mut response = Vec::with_capacity(capture);
+        let mut radiated = [0.0f32; 1];
+        let bank_excitations = [0.0f32; 1];
+        for i in 0..capture {
+            let excitations = [if i == 0 { 1.0 } else { 0.0 }];
+            network.step(&excitations, &bank_excitations, &mut radiated);
+            response.push(radiated[0]);
+        }
+
+        let mut best = (0.0f32, -1.0f32);
+        let lo = guess_hz * (1.0 - search_fraction);
+        let hi = guess_hz * (1.0 + search_fraction);
+        let mut f = lo;
+        while f <= hi {
+            let m = magnitude_at(&response, f, fs);
+            if m > best.1 {
+                best = (f, m);
+            }
+            f += guess_hz * 0.0005;
+        }
+        best.0
+    }
+
+    #[test]
+    fn single_pipe_resonates_at_the_quarter_wave_prediction() {
+        // Appendix A's `f = c(1 - M^2) / 4L`, with M = 0 here (no mean flow is
+        // set on this network) and L the pipe's *acoustic* length — physical
+        // length plus the mouth's own Karal-Flugge end correction, per
+        // `examples/calibrate.rs`'s treatment of the same mode.
+        use crate::audio::radiation::end_correction;
+
+        const FS: f32 = 48_000.0;
+        const DIAMETER: f64 = 0.045;
+        const TAPER: f64 = 0.02; // TaperedCollector's own floor, see its `new`
+        const TAILPIPE: f64 = 0.05;
+        let radius = DIAMETER * 0.5;
+        let delta = end_correction(radius, false);
+        let c = speed_of_sound(1.33, 287.0, 300.0);
+
+        for &l_primary in &[0.50f64, 0.80, 1.20] {
+            let exhaust = single_pipe(l_primary, TAPER, TAILPIPE, DIAMETER);
+            let total_length = l_primary + TAPER + TAILPIPE + delta;
+            let expected = c / (4.0 * total_length as f32);
+
+            let measured = impulse_resonance_hz(&exhaust, FS, expected, 0.3);
+            let error = (measured - expected).abs() / expected;
+            assert!(
+                error < 0.02,
+                "primary {l_primary} m: measured {measured:.1} Hz against {expected:.1} Hz \
+                 predicted ({:.1} % off)",
+                error * 100.0
+            );
+        }
+    }
 }
