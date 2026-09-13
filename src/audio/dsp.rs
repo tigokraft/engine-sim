@@ -1203,6 +1203,16 @@ impl PopPool {
 struct CycleTables {
     /// Exhaust excitation shape over the cycle from EVO, peak one [-].
     exhaust: [f32; CYCLE_TABLE],
+    /// Acoustic flux this cycle's port launches at its peak flow, $c \dot m$ [N].
+    ///
+    /// The shape above is normalised, so this is what says how big it is: a
+    /// port moving gas at $u$ launches a wave of $\rho c u$ into the runner
+    /// behind it, and $\rho u$ is $\dot m / A$, so dividing this by the
+    /// runner's area gives the pressure. Taken from the gas state of the
+    /// snapshot this cycle was read out of rather than from the synth's glide,
+    /// so that the pascal scale an excitation is played at is a property of the
+    /// cycle and changes only when the cycle does.
+    launch_flux: f32,
     /// Induction mass flow through one cylinder's intake port [kg/s].
     ///
     /// Kept in its own units rather than normalised, because the intake layer's
@@ -1256,6 +1266,7 @@ impl Default for CycleTables {
     fn default() -> Self {
         Self {
             exhaust: [0.0; CYCLE_TABLE],
+            launch_flux: 0.0,
             intake: [0.0; CYCLE_TABLE],
             pressure_slope: [0.0; CYCLE_TABLE],
             intake_slope: [0.0; CYCLE_TABLE],
@@ -1316,6 +1327,11 @@ impl CycleTables {
 
         Self {
             exhaust,
+            launch_flux: crate::audio::filters::speed_of_sound(
+                snapshot.exhaust_gamma,
+                snapshot.exhaust_gas_constant,
+                snapshot.exhaust_temperature,
+            ) * peak_flow,
             intake: snapshot.intake_port_flow,
             pressure_slope,
             intake_slope,
@@ -1441,6 +1457,7 @@ impl CyclePlayer {
             p.intake[k] += (c.intake[k] - p.intake[k]) * blend;
             p.pressure_slope[k] += (c.pressure_slope[k] - p.pressure_slope[k]) * blend;
         }
+        self.previous.launch_flux += (self.current.launch_flux - self.previous.launch_flux) * blend;
         self.current = CycleTables::from_snapshot(snapshot);
         self.blend.snap(0.0);
         self.blend.set_target(1.0);
@@ -1450,6 +1467,14 @@ impl CyclePlayer {
     #[inline(always)]
     fn advance(&mut self) -> f32 {
         self.blend.next_value()
+    }
+
+    /// Acoustic flux the cycle being played launches at its peak flow [N].
+    #[inline(always)]
+    fn launch_flux(&self, blend: f32) -> f32 {
+        let a = self.previous.launch_flux;
+        let b = self.current.launch_flux;
+        a + (b - a) * blend
     }
 
     /// Exhaust excitation at a cycle phase measured from EVO.
@@ -2693,6 +2718,31 @@ pub struct EngineSynth {
     bank_excitations: Vec<f32>,
     /// Pressure radiated from each bank's mouth this sample.
     radiated: Vec<f32>,
+    /// Cross-sectional area of one exhaust primary [m^2].
+    ///
+    /// The area the port launches its wave into; see
+    /// [`EngineSynth::port_launch_pressure`].
+    primary_area: f32,
+    /// Pascal scale the exhaust network is driven in and read back out of [Pa].
+    ///
+    /// Tracks [`EngineSynth::port_launch_pressure`] on a glide far longer than
+    /// a cycle, and holds its last value rather than following the flow to
+    /// zero. Both of those are about the same thing. This number multiplies the
+    /// excitation going in and divides what the mouth radiates coming out, and
+    /// the pipe between them remembers a few milliseconds — so anything the
+    /// scale does faster than the pipe can forget is an amplitude modulation
+    /// applied to the ringing but not to the pulse that caused it. A scale that
+    /// wobbled with the phase ring's own refresh put four decibels on the big
+    /// single's first order doing exactly that. A cycle is at most a fifth of a
+    /// second even at a cranking idle, so half a second of glide is slower than
+    /// any of it and still quick enough to follow a pull.
+    launch: Smoothed,
+    /// Whether [`EngineSynth::launch`] has seen a breathing port yet.
+    ///
+    /// The first scale is snapped rather than glided to: there is no earlier
+    /// one to glide from, and starting at a placeholder would swell the first
+    /// firing up out of nothing.
+    launch_primed: bool,
     intake_network: IntakeNetwork,
     intake_excitations: Vec<f32>,
     /// Effective valve flow area presented to each network this control block.
@@ -2817,6 +2867,14 @@ impl EngineSynth {
         }
 
         let snapshot = EngineSnapshot::default();
+        // The same fallback the network builds its primaries with, so the
+        // pascal scale the excitation is played at and the pipe it is played
+        // into are describing one geometry.
+        let primary_area = if config.exhaust.primaries.is_empty() {
+            std::f64::consts::PI * 0.020 * 0.020
+        } else {
+            config.exhaust.primary_area()
+        };
         let network = ExhaustNetwork::new(
             &config.exhaust,
             &config.cylinders,
@@ -2910,6 +2968,9 @@ impl EngineSynth {
             backfire_pulses: vec![PopPool::default(); config.bank_count],
             bank_excitations: vec![0.0; config.bank_count],
             radiated: vec![0.0; config.bank_count],
+            primary_area: primary_area as f32,
+            launch: Smoothed::new(1.0, fs, 0.500),
+            launch_primed: false,
             intake_network: IntakeNetwork::new(&config.intake, config.cylinders.len(), fs),
             intake_excitations: vec![0.0; n_cyl],
             exhaust_valve_areas: vec![0.0; n_cyl],
@@ -3380,6 +3441,32 @@ impl EngineSynth {
         true
     }
 
+    /// Acoustic pressure this cycle's exhaust port launches at its peak flow [Pa].
+    ///
+    /// A wave in a duct is $p = \rho c u$, and a port moving $\dot m$ into a
+    /// runner of area $A$ is moving gas at $u = \dot m / \rho A$, so the two
+    /// densities cancel and the pressure the port launches is
+    ///
+    /// $$p = \frac{c \, \dot m}{A}$$
+    ///
+    /// — the same law the intake side launches its rarefaction by. Across the
+    /// catalogue this runs from a third of an atmosphere at idle to two thirds
+    /// at the limiter, and it is a good deal smaller than the pressure
+    /// *difference* across the valve, because a port is a restriction and not
+    /// an open end. A runner handed the full blowdown difference would be past
+    /// the shock condition on every firing at every speed, which is the same as
+    /// not modelling the shock condition at all.
+    ///
+    /// The excitation shape is normalised to a peak of one, so this is the
+    /// pascal scale it is played at, and it is divided back out where the mouth
+    /// radiates. It therefore cancels out of every linear element in the
+    /// network — the level law is untouched by it — and survives only where
+    /// propagation is not linear, which is the primaries.
+    #[inline(always)]
+    fn port_launch_pressure(&self, blend: f32) -> f32 {
+        self.cycle.launch_flux(blend) / self.primary_area
+    }
+
     /// Reads each cylinder's excitation out of the cycle at its own phase.
     ///
     /// Every cylinder plays the same curve, displaced by where its EVO sits in
@@ -3396,6 +3483,19 @@ impl EngineSynth {
         // Advanced whether or not the crank is, so a fade cannot be left
         // half-finished by a stopped engine and resume when it restarts.
         let blend = self.cycle.advance();
+        // Per sample, not per control block: it is a gain on the excitation and
+        // a divisor on what the mouth radiates, and stepping a gain sixteen
+        // samples at a time puts an edge in both.
+        let live = self.port_launch_pressure(blend);
+        if live > 0.0 {
+            if self.launch_primed {
+                self.launch.set_target(live);
+            } else {
+                self.launch.snap(live);
+                self.launch_primed = true;
+            }
+        }
+        let launch = self.launch.next_value();
         if !turning {
             self.excitations.fill(0.0);
             self.intake_excitations.fill(0.0);
@@ -3418,8 +3518,26 @@ impl EngineSynth {
             let alive = self.blowdown_pa[index].value() > 1.0;
             // Strictly linear in the pressure difference, per the excitation
             // model; the curve it multiplies is normalised to a peak of one.
+            //
+            // In pascals, because the network is. Every boundary in it — the
+            // valve load, the junctions, the wall loss — is linear and would
+            // read the same from a normalised drive, but propagation down a
+            // primary is not: a characteristic's speed is set by `p / P_0`, and
+            // a pulse handed over as a number near one is a pulse a hundred
+            // thousandth of an atmosphere tall, which steepens by nothing at
+            // all. The scaling back to the mix happens once, where the mouth
+            // radiates.
+            //
+            // The scale is the port's own ceiling and not the pressure
+            // difference driving it. A wave in a duct carries `p = rho c u`,
+            // the throat chokes at `u = c`, so the largest wave a port can
+            // launch is `rho c^2 = gamma P_0` however far past that the
+            // cylinder is — which is why a full-scale blowdown is a bar and a
+            // third of pulse and not the four and a half bar of
+            // [`REFERENCE_BLOWDOWN`] across the valve.
             let amplitude = if alive {
                 (self.blowdown_pa[index].value() / REFERENCE_BLOWDOWN).min(2.0)
+                    * launch
                     * variation.amplitude_scale
             } else {
                 0.0
@@ -3511,12 +3629,14 @@ impl EngineSynth {
         );
 
         let exhaust_level = self.exhaust_level.next_value();
+        let launch = self.launch.value();
         for (excitation, pool) in self
             .bank_excitations
             .iter_mut()
             .zip(self.backfire_pulses.iter_mut())
         {
-            *excitation = pool.process(&mut self.noise);
+            // Into the same pascals the cylinders' own excitations arrive in.
+            *excitation = pool.process(&mut self.noise) * launch;
         }
         self.network.step(
             &self.excitations,
@@ -3524,7 +3644,7 @@ impl EngineSynth {
             &mut self.radiated,
         );
         for (tp, &out) in self.tailpipe_pressures.iter_mut().zip(self.radiated.iter()) {
-            *tp = out * exhaust_level;
+            *tp = out * (exhaust_level / launch);
         }
 
         let turbo = match self.config.turbo {
@@ -5021,7 +5141,9 @@ mod tests {
             let expected_fires = 8 * cycles;
             // Half of each cylinder's own peak: the instant its excitation
             // crosses that on the way up is that cylinder's firing, and the
-            // curve crosses it once a cycle.
+            // curve crosses it once a cycle. As a fraction of the scale the
+            // port is launching at, because that is the other half of what
+            // decides how tall the pulse is.
             let thresholds: Vec<f32> = (0..8)
                 .map(|i| 0.5 * snapshot.blowdown_delta[i] / REFERENCE_BLOWDOWN)
                 .collect();
@@ -5036,7 +5158,7 @@ mod tests {
             while firing_times.len() <= expected_fires && sample_idx < 100_000 {
                 synth.render(&mut buffer, 2);
                 for i in 0..8 {
-                    let now = synth.excitations[i] > thresholds[i];
+                    let now = synth.excitations[i] > thresholds[i] * synth.launch.value();
                     if now && !above[i] {
                         firing_times.push(sample_idx);
                     }
