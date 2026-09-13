@@ -2035,6 +2035,68 @@ mod tests {
         }
     }
 
+    /// Amplitude of a `2*pi`-periodic function's second harmonic, by direct
+    /// quadrature against `cos(2 theta)` and `sin(2 theta)` over one crank
+    /// revolution — the piston kinematics repeat every revolution, not every
+    /// 720-degree master cycle, so that is the period the harmonic lives in.
+    fn second_harmonic_amplitude(f: impl Fn(f64) -> f64) -> f64 {
+        let steps = 3600;
+        let dtheta = CYCLE_ANGLE / 2.0 / steps as f64;
+        let (mut re, mut im) = (0.0, 0.0);
+        for i in 0..steps {
+            let theta = dtheta * i as f64;
+            let v = f(theta);
+            let (s, c) = (2.0 * theta).sin_cos();
+            re += v * c;
+            im += v * s;
+        }
+        (re * re + im * im).sqrt()
+    }
+
+    /// Second-harmonic magnitude of a firing order's shaking-force resultant,
+    /// combining both in-plane axes.
+    fn resultant_second_harmonic(
+        order: &FiringOrder,
+        geometry: &CylinderGeometry,
+        omega: f64,
+    ) -> f64 {
+        let x = second_harmonic_amplitude(|theta| order.shaking_force(geometry, theta, omega).0);
+        let y = second_harmonic_amplitude(|theta| order.shaking_force(geometry, theta, omega).1);
+        (x * x + y * y).sqrt()
+    }
+
+    #[test]
+    fn inline_four_secondary_does_not_cancel_and_v8_layouts_differ() {
+        // This is the test that proves the block layout is actually being
+        // read: an inline-four has nothing to cancel against (one bank, every
+        // cylinder's inertia force on the same axis), a crossplane V8's four
+        // throws per bank already span a full quadrant and cancel on their
+        // own, and a flatplane V8 shares the crossplane's bank angle and bank
+        // split population but not its phase pairing, so it does not.
+        let geometry = CylinderGeometry::default().with_reciprocating_mass(0.5);
+        let omega = 500.0; // rad/s, shared so only layout differs
+
+        let inline_four = resultant_second_harmonic(&FiringOrder::inline_four(), &geometry, omega);
+        let cross_plane =
+            resultant_second_harmonic(&FiringOrder::cross_plane_v8(), &geometry, omega);
+        let flat_plane = resultant_second_harmonic(&FiringOrder::flat_plane_v8(), &geometry, omega);
+
+        assert!(
+            inline_four > 1.0,
+            "an inline-four's secondary should not cancel: {inline_four}"
+        );
+        assert!(
+            cross_plane < 0.01 * inline_four,
+            "a crossplane V8's secondary should cancel against an inline-four's: \
+             {cross_plane} vs {inline_four}"
+        );
+        assert!(
+            (flat_plane - cross_plane).abs() > 0.1 * inline_four,
+            "a flatplane and a crossplane V8 should differ in resultant: \
+             {flat_plane} vs {cross_plane}"
+        );
+    }
+
     // -- friction -----------------------------------------------------------
 
     /// The temperature the Chen-Flynn coefficients were measured at [K].
