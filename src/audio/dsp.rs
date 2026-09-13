@@ -1086,11 +1086,12 @@ impl Pop {
     /// Starts a pop, `age` samples into its own envelope.
     ///
     /// The fractional `age` is what buys sample-accurate onsets. A pop is polled
-    /// for at the control rate but does not begin on a control boundary, and
-    /// quantising to one would put every pop in the engine on a 32-sample grid —
-    /// which a rapid string of them during a shift cut would make audible as a
-    /// buzz at the control rate. Advancing the envelope analytically to its true
-    /// starting point removes it.
+    /// for once per control block rather than every sample, so by the time it is
+    /// noticed it may already be up to a whole block old — quantising `age` to
+    /// the block boundary would put every pop in the engine on a
+    /// [`CONTROL_BLOCK`]-sample grid, which a rapid string of them during a
+    /// shift cut would make audible as a buzz at the control rate. Advancing the
+    /// envelope analytically to its true starting point removes it.
     fn trigger(
         &mut self,
         sample_rate: f32,
@@ -1116,7 +1117,9 @@ impl Pop {
 
         // `age` counts forward from the pulse's own start, so it is how far into
         // its own envelope the pulse already is on the sample it first appears.
-        let age = age.clamp(0.0, 1.0);
+        // Bounded below at zero and otherwise left open: the caller knows how
+        // wide the control grid it was noticed on is, not this envelope.
+        let age = age.max(0.0);
         self.attack_state = 1.0 - (1.0 - self.attack_coeff).powf(age);
         self.decay_state = self.decay_coeff.powf(age);
         self.active = true;
@@ -3477,13 +3480,18 @@ impl EngineSynth {
             // Backfires combine an explosive positive expansion wave with
             // turbulent flame roar; sharing the runner and muffler gives them
             // the pipe's acoustic colour without reducing to a thin metallic click.
+            // The poll that found this pop only runs once a block, so its true
+            // ignition instant is uniformly distributed somewhere in the block
+            // just finished; a fresh draw over that width is that instant's
+            // correct distribution, not a quantised guess at the boundary.
+            let age_samples = self.noise.next_unit() * CONTROL_BLOCK as f32;
             self.backfire_pulses[bank].trigger(
                 self.config.sample_rate,
                 amplitude,
                 0.00018,
                 decay,
                 0.80,
-                self.noise.next_unit(),
+                age_samples,
             );
         }
     }
