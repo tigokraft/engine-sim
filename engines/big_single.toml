@@ -1,0 +1,145 @@
+[identity]
+name = "Big Single"
+note = "One firing every two turns: the crank itself is the rhythm."
+
+[block]
+mass = 45.0
+bore_spacing = 0.125
+inertia = 0.1
+redline = 7600.0
+idle = 1250.0
+load = [
+    1.0,
+    0.004,
+    0.000022,
+]
+anti_lag = false
+limiter_mode = "HardCut"
+limiter_cut = "Spark"
+
+[cylinder]
+bore = 0.1
+stroke = 0.084
+rod_length = 0.145
+compression_ratio = 12.0
+intake_open_deg = 695.0
+intake_duration_deg = 255.00000000000003
+intake_lift = 0.0115
+intake_diameter = 0.042
+intake_discharge_coeff = 0.66
+exhaust_open_deg = 484.99999999999994
+exhaust_duration_deg = 249.99999999999997
+exhaust_lift = 0.0105
+exhaust_diameter = 0.036
+exhaust_discharge_coeff = 0.62
+
+[combustion]
+type = "Spark"
+spark_angle_deg = 340.0
+duration_deg = 59.99999999999999
+efficiency_parameter = 5.0
+form_factor = 2.0
+combustion_efficiency = 0.97
+fuel_lhv = 44000000.0
+air_fuel_ratio = 14.7
+
+[firing]
+sequence = [1]
+banks = [0]
+
+[exhaust]
+tailpipe_flanged = false
+cutout_fitted = false
+
+[[exhaust.primaries]]
+length = 0.62
+diameter = 0.042
+temperature = 880.0
+
+[exhaust.collector]
+inlets = 1
+outlet_diameter = 0.048
+taper_length = 0.16
+
+[exhaust.crossover]
+type = "None"
+
+[[exhaust.silencers]]
+type = "Absorptive"
+length = 0.36
+diameter = 0.048
+packing_thickness = 0.022
+packing_absorption = 0.75
+
+[exhaust.tailpipe]
+length = 0.35
+diameter = 0.048
+temperature = 620.0
+
+[intake]
+plenum_volume = 0.0
+trumpet_flanged = true
+
+[[intake.runners]]
+length = 0.18
+diameter = 0.048
+temperature = 310.0
+
+[intake.throttle]
+type = "IndividualBodies"
+bore = 0.046
+
+[intake.airbox]
+length = 0.16
+diameter = 0.075
+temperature = 300.0
+
+[induction]
+type = "NaturallyAspirated"
+
+[mechanical.intake_valve]
+timing = "per_cylinder"
+order = 0.0
+level = 0.5
+
+[mechanical.exhaust_valve]
+timing = "per_cylinder"
+order = 0.0
+level = 0.5
+
+[mechanical.piston_slap]
+timing = "per_cylinder"
+order = 0.0
+level = 0.699999988079071
+
+[mechanical.injector]
+timing = "per_cylinder"
+order = 0.0
+level = 0.3499999940395355
+
+[mechanical.gear_whine]
+timing = "crank_order"
+order = 2.0
+level = 0.2199999988079071
+
+[mechanical.accessory]
+timing = "crank_order"
+order = 1.3700000047683716
+level = 0.20000000298023224
+
+[acoustics]
+tailpipes = [[
+    0.2,
+    -1.0,
+    0.3,
+]]
+intake = [
+    -0.15,
+    0.5,
+    0.7,
+]
+block = [
+    0.0,
+    0.2,
+    0.45,
+]
