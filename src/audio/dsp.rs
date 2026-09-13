@@ -2711,6 +2711,7 @@ pub struct EngineSynth {
     /// what the gap resists is what is crossing it.
     cylinder_volumes: Vec<f64>,
     exhaust_port_flows: Vec<f64>,
+    intake_port_flows: Vec<f64>,
     turbo: TurboVoice,
     roots: RootsVoice,
     centrifugal: CentrifugalVoice,
@@ -2915,6 +2916,7 @@ impl EngineSynth {
             intake_valve_areas: vec![0.0; n_cyl],
             cylinder_volumes: vec![1e-4; n_cyl],
             exhaust_port_flows: vec![0.0; n_cyl],
+            intake_port_flows: vec![0.0; n_cyl],
             turbo: TurboVoice::new(fs),
             roots: RootsVoice::new(fs),
             centrifugal: CentrifugalVoice::new(fs),
@@ -3080,6 +3082,7 @@ impl EngineSynth {
         self.exhaust_valve_areas.fill(0.0);
         self.intake_valve_areas.fill(0.0);
         self.exhaust_port_flows.fill(0.0);
+        self.intake_port_flows.fill(0.0);
         self.bank_excitations.fill(0.0);
         self.radiated.fill(0.0);
         for smoother in self.blowdown_pa.iter_mut() {
@@ -3460,6 +3463,7 @@ impl EngineSynth {
             // to develop, and how much that varies — and a valve opening on the
             // intake side does not wait for a flame.
             let flow = self.cycle.intake_at(cylinder, blend);
+            self.intake_port_flows[index] = flow as f64;
 
             // Per cycle from the table, times cycles per second: `dmdot/dt`.
             let d_flow_dt = self.cycle.intake_slope_at(cylinder, blend) * cycle_hz;
@@ -3500,8 +3504,11 @@ impl EngineSynth {
             &self.cylinder_volumes,
             &self.exhaust_port_flows,
         );
-        self.intake_network
-            .set_valve_areas(&self.intake_valve_areas);
+        self.intake_network.set_valve_loads(
+            &self.intake_valve_areas,
+            &self.cylinder_volumes,
+            &self.intake_port_flows,
+        );
 
         let exhaust_level = self.exhaust_level.next_value();
         for (excitation, pool) in self

@@ -21,7 +21,7 @@
 
 use crate::audio::filters::speed_of_sound;
 use crate::audio::radiation::Mouth;
-use crate::audio::waveguide::{ScatteringJunction, WaveguidePipe, SMOOTH_WALL};
+use crate::audio::waveguide::{ScatteringJunction, ValveTermination, WaveguidePipe, SMOOTH_WALL};
 use crate::physics::plumbing::{IntakeSystem, ThrottleLayout};
 
 /// Reference ambient temperature for intake air [K].
@@ -245,74 +245,17 @@ pub fn scatter_throttle_restriction(
     (p1_minus, p2_minus)
 }
 
-/// Area-step boundary at the intake valve end of a runner.
-///
-/// Rigid on the seat, and off it the two-pipe result for the runner area $A_p$
-/// against the valve's effective area $A_v$:
-///
-/// ```text
-/// r = (A_p - A_v) / (A_p + A_v)
-/// ```
-///
-/// applied flat across the band. This is what the exhaust side used to do, and
-/// it is not what a cylinder is: see
-/// [`ValveTermination`](crate::audio::waveguide::ValveTermination), which loads
-/// the runner with the gap's inertance and the cylinder's compliance instead,
-/// and holds the bottom of the band where an area step bleeds it away.
-///
-/// The induction side has not been moved onto that load yet. It is a bigger
-/// change here than on the exhaust: a runner damped by nothing but its valve —
-/// smooth walls, and a bellmouth that keeps its reflection because air drawn
-/// *in* arrives without a shear layer to shed — rings hard the moment that
-/// valve stops absorbing, and the plenum tuning is calibrated against this
-/// boundary. Moving it wants its own measurements.
-#[derive(Debug, Clone, Copy)]
-pub struct PortAreaStep {
-    pipe_area: f32,
-    reflection: f32,
-}
-
-impl PortAreaStep {
-    /// A boundary at the head of a runner of area $A_p$ [m^2], seated.
-    pub fn new(pipe_area: f64) -> Self {
-        Self {
-            pipe_area: pipe_area.max(1e-7) as f32,
-            reflection: 1.0,
-        }
-    }
-
-    /// Sets the valve's effective flow area $A_v$ [m^2].
-    pub fn set_effective_area(&mut self, effective_area: f64) {
-        let av = effective_area.max(0.0) as f32;
-        let ap = self.pipe_area;
-        self.reflection = if av <= 1e-9 {
-            1.0
-        } else {
-            ((ap - av) / (ap + av)).clamp(-1.0, 1.0)
-        };
-    }
-
-    /// Reflection coefficient currently in effect [-].
-    pub fn reflection(&self) -> f32 {
-        self.reflection
-    }
-
-    /// Computes the forward-travelling wave entering the runner:
-    /// - `excitation`: pressure pulse injected at the port [Pa].
-    /// - `returning_wave`: backward wave arriving at the boundary ($p^-(0)$) [Pa].
-    #[inline(always)]
-    pub fn step(&self, excitation: f32, returning_wave: f32) -> f32 {
-        excitation + self.reflection() * returning_wave
-    }
-}
-
 /// 1D digital waveguide network representing the complete intake system.
 #[derive(Debug, Clone)]
 pub struct IntakeNetwork {
     /// Intake runners (one per cylinder).
     runners: Vec<WaveguidePipe>,
-    /// Valve boundary conditions at the cylinder ports.
-    valves: Vec<PortAreaStep>,
+    /// The cylinder each runner's valve opens into.
+    ///
+    /// The same load the exhaust primaries carry, and for the same reason: an
+    /// intake valve off its seat is a short constriction into a closed box with
+    /// a piston for one wall, not a hole into a pipe running away forever.
+    valves: Vec<ValveTermination>,
     /// Junction where all runners meet the central plenum cavity.
     plenum_junction: Option<ScatteringJunction>,
     /// Central plenum cavity duct.
@@ -394,7 +337,9 @@ impl IntakeNetwork {
                 pipe.set_wall_enhancement(SMOOTH_WALL);
                 runners.push(pipe);
             }
-            valves.push(PortAreaStep::new(spec.area));
+            let mut valve = ValveTermination::new(sample_rate, spec.area);
+            valve.tune(gamma, r, temp);
+            valves.push(valve);
         }
 
         // 2. Single throttle path (plenum, airbox, snorkel, mouth)
@@ -539,13 +484,33 @@ impl IntakeNetwork {
         for m in &mut self.itb_mouths {
             m.tune(c);
         }
+        for v in &mut self.valves {
+            v.tune(gamma, gas_constant, temperature);
+        }
     }
 
-    /// Updates valve effective flow areas for all cylinders.
-    pub fn set_valve_areas(&mut self, valve_areas: &[f64]) {
-        for (v, &area) in self.valves.iter_mut().zip(valve_areas.iter()) {
-            v.set_effective_area(area);
+    /// Sets the cylinder each valve opens into, for all cylinders.
+    ///
+    /// Areas [m^2], volumes [m^3] and port mass flows [kg/s], one per cylinder
+    /// and in the order the runners were declared.
+    pub fn set_valve_loads(&mut self, areas: &[f64], volumes: &[f64], flows: &[f64]) {
+        for (i, v) in self.valves.iter_mut().enumerate() {
+            v.set_load(
+                areas.get(i).copied().unwrap_or(0.0),
+                volumes.get(i).copied().unwrap_or(1e-4),
+                flows.get(i).copied().unwrap_or(0.0),
+            );
         }
+    }
+
+    /// Magnitude of the reflection a cylinder's intake valve presents at `hz` [-].
+    pub fn valve_reflection_at(&self, cylinder: usize, hz: f32) -> f32 {
+        self.valves[cylinder.min(self.valves.len() - 1)].reflection_at(hz)
+    }
+
+    /// Frequency the cylinder behind an intake valve resonates at [Hz].
+    pub fn valve_helmholtz_hz(&self, cylinder: usize) -> f32 {
+        self.valves[cylinder.min(self.valves.len() - 1)].helmholtz_hz()
     }
 
     /// Updates the throttle position, `0.0..=1.0` [-].
@@ -736,7 +701,7 @@ impl IntakeNetwork {
             r.reset();
         }
         for v in &mut self.valves {
-            v.set_effective_area(0.0);
+            v.reset();
         }
         if let Some(p) = &mut self.plenum_pipe {
             p.reset();
@@ -826,69 +791,123 @@ mod tests {
     }
 
     #[test]
-    fn plenum_ram_peak_lands_at_the_helmholtz_frequency() {
-        // In engine acoustics, plenum ram tuning occurs when the intake runner
-        // (acting as an acoustic inertance M = rho * L / A) resonates against
-        // the plenum chamber volume (acting as an acoustic compliance C = V / (rho * c^2)).
-        // During induction with the intake valve open and the throttle closing or restricting
-        // the cavity, this Helmholtz resonator mode peaks at:
-        //   f_H = (c / 2*pi) * sqrt(A_runner / (V_plenum * L_runner))
+    fn ram_tuning_peak_scales_with_the_cylinder_behind_the_valve() {
+        // Intake ram tuning is a Helmholtz resonator, and the volume in it is
+        // the cylinder. The runner is the neck, carrying an inertance
+        // `M = rho L / A`; the space above the piston is the cavity, carrying a
+        // compliance `C = V / (rho c^2)`; and the plenum end of the runner is
+        // the free end, because a junction into a plenum an order of magnitude
+        // wider is very nearly a pressure release. So the mode sits at
         //
-        // Here we construct an IntakeNetwork with known geometry, open the valve
-        // termination (effective area > pipe area, r -> -1), shut the throttle
-        // (rigid cavity termination), inject an acoustic impulse, and measure the
-        // resonant frequency inside the runner.
+        //   f_H = (c / 2 pi) sqrt(A_runner / (V_cyl * L_runner))
+        //
+        // which is Engelman's ram-tuning frequency. It is a mode this network
+        // can only have now that the valve is loaded by the cylinder: against
+        // the area step this test used to run on, an open valve was a pressure
+        // release, both ends of the runner were free, and what the peak tracked
+        // was the *plenum* volume, which is the tuning of an airbox and not of
+        // an induction stroke.
+        //
+        // The assertion is on how the peak moves with `V_cyl` rather than on
+        // where it lands, because where it lands also carries the end
+        // correction at the plenum junction and the inertance of the valve gap
+        // itself, neither of which is in the formula. Both are properties of
+        // the geometry and not of the volume, so they cancel out of the ratio:
+        // quartering the cylinder must double the frequency, whatever else is
+        // adding length to the neck.
         let runner_len = 0.25f64;
         let runner_diam = 0.042f64;
         let runner_area = std::f64::consts::PI * 0.25 * runner_diam * runner_diam;
-        let plenum_vol = 0.0035f64; // 3.5 L
-        let runners = vec![crate::physics::PipeSection::new(
-            runner_len,
-            runner_area,
-            300.0,
-        )];
         let system = IntakeSystem {
-            runners,
-            plenum_volume: plenum_vol,
+            runners: vec![crate::physics::PipeSection::new(
+                runner_len,
+                runner_area,
+                300.0,
+            )],
+            plenum_volume: 0.0035,
             throttle: ThrottleLayout::Single { bore: 0.065 },
             airbox: None,
             snorkel: None,
             trumpet_flanged: false,
         };
         let fs = 48_000.0;
-        let mut net = IntakeNetwork::new(&system, 1, fs);
-        net.set_throttle(0.0);
-        net.set_valve_areas(&[runner_area * 10.0]);
 
-        let c = speed_of_sound(
-            INTAKE_AIR_GAMMA,
-            INTAKE_GAS_CONSTANT,
-            INTAKE_AMBIENT_TEMPERATURE_K,
-        );
-        let f_helmholtz = (c / std::f32::consts::TAU)
-            * ((runner_area as f32) / (plenum_vol as f32 * runner_len as f32)).sqrt();
-
-        let mut runner_waves = Vec::with_capacity(48_000);
-        for i in 0..48_000 {
-            let excit = if i == 0 { 1_000.0 } else { 0.0 };
-            net.step(&[excit]);
-            runner_waves.push(net.runner_to_plenum[0]);
-        }
-
-        let mut max_mag = 0.0f32;
-        let mut peak_f = 0.0f32;
-        for f in 40..110 {
-            let mag = magnitude_at(&runner_waves, f as f32, fs);
-            if mag > max_mag {
-                max_mag = mag;
-                peak_f = f as f32;
+        let peak_for = |cylinder_volume: f64| -> f32 {
+            let mut net = IntakeNetwork::new(&system, 1, fs);
+            net.set_throttle(1.0);
+            // Valve wide open against the runner, so the gap's own inertance is
+            // a twentieth of the runner's and the neck is very nearly the
+            // runner alone.
+            net.set_valve_loads(&[runner_area * 10.0], &[cylinder_volume], &[0.0]);
+            let mut runner_waves = Vec::with_capacity(48_000);
+            for i in 0..48_000 {
+                let excit = if i == 0 { 1_000.0 } else { 0.0 };
+                net.step(&[excit]);
+                runner_waves.push(net.runner_to_plenum[0]);
             }
-        }
+            let mut max_mag = 0.0f32;
+            let mut peak_f = 0.0f32;
+            for f in 40..600 {
+                let mag = magnitude_at(&runner_waves, f as f32, fs);
+                if mag > max_mag {
+                    max_mag = mag;
+                    peak_f = f as f32;
+                }
+            }
+            peak_f
+        };
 
-        let error_pct = (peak_f - f_helmholtz).abs() / f_helmholtz * 100.0;
+        // Both volumes are large enough to keep the mode under a hundred hertz,
+        // where the runner is a short fraction of a quarter wave and is honestly
+        // a lumped mass. Taken higher the neck stops being lumped, the
+        // distributed pipe drags the mode below the formula, and the ratio
+        // sags: a quarter of a 500 cm^3 cylinder reads 1.86 rather than 2.
+        let big = peak_for(8.0e-3);
+        let small = peak_for(2.0e-3);
+        let ratio = small / big;
         assert!(
-            error_pct < 4.0,
-            "Helmholtz ram peak at {peak_f:.1} Hz must match theoretical {f_helmholtz:.1} Hz within 4% (got {error_pct:.2}%)"
+            (ratio - 2.0).abs() < 0.08,
+            "quartering the cylinder must double the ram peak: {big:.1} Hz to {small:.1} Hz is a factor of {ratio:.3}"
+        );
+    }
+
+    #[test]
+    fn an_open_intake_valve_still_reflects_a_long_wave() {
+        // The defect this boundary replaces, stated as a test. A valve off its
+        // seat opens into a closed box, and a box a wave cannot compress is a
+        // wall: at the bottom of the band the runner must get essentially all
+        // of its wave back however far the valve is lifted. The area step
+        // returned `(A_p - A_v)/(A_p + A_v)` flat across the band, which for a
+        // valve open to a third of the runner's area threw half of every bounce
+        // away at 20 Hz as readily as at 2 kHz.
+        let runner_area = std::f64::consts::PI * 0.25 * 0.042 * 0.042;
+        let system = IntakeSystem {
+            runners: vec![crate::physics::PipeSection::new(0.25, runner_area, 300.0)],
+            plenum_volume: 0.0035,
+            throttle: ThrottleLayout::Single { bore: 0.065 },
+            airbox: None,
+            snorkel: None,
+            trumpet_flanged: false,
+        };
+        let mut net = IntakeNetwork::new(&system, 1, 48_000.0);
+        net.set_valve_loads(&[runner_area / 3.0], &[5.0e-4], &[0.05]);
+
+        assert!(
+            net.valve_reflection_at(0, 20.0) > 0.97,
+            "a lifted intake valve must still be a wall at 20 Hz, got {}",
+            net.valve_reflection_at(0, 20.0)
+        );
+        // And it is not a wall everywhere: the gap's mass and the cylinder's
+        // stiffness cancel somewhere in the midrange, and there the load
+        // swallows what lands on it.
+        let f_h = net.valve_helmholtz_hz(0);
+        assert!(
+            f_h.is_finite() && f_h > 20.0,
+            "an open valve must have a finite Helmholtz frequency, got {f_h}"
+        );
+        assert!(
+            net.valve_reflection_at(0, f_h) < net.valve_reflection_at(0, 20.0),
+            "the cylinder must absorb more at its own resonance than at DC"
         );
     }
 
