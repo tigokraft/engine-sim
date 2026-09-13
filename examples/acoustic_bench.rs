@@ -15,7 +15,14 @@
 //!   --direct <bool>         Direct monitoring: true | false (default: true for dyno)
 //!   --compare <path>        Compare 10-octave spectrum against audio file (WAV or MP3)
 //!   --out <path>            Output WAV path (default: acoustic_bench.wav)
+//!   --sweep <parameter>     Sweep one exhaust geometry parameter and print its resonance table
+//!                           (primary-length | primary-diameter | collector-taper |
+//!                            tailpipe-length | tailpipe-diameter | crossover-position)
+//!   --sweep-steps <n>       Points in the sweep, log-spaced 0.5x to 2x of the preset (default: 5)
 //! ```
+//!
+//! `--sweep` prints its own report and exits; it does not render the dyno
+//! pull below. See docs/ENGINE_CONFIGURATION_GUIDE.md for a worked example.
 
 use std::f32::consts::PI;
 use std::path::{Path, PathBuf};
@@ -23,13 +30,20 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-use rust_engine_sim::analysis::render::{read_wav, write_wav, CHANNELS, OFFLINE_RATE, PHYSICS_HZ};
-use rust_engine_sim::analysis::script::{RenderScript, Segment};
-use rust_engine_sim::audio::dsp::EngineSynth;
+use rust_engine_sim::analysis::orders::{self, PLACEMENT_WINDOW_PCT};
+use rust_engine_sim::analysis::render::{
+    read_wav, write_wav, RenderPlan, CHANNELS, OFFLINE_RATE, PHYSICS_HZ, PRIME_STEPS,
+};
+use rust_engine_sim::analysis::script::{calibration_sweep, RenderScript, Segment};
+use rust_engine_sim::audio::dsp::{EngineSnapshot, EngineSynth};
+use rust_engine_sim::audio::filters::speed_of_sound;
 use rust_engine_sim::audio::propagation::{AperturePositions, Listener};
+use rust_engine_sim::audio::radiation::end_correction;
+use rust_engine_sim::audio::waveguide::mean_flow_mach;
 use rust_engine_sim::audio::SnapshotSource;
 use rust_engine_sim::bench::EnginePreset;
 use rust_engine_sim::environment::Environment;
+use rust_engine_sim::physics::plumbing::{Crossover, ExhaustSystem};
 
 /// 10 ISO standard octave center frequencies [Hz].
 const OCTAVE_CENTERS: [f32; 10] = [
@@ -322,6 +336,309 @@ fn ensure_wav_file(path: &Path) -> Result<PathBuf> {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Exhaust tuning sweep (Stage T4)
+// ---------------------------------------------------------------------------
+//
+// `ExhaustNetwork` already computes every one of these resonances; nothing
+// here adds physics. It reads the geometry back the way `examples/calibrate.rs`
+// does — length, area, end correction, mean-flow Mach — and prints that
+// prediction beside whatever the render actually did, so a length can be
+// chosen against a number instead of by re-rendering and squinting.
+
+/// Resonance peaks reported per sweep point.
+///
+/// Enough to cover the primary and the tailpipe and a couple of harmonics of
+/// each without the average spectrum's firing-order residue crowding them out.
+const SWEEP_PEAKS: usize = 16;
+
+/// How far a measured peak may sit from its prediction before the table calls
+/// it a disagreement rather than rounding [%].
+///
+/// A few percent, per the stage: tighter and ordinary end-correction and
+/// mean-flow arithmetic would trip it on every row; looser and a genuine
+/// missing term — a junction the formula does not know about — would read as
+/// agreement.
+const DIVERGE_PCT: f64 = 6.0;
+
+/// One exhaust geometry parameter the bench can sweep.
+#[derive(Clone, Copy)]
+enum SweepParam {
+    PrimaryLength,
+    PrimaryDiameter,
+    CollectorTaper,
+    TailpipeLength,
+    TailpipeDiameter,
+    CrossoverPosition,
+}
+
+/// Which analytic quarter-wave mode a swept parameter is judged against.
+///
+/// Primary length and diameter, the collector taper and the crossover
+/// position all sit upstream of the tailpipe, so a change to any of them is
+/// read off the *primary's* prediction; only the tailpipe's own length and
+/// diameter move the tailpipe's.
+enum Predicts {
+    Primary,
+    Tailpipe,
+}
+
+impl SweepParam {
+    fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "primary-length" | "primary_length" => Self::PrimaryLength,
+            "primary-diameter" | "primary_diameter" => Self::PrimaryDiameter,
+            "collector-taper" | "collector_taper" => Self::CollectorTaper,
+            "tailpipe-length" | "tailpipe_length" => Self::TailpipeLength,
+            "tailpipe-diameter" | "tailpipe_diameter" => Self::TailpipeDiameter,
+            "crossover-position" | "crossover_position" => Self::CrossoverPosition,
+            _ => return None,
+        })
+    }
+
+    fn names() -> &'static str {
+        "primary-length | primary-diameter | collector-taper | tailpipe-length | \
+         tailpipe-diameter | crossover-position"
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::PrimaryLength => "primary length",
+            Self::PrimaryDiameter => "primary diameter",
+            Self::CollectorTaper => "collector taper",
+            Self::TailpipeLength => "tailpipe length",
+            Self::TailpipeDiameter => "tailpipe diameter",
+            Self::CrossoverPosition => "crossover position",
+        }
+    }
+
+    fn predicts(&self) -> Predicts {
+        match self {
+            Self::TailpipeLength | Self::TailpipeDiameter => Predicts::Tailpipe,
+            _ => Predicts::Primary,
+        }
+    }
+
+    /// Current value of the swept quantity, read back off the geometry [m].
+    fn current(&self, exhaust: &ExhaustSystem) -> f64 {
+        match self {
+            Self::PrimaryLength => exhaust.primary_length(),
+            Self::PrimaryDiameter => 2.0 * (exhaust.primary_area() / PI64).sqrt(),
+            Self::CollectorTaper => exhaust.collector.taper_length,
+            Self::TailpipeLength => exhaust.tailpipe.length,
+            Self::TailpipeDiameter => exhaust.tailpipe.diameter(),
+            Self::CrossoverPosition => match &exhaust.crossover {
+                Crossover::HPipe { position, .. } | Crossover::XPipe { position } => *position,
+                Crossover::None | Crossover::Balance180 => 0.0,
+            },
+        }
+    }
+
+    /// Sets the swept quantity to `value` [m], in place.
+    fn apply(&self, exhaust: &mut ExhaustSystem, value: f64) -> Result<()> {
+        match self {
+            Self::PrimaryLength => {
+                for p in &mut exhaust.primaries {
+                    p.length = value;
+                }
+            }
+            Self::PrimaryDiameter => {
+                let area = PI64 * (value * 0.5).powi(2);
+                for p in &mut exhaust.primaries {
+                    p.area = area;
+                }
+            }
+            Self::CollectorTaper => exhaust.collector.taper_length = value,
+            Self::TailpipeLength => exhaust.tailpipe.length = value,
+            Self::TailpipeDiameter => exhaust.tailpipe.area = PI64 * (value * 0.5).powi(2),
+            Self::CrossoverPosition => match &mut exhaust.crossover {
+                Crossover::HPipe { position, .. } | Crossover::XPipe { position } => {
+                    *position = value;
+                }
+                Crossover::None | Crossover::Balance180 => anyhow::bail!(
+                    "this engine has no HPipe/XPipe crossover fitted to sweep the position of"
+                ),
+            },
+        }
+        Ok(())
+    }
+}
+
+/// `std::f64::consts::PI`, named locally so it does not collide with this
+/// file's own `f32` import of the same name.
+const PI64: f64 = std::f64::consts::PI;
+
+/// The gas the network is actually carrying at the sweep's midpoint [SI].
+///
+/// Mirrors `examples/calibrate.rs`'s own `gas_state`: primed exactly as
+/// [`RenderPlan::render`] primes, then stepped to the midpoint of the render,
+/// which is where a resonance smeared across a warming sweep lands. A
+/// prediction taken off a nominal temperature instead would be a prediction
+/// about a different render than the one measured.
+fn gas_state(preset: &EnginePreset, script: &RenderScript) -> EngineSnapshot {
+    let dt = 1.0 / PHYSICS_HZ;
+    let mut block = preset.block(Environment::default());
+    let mut source = SnapshotSource::with_induction(&block, preset.induction);
+
+    for _ in 0..PRIME_STEPS {
+        block.update(dt, script.start_rpm());
+    }
+
+    let mut snapshot = EngineSnapshot::default();
+    let steps = (0.5 * script.seconds() * PHYSICS_HZ).round() as usize;
+    for step in 0..steps {
+        let (rpm, controls) = script.at(step as f64 * dt);
+        block.update(dt, rpm);
+        snapshot = source.sample(&block, rpm, dt, controls);
+    }
+    snapshot
+}
+
+/// Quarter-wave prediction for the primary runner [Hz]: `c(1-M^2)/4(L+d)`.
+///
+/// The collector outlet is wider than the primary, so the junction is given
+/// the *flanged* end correction: an abrupt expansion loads the runner the way
+/// a baffle does, exactly as `examples/calibrate.rs` treats the same mode.
+fn predicted_primary_hz(preset: &EnginePreset, gas: &EngineSnapshot) -> f64 {
+    let exhaust = &preset.exhaust;
+    let l = exhaust.primary_length();
+    if l <= 0.0 {
+        return 0.0;
+    }
+    let gamma = gas.exhaust_gamma;
+    let r = gas.exhaust_gas_constant;
+    let a = exhaust.primary_area();
+    let radius = (a / PI64).sqrt();
+    let delta = end_correction(radius, true);
+    let c = speed_of_sound(gamma, r, gas.primary_temperature[0]) as f64;
+    let cylinders = preset.firing.len().max(1);
+    let mach = mean_flow_mach(
+        gas.intake_mass_flow / cylinders as f32,
+        a as f32,
+        gamma,
+        r,
+        gas.primary_temperature[0],
+    ) as f64;
+    c * (1.0 - mach * mach) / (4.0 * (l + delta))
+}
+
+/// Quarter-wave prediction for the tailpipe [Hz]: `c(1-M^2)/4(L+d)`.
+fn predicted_tailpipe_hz(preset: &EnginePreset, gas: &EngineSnapshot) -> f64 {
+    let exhaust = &preset.exhaust;
+    let l = exhaust.tailpipe.length;
+    if l <= 0.0 {
+        return 0.0;
+    }
+    let gamma = gas.exhaust_gamma;
+    let r = gas.exhaust_gas_constant;
+    let radius = (exhaust.tailpipe.area / PI64).sqrt();
+    let delta = end_correction(radius, exhaust.tailpipe_flanged);
+    let c = speed_of_sound(gamma, r, gas.tailpipe_temperature) as f64;
+    let banks = preset.firing.bank_count().max(1);
+    let mach = mean_flow_mach(
+        gas.intake_mass_flow / banks as f32,
+        exhaust.tailpipe.area as f32,
+        gamma,
+        r,
+        gas.tailpipe_temperature,
+    ) as f64;
+    c * (1.0 - mach * mach) / (4.0 * (l + delta))
+}
+
+/// Multipliers applied to a parameter's current value to build a sweep,
+/// log-spaced from half to double so the table sits symmetric on both sides
+/// of what the preset actually ships.
+fn sweep_multipliers(steps: usize) -> Vec<f64> {
+    let steps = steps.max(2);
+    let (lo, hi) = (0.5f64.ln(), 2.0f64.ln());
+    (0..steps)
+        .map(|i| (lo + (hi - lo) * i as f64 / (steps - 1) as f64).exp())
+        .collect()
+}
+
+/// Rebuilds `preset`'s exhaust across a range of `param` and prints the
+/// resulting resonance table: the analytic prediction beside the peak the
+/// render actually produced, for every point.
+fn run_sweep(preset: &EnginePreset, param: SweepParam, steps: usize) -> Result<()> {
+    let base = param.current(&preset.exhaust);
+    let base = if base > 1e-6 {
+        base
+    } else {
+        // No sensible current value to scale from — the collector taper and
+        // the crossover position can both sit at a preset's construction
+        // default without one — so start the sweep from a physically
+        // plausible centre instead of at zero.
+        match param {
+            SweepParam::CollectorTaper => 0.15,
+            SweepParam::CrossoverPosition => 0.5,
+            _ => 0.30,
+        }
+    };
+
+    println!("================================================================================");
+    println!("           EXHAUST TUNING SWEEP: {}", param.label());
+    println!("================================================================================");
+    println!("Engine        : {} ({})", preset.name, preset.spec());
+    println!("Baseline      : {} = {:.4} m", param.label(), base);
+    println!();
+    println!(
+        "{:<10} | {:>12} | {:>12} | {:>9} | {:>10} | Note",
+        "Value [m]", "Predicted", "Measured", "Error", "Prom."
+    );
+    println!("--------------------------------------------------------------------------------");
+
+    for mult in sweep_multipliers(steps) {
+        let value = base * mult;
+        let mut p = preset.clone();
+        param.apply(&mut p.exhaust, value)?;
+
+        let script = calibration_sweep(&p);
+        let gas = gas_state(&p, &script);
+        let predicted_hz = match param.predicts() {
+            Predicts::Primary => predicted_primary_hz(&p, &gas),
+            Predicts::Tailpipe => predicted_tailpipe_hz(&p, &gas),
+        };
+
+        let render = RenderPlan::new(&p, &script).render();
+        let mono = render.mono();
+        let peaks = orders::resonances(&mono, render.sample_rate, SWEEP_PEAKS);
+        let placement = orders::place(predicted_hz, &peaks, PLACEMENT_WINDOW_PCT);
+
+        let (measured, error, prominence, note) = match placement.measured_hz {
+            Some(measured_hz) => {
+                let error_pct = placement.error_pct().unwrap_or(0.0);
+                let note = if error_pct.abs() <= DIVERGE_PCT {
+                    "agrees with the analytic mode".to_string()
+                } else {
+                    format!(
+                        "diverges {error_pct:+.1}% -- mean-flow bias, end correction, \
+                         or a junction the formula omits"
+                    )
+                };
+                (
+                    format!("{measured_hz:.1} Hz"),
+                    format!("{error_pct:+.1}%"),
+                    format!("{:.1} dB", placement.prominence_db.unwrap_or(0.0)),
+                    note,
+                )
+            }
+            None => (
+                "--".to_string(),
+                "--".to_string(),
+                "--".to_string(),
+                "no peak found within the search window".to_string(),
+            ),
+        };
+
+        println!(
+            "{value:<10.4} | {predicted_hz:>9.1} Hz | {measured:>12} | {error:>9} | {prominence:>10} | {note}",
+        );
+    }
+
+    println!("================================================================================\n");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     println!("================================================================================");
     println!("                ACOUSTIC DIAGNOSTIC & BENCHMARK TOOL                            ");
@@ -334,6 +651,8 @@ fn main() -> Result<()> {
     let mut compare_path: Option<PathBuf> = None;
     let mut out_wav = PathBuf::from("acoustic_bench.wav");
     let mut master_gain = 0.70f32;
+    let mut sweep_param: Option<String> = None;
+    let mut sweep_steps = 5usize;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -376,6 +695,16 @@ fn main() -> Result<()> {
                     master_gain = val.parse().unwrap_or(0.70);
                 }
             }
+            "--sweep" => {
+                if let Some(val) = args.next() {
+                    sweep_param = Some(val.to_lowercase());
+                }
+            }
+            "--sweep-steps" => {
+                if let Some(val) = args.next() {
+                    sweep_steps = val.parse().unwrap_or(5);
+                }
+            }
             _ => {}
         }
     }
@@ -400,6 +729,19 @@ fn main() -> Result<()> {
                 .unwrap_or_else(EnginePreset::cross_plane_v8)
         }
     };
+
+    // 1b. `--sweep` is its own report: run it, print it, and exit before the
+    // normal dyno-pull render below, which does not need it and would
+    // otherwise force the exhaust into `--exhaust`'s mode first.
+    if let Some(name) = sweep_param {
+        let param = SweepParam::parse(&name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown --sweep parameter '{name}'. Choose one of: {}",
+                SweepParam::names()
+            )
+        })?;
+        return run_sweep(&preset, param, sweep_steps);
+    }
 
     // 2. Apply exhaust mode
     match exhaust_mode.as_str() {
