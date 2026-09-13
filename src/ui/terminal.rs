@@ -1014,7 +1014,7 @@ impl Dashboard {
         let lim_cut_str = match t.limiter_cut {
             LimiterCut::Spark => "SPARK CUT (Backfire)",
             LimiterCut::Fuel => "FUEL CUT (Clean)",
-            LimiterCut::None => "NONE",
+            LimiterCut::None => "NONE (No Cut)",
         };
         let lim_rows = vec![
             vital("Redline Ceiling", format!("{:>6.0} rpm", t.redline), HOT),
@@ -2332,6 +2332,18 @@ mod tests {
             dashboard.on_key(press(KeyCode::Char('M'))),
             Some(Command::ToggleMute)
         );
+        assert_eq!(
+            dashboard.on_key(press(KeyCode::Char('c'))),
+            Some(Command::CycleLimiterCut)
+        );
+        assert_eq!(
+            dashboard.on_key(press(KeyCode::Char('C'))),
+            Some(Command::CycleLimiterCut)
+        );
+        assert_eq!(
+            dashboard.on_key(press(KeyCode::Char('l'))),
+            Some(Command::CycleLimiterMode)
+        );
         for (key, index) in [('1', 0), ('3', 2), ('7', 6), ('9', 8)] {
             assert_eq!(
                 dashboard.on_key(press(KeyCode::Char(key))),
@@ -2748,13 +2760,23 @@ mod tests {
             assert!(!s.is_empty());
         }
 
-        // Test ECU tuning screen contains calibration indicators
+        // Test ECU tuning screen contains calibration indicators and cut type display
         d.set_active_pane_view(ViewPane::EcuTuning);
+        d.telemetry.limiter_cut = crate::physics::LimiterCut::Spark;
         let ecu_screen = screen(&d, 160, 50);
         assert!(ecu_screen.contains("IGNITION CALIBRATION"));
         assert!(ecu_screen.contains("FUELLING CALIBRATION"));
         assert!(ecu_screen.contains("REV LIMITER"));
         assert!(ecu_screen.contains("CYLINDER HEALTH MATRIX"));
+        assert!(ecu_screen.contains("SPARK CUT (Backfire)"));
+
+        d.telemetry.limiter_cut = crate::physics::LimiterCut::Fuel;
+        let ecu_fuel = screen(&d, 160, 50);
+        assert!(ecu_fuel.contains("FUEL CUT (Clean)"));
+
+        d.telemetry.limiter_cut = crate::physics::LimiterCut::None;
+        let ecu_none = screen(&d, 160, 50);
+        assert!(ecu_none.contains("NONE (No Cut)"));
 
         // Test Combustion lab contains LPP and IMEP
         d.set_active_pane_view(ViewPane::CombustionLab);
