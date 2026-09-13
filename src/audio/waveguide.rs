@@ -1362,20 +1362,59 @@ impl ScatteringJunction {
 // Composed elements: Expansion chamber
 // ---------------------------------------------------------------------------
 
+/// Acoustic absorption coefficient of a bare, unlined expansion-chamber shell [-].
+///
+/// [`sabine_attenuation_db_per_m`] was written for a packed absorptive body,
+/// where the fibre bed takes near 0.8 of what reaches it. A reactive
+/// chamber's shell is bare sheet steel with no fibre in it at all — most of
+/// what does not come straight back out arrives at the two area steps rather
+/// than the wall — so it gets the same formula with a coefficient two orders
+/// smaller: a little viscous drag and shell damping, not a muffler's packing.
+/// Small is not zero, though, which is the entire point: the pair of
+/// scattering junctions either side of the cavity are exactly lossless, so
+/// without this the chamber has no dissipative path at all and a network
+/// whose only sink is the mouth hands every watt it reflects back out again.
+pub const CHAMBER_WALL_ABSORPTION: f64 = 0.03;
+
 /// Acoustic expansion chamber silencer composed from area steps.
 ///
 /// Models a sudden expansion to area $A_2 = m A_1$ over length $L$, followed by
 /// a contraction back to $A_1$. Built from two 2-port scattering junctions
 /// separated by a bidirectional waveguide pipe.
 ///
-/// Classical transmission loss for an expansion chamber of length $L$ and area ratio $m$:
+/// Classical transmission loss for a *lossless* expansion chamber of length
+/// $L$ and area ratio $m$:
 ///
 /// $$TL = 10 \log_{10} \left[ 1 + \frac{1}{4} \left(m - \frac{1}{m}\right)^2 \sin^2(k L) \right]$$
+///
+/// which is exactly zero whenever $kL$ is a multiple of $\pi$: a pair of
+/// scattering junctions with a lossless cavity between them can only reflect
+/// and store, so at those frequencies the chamber is transparent and every
+/// watt it does not send downstream immediately comes back out. Two loss
+/// mechanisms are added on top of that reflection so the chamber has
+/// somewhere for energy to actually go:
+///
+/// - **Wall transmission** ([`CHAMBER_WALL_ABSORPTION`], applied by
+///   [`Self::wall_pass`]) takes a small, fixed fraction out of whatever
+///   crosses the cavity each pass, in both directions — the shell is not a
+///   perfect mirror even where the plane-wave theory above says it should be.
+/// - **Flow loss at each area step** ($k$ from Borda-Carnot sudden expansion
+///   and sudden contraction — the identical two terms
+///   [`ExhaustSystem::back_pressure`](crate::physics::plumbing::ExhaustSystem::back_pressure)
+///   sums for the mean-flow pressure drop across this stage) takes a further
+///   fraction out of the wave crossing each junction in the direction of the
+///   mean flow, where the real separation and turbulence actually happens.
 #[derive(Debug, Clone)]
 pub struct ExpansionChamber {
     junction_in: ScatteringJunction,
     cavity: WaveguidePipe,
     junction_out: ScatteringJunction,
+    /// Amplitude surviving one pass across the cavity, either direction [-].
+    wall_pass: f32,
+    /// Amplitude surviving the forward-flow crossing of the entry expansion [-].
+    entry_pass: f32,
+    /// Amplitude surviving the forward-flow crossing of the exit contraction [-].
+    exit_pass: f32,
     scatter_buf_in: [f32; 2],
     scatter_buf_out: [f32; 2],
 }
@@ -1395,18 +1434,55 @@ impl ExpansionChamber {
         temperature: f32,
     ) -> Self {
         let a1 = pipe_area.max(1e-7);
-        let a2 = a1 * area_ratio.max(1.0);
+        let m = area_ratio.max(1.1);
+        let a2 = a1 * m;
         let junction_in = ScatteringJunction::from_areas(&[a1, a2]);
         let cavity = WaveguidePipe::new(length, a2, sample_rate, gamma, gas_constant, temperature);
         let junction_out = ScatteringJunction::from_areas(&[a2, a1]);
+
+        // Wall transmission: neither temperature nor gas constant enters --
+        // it is a property of the shell and the cavity's own bore, not of
+        // what is passing through it, so it is fixed once at construction.
+        let core_radius = (a2 / std::f64::consts::PI).sqrt();
+        let wall_db_per_m = sabine_attenuation_db_per_m(core_radius, CHAMBER_WALL_ABSORPTION);
+        let wall_pass = 10f64.powf(-wall_db_per_m * length.max(0.001) / 20.0) as f32;
+
+        // Flow loss at each area step, from the same Borda-Carnot minor-loss
+        // coefficients `back_pressure` sums into one figure for the mean-flow
+        // pressure drop. Read here as a fraction of *acoustic* energy rather
+        // than of dynamic pressure: `k` of it goes to separation and
+        // turbulence, `1` continues, so `1 / sqrt(1 + k)` is the amplitude
+        // that survives.
+        let k_expansion = (1.0 - 1.0 / m).powi(2);
+        let k_contraction = 0.5 * (1.0 - 1.0 / m);
+        let entry_pass = (1.0 / (1.0 + k_expansion).sqrt()) as f32;
+        let exit_pass = (1.0 / (1.0 + k_contraction).sqrt()) as f32;
 
         Self {
             junction_in,
             cavity,
             junction_out,
+            wall_pass,
+            entry_pass,
+            exit_pass,
             scatter_buf_in: [0.0; 2],
             scatter_buf_out: [0.0; 2],
         }
+    }
+
+    /// Amplitude surviving one pass across the cavity, either direction [-].
+    pub fn wall_pass(&self) -> f32 {
+        self.wall_pass
+    }
+
+    /// Amplitude surviving the forward-flow crossing of the entry expansion [-].
+    pub fn entry_pass(&self) -> f32 {
+        self.entry_pass
+    }
+
+    /// Amplitude surviving the forward-flow crossing of the exit contraction [-].
+    pub fn exit_pass(&self) -> f32 {
+        self.exit_pass
     }
 
     /// Retunes propagation delay and acoustic admittance for current gas state.
@@ -1424,18 +1500,26 @@ impl ExpansionChamber {
     #[inline(always)]
     pub fn step(&mut self, p_in_plus: f32, p_out_minus: f32) -> (f32, f32) {
         let (p_cav_0, p_cav_1) = self.cavity.read_outputs();
+        let p_cav_0 = p_cav_0 * self.wall_pass;
+        let p_cav_1 = p_cav_1 * self.wall_pass;
 
         // Upstream junction: inlet duct (0) and cavity inlet (1)
         self.junction_in
             .scatter(&[p_in_plus, p_cav_0], &mut self.scatter_buf_in);
         let p_in_minus = self.scatter_buf_in[0];
-        let p_into_cav_0 = self.scatter_buf_in[1];
+        // The wave now heading further into the chamber has just crossed the
+        // sudden expansion in the direction of the mean flow, so it pays the
+        // entry loss.
+        let p_into_cav_0 = self.scatter_buf_in[1] * self.entry_pass;
 
         // Downstream junction: cavity exit (0) and outlet duct (1)
         self.junction_out
             .scatter(&[p_cav_1, p_out_minus], &mut self.scatter_buf_out);
         let p_into_cav_1 = self.scatter_buf_out[0];
-        let p_out_plus = self.scatter_buf_out[1];
+        // The wave now heading downstream has just crossed the contraction
+        // back to pipe area, in the direction of the mean flow, so it pays
+        // the exit loss.
+        let p_out_plus = self.scatter_buf_out[1] * self.exit_pass;
 
         self.cavity.push_inputs(p_into_cav_0, p_into_cav_1);
 
@@ -3324,16 +3408,20 @@ mod tests {
     #[test]
     fn chamber_transmission_loss_matches_theory() {
         // A single-expansion chamber terminated anechoically has a closed-form
-        // transmission loss that depends only on the area ratio and how many
-        // wavelengths fit the cavity:
+        // *lossless* transmission loss that depends only on the area ratio and
+        // how many wavelengths fit the cavity:
         //
         //   TL = 10 log10[ 1 + (1/4) (m - 1/m)^2 sin^2(kL) ]
         //
-        // It is zero whenever kL is a multiple of pi — the chamber is
-        // transparent at those frequencies, which is exactly why a single
-        // chamber cannot silence an engine on its own — and peaks at the
-        // quarter-wave points. Nothing in it is tunable, so it is a real check
-        // that the two area steps and the pipe between them scatter correctly.
+        // It is zero whenever kL is a multiple of pi — the two junctions and
+        // the cavity between them are exactly lossless, so at those
+        // frequencies the chamber is transparent — and peaks at the
+        // quarter-wave points. Stage T5 adds two small loss terms on top of
+        // that reflection (see `ExpansionChamber`'s own docs), so the measured
+        // figure is the lossless prediction plus a fixed amount this chamber's
+        // geometry adds on every forward pass, not the lossless figure alone.
+        // The two area steps and the pipe between them still have to scatter
+        // correctly, which is what this test continues to check.
         const FS: f32 = 48_000.0;
         const GAMMA: f32 = 1.4;
         const R: f32 = 287.0;
@@ -3344,15 +3432,32 @@ mod tests {
         let cavity_length = 0.30f64;
         let area_ratio = 4.0f64;
 
-        let analytic = |f: f32| {
+        let lossless = |f: f32| {
             let k = std::f32::consts::TAU * f / c;
             let m = area_ratio as f32;
             let s = (k * cavity_length as f32).sin();
             10.0 * (1.0 + 0.25 * (m - 1.0 / m).powi(2) * s * s).log10()
         };
+        // The fixed amount one forward pass through this geometry's entry
+        // expansion, cavity wall and exit contraction adds, independent of
+        // frequency. Read straight off a throwaway chamber rather than
+        // re-derived, so this test moves automatically if the loss formulas do.
+        let probe = ExpansionChamber::new(
+            pipe_area,
+            area_ratio,
+            cavity_length,
+            FS,
+            GAMMA,
+            R,
+            TEMPERATURE,
+        );
+        let fixed_loss_db = -20.0
+            * (probe.entry_pass() as f64 * probe.wall_pass() as f64 * probe.exit_pass() as f64)
+                .log10();
+        let analytic = |f: f32| lossless(f) + fixed_loss_db as f32;
 
-        // Quarter-wave point (peak loss), half-wave point (transparent), and a
-        // frequency between the two.
+        // Quarter-wave point (peak loss), half-wave point (transparent in the
+        // lossless theory), and a frequency between the two.
         let quarter = c / (4.0 * cavity_length as f32);
         for f in [quarter, 2.0 * quarter, 0.5 * quarter, 1.5 * quarter] {
             let mut chamber = ExpansionChamber::new(
@@ -3383,12 +3488,133 @@ mod tests {
             let measured = -20.0 * amplitude.max(1e-9).log10();
             let expected = analytic(f);
 
+            // Wider than the pre-T5 1.0 dB: `fixed_loss_db` is a single-pass
+            // estimate and the losses also touch the resonance's internal
+            // bounces, which the closed-form theory does not model at all.
             assert!(
-                (measured - expected).abs() < 1.0,
-                "at {f:.0} Hz (kL = {:.2} rad): {measured:.2} dB measured, {expected:.2} dB from theory",
+                (measured - expected).abs() < 2.5,
+                "at {f:.0} Hz (kL = {:.2} rad): {measured:.2} dB measured, {expected:.2} dB from \
+                 lossless theory + {fixed_loss_db:.2} dB fixed loss",
                 std::f32::consts::TAU * f / c * cavity_length as f32
             );
         }
+    }
+
+    #[test]
+    fn expansion_chamber_transmission_loss_is_positive_at_the_transparent_frequency() {
+        // The lossless closed-form TL is exactly zero at the half-wave point
+        // (`kL = pi`) -- a pair of lossless scattering junctions around a
+        // lossless cavity really can be perfectly transparent there. Stage T5
+        // adds a wall-transmission loss and a flow loss at each area step
+        // specifically so that claim stops being true: this measures TL at
+        // that exact frequency and checks it is now strictly positive, which
+        // only the new loss terms can produce -- the reflection math this
+        // frequency was chosen to null out contributes nothing here.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.4;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 300.0;
+
+        let c = speed_of_sound(GAMMA, R, TEMPERATURE);
+        let pipe_area = std::f64::consts::PI * 0.030 * 0.030;
+        let cavity_length = 0.30f64;
+        let area_ratio = 4.0f64;
+        let half_wave = c / (2.0 * cavity_length as f32);
+
+        let mut chamber = ExpansionChamber::new(
+            pipe_area,
+            area_ratio,
+            cavity_length,
+            FS,
+            GAMMA,
+            R,
+            TEMPERATURE,
+        );
+
+        let settle = 24_000;
+        let measure = 24_000;
+        let mut transmitted = vec![0.0f32; measure];
+        for i in 0..(settle + measure) {
+            let phase = std::f32::consts::TAU * half_wave * i as f32 / FS;
+            let (_, out) = chamber.step(phase.sin(), 0.0);
+            if i >= settle {
+                transmitted[i - settle] = out;
+            }
+        }
+
+        let amplitude = magnitude_at(&transmitted, half_wave, FS);
+        let measured_tl = -20.0 * amplitude.max(1e-9).log10();
+
+        assert!(
+            measured_tl > 0.2,
+            "at the half-wave point ({half_wave:.0} Hz) a lossless chamber \
+             measures 0 dB TL; this one measures {measured_tl:.3} dB, which \
+             should be clearly positive now that the chamber dissipates"
+        );
+    }
+
+    #[test]
+    fn expansion_chamber_radiates_less_energy_than_no_silencer() {
+        // The bug this stage exists to close, stated as directly as possible:
+        // "a muffler that makes the engine 9.7 dB louder is not a muffler."
+        // Two lossless scattering junctions around a cavity can only reflect
+        // and store, so in a network whose only sink is the mouth a chamber
+        // with no loss term measures *louder* than no silencer at all. This
+        // drives a whole exhaust network, chamber fitted vs. straight pipe,
+        // with the same pulse train, and requires the chamber to radiate
+        // strictly less total energy.
+        use crate::physics::plumbing::{
+            Collector, Crossover, ExhaustSystem, PipeSection, Silencer,
+        };
+
+        const FS: f32 = 48_000.0;
+
+        let exhaust = |silencers: Vec<Silencer>| ExhaustSystem {
+            primaries: vec![PipeSection::from_diameter(0.45, 0.040, 850.0); 4],
+            collector: Collector::from_diameter(4, 0.060, 0.15),
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers,
+            tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
+            tailpipe_flanged: false,
+            cutout_fitted: false,
+        };
+
+        let cylinders: Vec<crate::audio::dsp::CylinderTap> = (0..4)
+            .map(|i| crate::audio::dsp::CylinderTap {
+                evo_phase: i as f32 / 4.0,
+                bank: 0,
+            })
+            .collect();
+        let snapshot = crate::audio::dsp::EngineSnapshot::default();
+
+        let total_radiated_energy = |silencers: Vec<Silencer>| -> f64 {
+            let system = exhaust(silencers);
+            let mut network = ExhaustNetwork::new(&system, &cylinders, 1, FS, &snapshot);
+            let mut radiated = [0.0f32; 1];
+            let bank_excitations = [0.0f32; 1];
+            let mut energy = 0.0f64;
+            for i in 0..(4 * FS as usize) {
+                let pulse = if i % 240 < 6 { 1.0 } else { 0.0 };
+                let excitations = [pulse, 0.0, 0.0, 0.0];
+                network.step(&excitations, &bank_excitations, &mut radiated);
+                energy += (radiated[0] as f64).powi(2);
+            }
+            energy
+        };
+
+        let muffled = total_radiated_energy(vec![Silencer::ExpansionChamber {
+            length: 0.40,
+            area_ratio: 4.0,
+            stages: 2,
+        }]);
+        let straight = total_radiated_energy(vec![Silencer::Straight]);
+
+        assert!(
+            muffled < straight,
+            "an expansion chamber must radiate less total energy than no \
+             silencer at all: muffled={muffled:.6}, straight={straight:.6}"
+        );
     }
 
     #[test]
