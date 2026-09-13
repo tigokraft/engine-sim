@@ -4118,4 +4118,35 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn doubling_primary_length_halves_the_tuning_peak() {
+        // Long enough that the fixed taper, tailpipe and end correction are a
+        // small fraction of the total, so doubling the primary comes close to
+        // doubling the whole acoustic length and the peak comes close to
+        // halving. The stage's own claim is about the primary, not about a
+        // pipe with nothing else attached to it.
+        const FS: f32 = 48_000.0;
+        const DIAMETER: f64 = 0.045;
+        const TAPER: f64 = 0.02;
+        const TAILPIPE: f64 = 0.05;
+        let c = speed_of_sound(1.33, 287.0, 300.0);
+
+        let guess = |l: f64| c / (4.0 * (l + TAPER + TAILPIPE) as f32);
+
+        let short = 1.0f64;
+        let long = 2.0 * short;
+        let exhaust_short = single_pipe(short, TAPER, TAILPIPE, DIAMETER);
+        let exhaust_long = single_pipe(long, TAPER, TAILPIPE, DIAMETER);
+
+        let f_short = impulse_resonance_hz(&exhaust_short, FS, guess(short), 0.3);
+        let f_long = impulse_resonance_hz(&exhaust_long, FS, guess(long), 0.3);
+
+        let ratio = f_long / f_short;
+        assert!(
+            (ratio - 0.5).abs() < 0.05,
+            "doubling the primary from {short} m to {long} m moved the peak from \
+             {f_short:.1} Hz to {f_long:.1} Hz, a ratio of {ratio:.3} rather than one half"
+        );
+    }
 }
