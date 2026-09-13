@@ -288,11 +288,11 @@ impl EngineControlUnit {
         };
     }
 
-    /// Cycles through the available rev limiter cut mechanisms (Spark vs Fuel).
+    /// Cycles through the available rev limiter cut mechanisms (Spark vs Fuel vs None).
     pub fn cycle_limiter_cut(&mut self) {
         self.limiter_cut_type = match self.limiter_cut_type {
             LimiterCut::Spark => LimiterCut::Fuel,
-            LimiterCut::Fuel => LimiterCut::Spark,
+            LimiterCut::Fuel => LimiterCut::None,
             LimiterCut::None => LimiterCut::Spark,
         };
     }
@@ -1056,5 +1056,17 @@ mod tests {
         assert_eq!(ecu.cylinder_health(2), CylinderHealth::dead());
         ecu.toggle_cylinder_health(2);
         assert_eq!(ecu.cylinder_health(2), CylinderHealth::healthy());
+    }
+
+    #[test]
+    fn cycle_limiter_cut_cycles_all_mechanisms() {
+        let mut ecu = EngineControlUnit::new(7_000.0);
+        assert_eq!(ecu.limiter_cut_type, LimiterCut::Spark);
+        ecu.cycle_limiter_cut();
+        assert_eq!(ecu.limiter_cut_type, LimiterCut::Fuel);
+        ecu.cycle_limiter_cut();
+        assert_eq!(ecu.limiter_cut_type, LimiterCut::None);
+        ecu.cycle_limiter_cut();
+        assert_eq!(ecu.limiter_cut_type, LimiterCut::Spark);
     }
 }
