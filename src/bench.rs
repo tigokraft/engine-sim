@@ -199,7 +199,7 @@ impl EnginePreset {
     /// hear what a compressor does to a note.
     pub fn catalogue() -> Vec<EnginePreset> {
         type PresetSource = (&'static str, fn() -> EnginePreset);
-        let engine_files: [PresetSource; 11] = [
+        let engine_files: [PresetSource; 16] = [
             ("engines/inline_4.toml", Self::inline_four),
             ("engines/cross_plane_v8.toml", Self::cross_plane_v8),
             ("engines/flat_plane_v8.toml", Self::flat_plane_v8),
@@ -211,6 +211,11 @@ impl EnginePreset {
             ("engines/turbo_inline_6.toml", Self::turbo_inline_six),
             ("engines/turbodiesel_i4.toml", Self::turbo_diesel_four),
             ("engines/big_single.toml", Self::big_single),
+            ("engines/gt3_cup_992.toml", Self::gt3_cup_992),
+            ("engines/gt3_cup_997.toml", Self::gt3_cup_997),
+            ("engines/amg_gt3.toml", Self::amg_gt3),
+            ("engines/ferrari_458_gt3.toml", Self::ferrari_458_gt3),
+            ("engines/r8_lms_gt3.toml", Self::r8_lms_gt3),
         ];
 
         engine_files
