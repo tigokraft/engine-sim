@@ -1931,6 +1931,48 @@ mod tests {
     }
 
     #[test]
+    fn muffled_and_straight_pipe_renders_differ_for_every_silenced_preset() {
+        // The test that would have caught it: two of the catalogue's presets
+        // shipped their exhaust cutout permanently open, so `--exhaust muffled`
+        // and `--exhaust straight-pipe` rendered byte-identical WAVs. Presets
+        // whose silencer chain is `Silencer::Straight` are excluded on
+        // purpose — for those, muffled and straight-pipe are the same mode by
+        // construction, which is a separate, already-documented fact, not this
+        // bug.
+        use crate::analysis::render::RenderPlan;
+        use crate::analysis::script::{RenderScript, Segment};
+
+        for preset in EnginePreset::catalogue() {
+            let has_real_silencer = preset
+                .exhaust
+                .silencers
+                .iter()
+                .any(|s| !matches!(s, Silencer::Straight));
+            if !has_real_silencer {
+                continue;
+            }
+
+            let mut straight = preset.clone();
+            straight.exhaust = straight.exhaust.into_straight_pipe();
+
+            let script = RenderScript::new(
+                "t5_muffled_vs_straight",
+                "short idle hold to catch a bypassed silencer chain",
+                vec![Segment::hold(0.5, preset.idle, 0.15)],
+            );
+
+            let muffled = RenderPlan::new(&preset, &script).render();
+            let unbaffled = RenderPlan::new(&straight, &script).render();
+
+            assert_ne!(
+                muffled.samples, unbaffled.samples,
+                "{}: muffled and straight-pipe render identically",
+                preset.name
+            );
+        }
+    }
+
+    #[test]
     fn find_by_name_fails_loudly_on_an_unknown_preset() {
         assert!(EnginePreset::find_by_name("not-a-real-engine").is_none());
         assert!(EnginePreset::find_by_name("cross-plane v8").is_some());

@@ -4514,13 +4514,10 @@ mod tests {
         // straight-pipe more, and open-headers — no tailpipe, no crossover to
         // cross into — the most.
         //
-        // `Silencer::Absorptive` rather than `ExpansionChamber`: Stage T5
-        // documents the reactive chamber as having no loss term yet — two
-        // lossless junctions around a cavity can only reflect and store, and
-        // measure *louder* than a straight pipe — while the packed absorptive
-        // body already carries `sabine_attenuation_db_per_m`. This test is
-        // about T4's claim, not T5's open one, so it reaches for the silencer
-        // that already attenuates.
+        // `Silencer::Absorptive` rather than `ExpansionChamber`, so this test
+        // does not depend on the reactive chamber's own loss term (added in
+        // Stage T5) being tuned any particular way — it is about T4's claim,
+        // not T5's, and reaches for the silencer that has always attenuated.
         use crate::physics::plumbing::{
             Collector, Crossover, ExhaustSystem, PipeSection, Silencer,
         };
