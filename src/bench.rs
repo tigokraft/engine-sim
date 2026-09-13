@@ -1524,7 +1524,11 @@ impl Driveline {
             load: preset.load,
             pumping: CLOSED_THROTTLE_PMEP * preset.displacement() / (4.0 * PI),
             torque: 0.0,
-            exhaust_cutout: preset.exhaust.cutout_fitted,
+            // Closed regardless of whether this preset has a cutout fitted —
+            // fitment and state are different things, and a car does not
+            // drive around with its cutout open by default just because it
+            // has one.
+            exhaust_cutout: false,
             anti_lag: preset.anti_lag,
             dyno_mode: DynoMode::FreeRev,
             dyno_absorber_torque: 0.0,

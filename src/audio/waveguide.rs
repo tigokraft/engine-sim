@@ -2381,7 +2381,12 @@ pub struct ExhaustNetwork {
     /// about 7 mm of pipe, an order below the shortest length any geometry here
     /// describes.
     chain_returns: Vec<Vec<f32>>,
-    /// Whether the exhaust cutout / bypass junction is open.
+    /// Whether the exhaust cutout / bypass junction is open right now.
+    ///
+    /// Live state, always constructed closed regardless of whether the
+    /// [`ExhaustSystem`](crate::physics::plumbing::ExhaustSystem) this network
+    /// was built from has a cutout fitted at all — see
+    /// [`ExhaustSystem::cutout_fitted`](crate::physics::plumbing::ExhaustSystem::cutout_fitted).
     cutout_open: bool,
 }
 
@@ -2546,7 +2551,13 @@ impl ExhaustNetwork {
             // The mouth's reflection filter already holds part of the round
             // trip; leave it in the pipe as well and the tailpipe plays flat.
             tailpipe.set_boundary_phase_delay(mouth.phase_delay_samples());
-            tailpipe.set_steepening(exhaust.cutout_fitted || exhaust.is_open_headers());
+            // Open headers has no valve to open — the tailpipe always carries
+            // full pulses, so it steepens from construction. A cutout merely
+            // being fitted is not that: it defaults closed, and closed must
+            // sound identical to not fitted at all, so fitment plays no part
+            // here. `set_cutout` (below) is what turns steepening on once the
+            // live state actually opens.
+            tailpipe.set_steepening(exhaust.is_open_headers());
             tailpipe.tune(gamma, r, stations.tailpipe);
             tailpipes.push(tailpipe);
             mouths.push(mouth);
@@ -2590,7 +2601,11 @@ impl ExhaustNetwork {
             pre_cross_down: vec![0.0; n_banks],
             collector_returns: vec![0.0; n_banks],
             chain_returns,
-            cutout_open: exhaust.cutout_fitted,
+            // Closed regardless of fitment: a cutout being fitted at all is
+            // geometry, not a standing decision to run with it open. The live
+            // state arrives per frame through `set_cutout`, driven from the
+            // snapshot, which itself defaults closed.
+            cutout_open: false,
         }
     }
 
@@ -3970,6 +3985,70 @@ mod tests {
         assert!(
             high_open > high_closed * 2.0,
             "opening the cutout bypass must raise high-order spectral content: open={high_open}, closed={high_closed}"
+        );
+    }
+
+    #[test]
+    fn cutout_fitment_alone_does_not_open_the_cutout() {
+        // The other half of the split: `cutout_fitted` says a bypass valve
+        // exists, not that it is open. `ExhaustNetwork::new` used to seed its
+        // live `cutout_open` state straight from that fitment flag, so
+        // `cross_plane_v8` and `twin_turbo_v8` — both shipped with a cutout
+        // fitted — rendered wide open from frame zero regardless of what any
+        // caller asked for. Construct the same silencer chain with fitment
+        // true and false and, without ever calling `set_cutout`, require the
+        // renders to be bit-identical: a fitted-but-unopened cutout must sound
+        // exactly like no cutout at all.
+        use crate::physics::plumbing::{
+            Collector, Crossover, ExhaustSystem, PipeSection, Silencer,
+        };
+
+        const FS: f32 = 48_000.0;
+
+        let exhaust = |cutout_fitted: bool| ExhaustSystem {
+            primaries: vec![PipeSection::from_diameter(0.45, 0.040, 850.0); 4],
+            collector: Collector::from_diameter(4, 0.060, 0.15),
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![Silencer::ExpansionChamber {
+                length: 0.40,
+                area_ratio: 4.0,
+                stages: 2,
+            }],
+            tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
+            tailpipe_flanged: false,
+            cutout_fitted,
+        };
+
+        let cylinders: Vec<crate::audio::dsp::CylinderTap> = (0..4)
+            .map(|i| crate::audio::dsp::CylinderTap {
+                evo_phase: i as f32 / 4.0,
+                bank: 0,
+            })
+            .collect();
+        let snapshot = crate::audio::dsp::EngineSnapshot::default();
+
+        let render = |cutout_fitted: bool| -> Vec<f32> {
+            let system = exhaust(cutout_fitted);
+            let mut network = ExhaustNetwork::new(&system, &cylinders, 1, FS, &snapshot);
+            assert!(!network.is_cutout_open(), "must construct closed");
+            let mut radiated = [0.0f32; 1];
+            let bank_excitations = [0.0f32; 1];
+            let mut out = Vec::with_capacity(4800);
+            for i in 0..4800 {
+                let pulse = if i % 240 < 6 { 1.0 } else { 0.0 };
+                let excitations = [pulse, 0.0, 0.0, 0.0];
+                network.step(&excitations, &bank_excitations, &mut radiated);
+                out.push(radiated[0]);
+            }
+            out
+        };
+
+        let fitted = render(true);
+        let not_fitted = render(false);
+        assert_eq!(
+            fitted, not_fitted,
+            "a cutout fitted but never opened must render bit-identically to no cutout at all"
         );
     }
 

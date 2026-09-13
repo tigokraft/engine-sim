@@ -907,8 +907,13 @@ fn main() -> Result<()> {
         script.seconds()
     );
     for step in 0..steps {
-        let (rpm, mut controls) = script.at(step as f64 * dt);
-        controls.exhaust_cutout = preset.exhaust.cutout_fitted;
+        // The cutout's live state defaults closed, same as everywhere else --
+        // it used to be forced from `preset.exhaust.cutout_fitted` here, which
+        // meant any preset with a cutout fitted rendered wide open no matter
+        // which `--exhaust` mode was asked for, and the bug this bench exists
+        // to catch (muffled and straight-pipe rendering byte-identical) was
+        // invisible on exactly the presets that had one.
+        let (rpm, controls) = script.at(step as f64 * dt);
         block.update(dt, rpm);
         synth.set_snapshot(&source.sample(&block, rpm, dt, controls));
         synth.render(&mut chunk, CHANNELS);

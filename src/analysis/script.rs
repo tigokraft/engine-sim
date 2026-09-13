@@ -112,6 +112,8 @@ impl Segment {
             EngineControls {
                 throttle,
                 spark_cut: self.spark_cut,
+                // Closed, same as every other path: a script has no driver to
+                // reach for a cutout switch, and the default is closed anyway.
                 exhaust_cutout: false,
                 anti_lag: false,
             },
