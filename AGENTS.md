@@ -8,6 +8,12 @@ The implementation roadmap lives in [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENT
 Read the stage you are working on before touching code; each stage carries its own
 prompt, file list, formulas and required tests.
 
+How the engine *sounds* is a second, narrower plan:
+[docs/TIMBRE_PLAN.md](docs/TIMBRE_PLAN.md). Read its **Working method** section
+before any session that touches `src/audio` — it records what is already
+implemented, so it is not rediscovered, and how to diagnose a tonal problem by
+rendering rather than by reading code.
+
 ## Commit discipline (mandatory, applies to every model and every tool)
 
 - **Commit as you work.** A change that is finished is committed. Do not leave
