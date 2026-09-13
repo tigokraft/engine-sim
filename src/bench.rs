@@ -27,6 +27,7 @@ use crate::audio::{
     SnapshotSource, SynthConfig, WastegateVoicing,
 };
 use crate::environment::Environment;
+use crate::physics::control::{LimiterCut, LimiterMode};
 use crate::physics::cylinder::{deg, CylinderGeometry};
 use crate::physics::engine_block::{EngineBlock, FiringOrder};
 use crate::physics::plumbing::{
@@ -120,6 +121,10 @@ pub struct EnginePreset {
     pub aperture_positions: AperturePositions,
     /// Whether anti-lag is enabled on lift for this engine.
     pub anti_lag: bool,
+    /// Rev limiter intervention mode.
+    pub limiter_mode: LimiterMode,
+    /// Rev limiter cut mechanism.
+    pub limiter_cut: LimiterCut,
 }
 
 impl EnginePreset {
@@ -137,6 +142,8 @@ impl EnginePreset {
         block.rebuild_exhaust_banks();
         block.ecu.redline = self.redline;
         block.ecu.anti_lag = self.anti_lag;
+        block.ecu.limiter_mode = self.limiter_mode;
+        block.ecu.limiter_cut_type = self.limiter_cut;
         block
     }
 
@@ -240,6 +247,8 @@ impl EnginePreset {
             load: (3.0, 0.010, 7.0e-5),
             aperture_positions: AperturePositions::front_engine_single(),
             anti_lag: false,
+            limiter_mode: LimiterMode::RotatingStutter,
+            limiter_cut: LimiterCut::Spark,
         }
     }
 
@@ -298,6 +307,8 @@ impl EnginePreset {
             load: (6.0, 0.020, 1.3e-4),
             aperture_positions: AperturePositions::front_engine_dual(),
             anti_lag: false,
+            limiter_mode: LimiterMode::RotatingStutter,
+            limiter_cut: LimiterCut::Spark,
         }
     }
 
@@ -354,6 +365,8 @@ impl EnginePreset {
             load: (5.0, 0.014, 6.5e-5),
             aperture_positions: AperturePositions::mid_engine_dual(),
             anti_lag: false,
+            limiter_mode: LimiterMode::RotatingStutter,
+            limiter_cut: LimiterCut::Spark,
         }
     }
 
@@ -425,6 +438,8 @@ impl EnginePreset {
                 block: [0.0, -0.4, 0.45],
             },
             anti_lag: false,
+            limiter_mode: LimiterMode::RotatingStutter,
+            limiter_cut: LimiterCut::Spark,
         }
     }
 
@@ -485,6 +500,8 @@ impl EnginePreset {
                 block: [0.0, 0.7, 0.5],
             },
             anti_lag: false,
+            limiter_mode: LimiterMode::RotatingStutter,
+            limiter_cut: LimiterCut::Spark,
         }
     }
 
@@ -563,6 +580,8 @@ impl EnginePreset {
             load: (4.0, 0.013, 7.0e-5),
             aperture_positions: AperturePositions::rotary(),
             anti_lag: false,
+            limiter_mode: LimiterMode::RotatingStutter,
+            limiter_cut: LimiterCut::Spark,
         }
     }
 
@@ -619,6 +638,8 @@ impl EnginePreset {
                 block: [0.0, 0.8, 0.5],
             },
             anti_lag: true,
+            limiter_mode: LimiterMode::RotatingStutter,
+            limiter_cut: LimiterCut::Spark,
         }
     }
 
@@ -683,6 +704,8 @@ impl EnginePreset {
             load: (5.0, 0.016, 9.0e-5),
             aperture_positions: AperturePositions::front_engine_dual(),
             anti_lag: false,
+            limiter_mode: LimiterMode::RotatingStutter,
+            limiter_cut: LimiterCut::Spark,
         }
     }
 
@@ -768,6 +791,8 @@ impl EnginePreset {
                 block: [0.0, 0.2, 0.45],
             },
             anti_lag: false,
+            limiter_mode: LimiterMode::HardCut,
+            limiter_cut: LimiterCut::Spark,
         }
     }
 
@@ -886,6 +911,8 @@ impl EnginePreset {
             load: (2.2, 0.008, 4.0e-5),
             aperture_positions: AperturePositions::front_engine_single(),
             anti_lag: false,
+            limiter_mode: LimiterMode::HardCut,
+            limiter_cut: LimiterCut::Fuel,
         }
     }
 
@@ -946,6 +973,8 @@ impl EnginePreset {
                 block: [0.0, 0.7, 0.5],
             },
             anti_lag: false,
+            limiter_mode: LimiterMode::RotatingStutter,
+            limiter_cut: LimiterCut::Spark,
         }
     }
 }
@@ -1984,6 +2013,23 @@ mod tests {
                 "{}: block height <= 0 ({:?})",
                 preset.name,
                 preset.aperture_positions.block
+            );
+        }
+    }
+
+    #[test]
+    fn every_preset_configures_limiter_mode_and_cut_type() {
+        for preset in EnginePreset::catalogue() {
+            let block = preset.block(Environment::default());
+            assert_eq!(
+                block.ecu.limiter_mode, preset.limiter_mode,
+                "{}: limiter_mode mismatch",
+                preset.name
+            );
+            assert_eq!(
+                block.ecu.limiter_cut_type, preset.limiter_cut,
+                "{}: limiter_cut mismatch",
+                preset.name
             );
         }
     }
