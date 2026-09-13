@@ -551,6 +551,15 @@ impl AperturePositions {
         }
     }
 
+    /// Rear-engine dual-exhaust layout (e.g. Porsche 911 GT3 Cup).
+    pub fn rear_engine_dual() -> Self {
+        Self {
+            tailpipes: vec![[-0.10, -2.10, 0.35], [0.10, -2.10, 0.35]],
+            intake: [0.0, -1.20, 0.85],
+            block: [0.0, -1.45, 0.45],
+        }
+    }
+
     /// Front-mid rotary layout (e.g. RX-7).
     pub fn rotary() -> Self {
         Self {
