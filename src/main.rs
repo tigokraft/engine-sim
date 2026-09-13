@@ -349,6 +349,16 @@ fn simulation_thread(
                         }
                     }
                 }
+                Ok(Command::SetDynoMode(mode)) => rig.driveline.dyno_mode = mode,
+                Ok(Command::TriggerDynoPull) => rig.driveline.trigger_sweep_pull(),
+                Ok(Command::ToggleRpmHold) => rig.driveline.toggle_rpm_hold(),
+                Ok(Command::AdjustHeldRpm(delta)) => rig.driveline.nudge_held_rpm(delta),
+                Ok(Command::TrimSpark(delta)) => rig.block.ecu.nudge_spark_trim(delta),
+                Ok(Command::TrimAfr(delta)) => rig.block.ecu.nudge_afr_trim(delta),
+                Ok(Command::ResetTrims) => rig.block.ecu.reset_trims(),
+                Ok(Command::CycleLimiterMode) => rig.block.ecu.cycle_limiter_mode(),
+                Ok(Command::CycleLimiterCut) => rig.block.ecu.cycle_limiter_cut(),
+                Ok(Command::ToggleCylinder(cyl)) => rig.block.ecu.toggle_cylinder_health(cyl),
                 Err(TryRecvError::Empty) => break,
                 // The dashboard has gone: shut down rather than run headless.
                 Err(TryRecvError::Disconnected) => quit = true,
@@ -575,6 +585,41 @@ fn publish(
         }
         None => AudioHealth::default(),
     };
+
+    // --- Dyno loading & test cell ------------------------------------------
+    shared.dyno_mode = driveline.dyno_mode;
+    shared.dyno_absorber_torque = driveline.dyno_absorber_torque;
+    shared.last_pull = driveline.last_pull.clone();
+
+    // --- Combustion diagnostics & efficiency ------------------------------
+    shared.lpp_deg_atdc = block.lpp_deg_atdc();
+    shared.volumetric_efficiency = block.volumetric_efficiency();
+    shared.bsfc_g_kwh = block.bsfc_g_kwh(driveline.rpm, driveline.torque);
+
+    // --- Thermal & fluid circuits ------------------------------------------
+    shared.coolant_k = block.thermal.coolant_temperature();
+    shared.oil_k = block.thermal.oil_temperature();
+    shared.head_k = block.thermal.head_temperature();
+    shared.oil_pressure_bar = block.thermal.oil_pressure(driveline.rpm) / 100_000.0;
+
+    // --- Calibration & ECU trims -------------------------------------------
+    let load = (block.intake.pressure() / block.environment.pressure).clamp(0.0, 3.0);
+    shared.spark_advance_deg =
+        block
+            .ecu
+            .schedule_spark_advance_with_throttle(load, driveline.rpm, driveline.throttle);
+    shared.knock_retard_deg = block.ecu.knock_retard;
+    shared.spark_trim = block.ecu.spark_trim;
+    shared.afr_trim = block.ecu.afr_trim;
+    shared.actual_afr = block
+        .ecu
+        .target_afr(load, driveline.rpm, driveline.throttle);
+    shared.limiter_mode = block.ecu.limiter_mode;
+    shared.limiter_cut = block.ecu.active_cut;
+    shared.cylinder_health.clear();
+    shared
+        .cylinder_health
+        .extend((0..block.firing.len()).map(|i| block.ecu.cylinder_health(i)));
 }
 
 // ---------------------------------------------------------------------------

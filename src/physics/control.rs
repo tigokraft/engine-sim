@@ -167,6 +167,11 @@ pub struct EngineControlUnit {
     /// Maximum knock retard clamp [deg].
     pub max_knock_retard: f64,
 
+    /// Manual spark advance trim from test console [deg BTDC].
+    pub spark_trim: f64,
+    /// Manual air-fuel ratio trim from test console [-].
+    pub afr_trim: f64,
+
     /// Base Wiebe burn duration [rad].
     pub base_wiebe_duration: f64,
 
@@ -241,6 +246,9 @@ impl EngineControlUnit {
             knock_decay: 1.0,
             max_knock_retard: 15.0,
 
+            spark_trim: 0.0,
+            afr_trim: 0.0,
+
             base_wiebe_duration: 1.0471975511965976, // 60 deg
 
             redline,
@@ -252,6 +260,41 @@ impl EngineControlUnit {
 
             cylinder_health: [CylinderHealth::healthy(); MAX_CYLINDERS],
         }
+    }
+
+    /// Trims the spark advance by delta degrees, clamped to +/- 15 deg.
+    pub fn nudge_spark_trim(&mut self, delta: f64) {
+        self.spark_trim = (self.spark_trim + delta).clamp(-15.0, 15.0);
+    }
+
+    /// Trims the target AFR by delta, clamped to +/- 3.0.
+    pub fn nudge_afr_trim(&mut self, delta: f64) {
+        self.afr_trim = (self.afr_trim + delta).clamp(-3.0, 3.0);
+    }
+
+    /// Resets live calibration trims to nominal factory values.
+    pub fn reset_trims(&mut self) {
+        self.spark_trim = 0.0;
+        self.afr_trim = 0.0;
+        self.cylinder_health = [CylinderHealth::healthy(); MAX_CYLINDERS];
+    }
+
+    /// Cycles through the available rev limiter modes.
+    pub fn cycle_limiter_mode(&mut self) {
+        self.limiter_mode = match self.limiter_mode {
+            LimiterMode::HardCut => LimiterMode::SoftCut,
+            LimiterMode::SoftCut => LimiterMode::RotatingStutter,
+            LimiterMode::RotatingStutter => LimiterMode::HardCut,
+        };
+    }
+
+    /// Cycles through the available rev limiter cut mechanisms (Spark vs Fuel).
+    pub fn cycle_limiter_cut(&mut self) {
+        self.limiter_cut_type = match self.limiter_cut_type {
+            LimiterCut::Spark => LimiterCut::Fuel,
+            LimiterCut::Fuel => LimiterCut::Spark,
+            LimiterCut::None => LimiterCut::Spark,
+        };
     }
 
     /// Builder enabling or disabling anti-lag system.
@@ -291,6 +334,22 @@ impl EngineControlUnit {
     pub fn set_cylinder_health(&mut self, cylinder: usize, health: CylinderHealth) {
         if cylinder < MAX_CYLINDERS {
             self.cylinder_health[cylinder] = health;
+        }
+    }
+
+    /// Cycles cylinder operational health (Healthy -> DeadPlug -> DeadInjector -> Dead -> Healthy).
+    pub fn toggle_cylinder_health(&mut self, cylinder: usize) {
+        if cylinder < MAX_CYLINDERS {
+            let current = self.cylinder_health[cylinder];
+            self.cylinder_health[cylinder] = if current.spark_ok && current.fuel_ok {
+                CylinderHealth::dead_plug()
+            } else if !current.spark_ok && current.fuel_ok {
+                CylinderHealth::dead_injector()
+            } else if current.spark_ok && !current.fuel_ok {
+                CylinderHealth::dead()
+            } else {
+                CylinderHealth::healthy()
+            };
         }
     }
 
@@ -424,8 +483,8 @@ impl EngineControlUnit {
             0.0
         };
 
-        let total = speed_advance + load_offset - self.knock_retard;
-        total.clamp(0.0, self.max_advance)
+        let total = speed_advance + load_offset - self.knock_retard + self.spark_trim;
+        total.clamp(-10.0, self.max_advance)
     }
 
     /// Evaluates Wiebe spark angle [rad, cycle coords] from load and speed.
@@ -477,27 +536,28 @@ impl EngineControlUnit {
     pub fn target_afr(&self, load: f64, rpm: f64, throttle: f64) -> f64 {
         // Anti-lag overrun fuelling: rich mixture into the exhaust manifold
         if self.is_anti_lag_active(throttle, rpm) {
-            return self.anti_lag_afr;
+            return (self.anti_lag_afr + self.afr_trim).clamp(9.0, 22.0);
         }
 
         // High load or wide throttle: WOT enrichment for peak power and charge cooling
-        if throttle >= 0.70 || load >= 0.85 {
+        let base = if throttle >= 0.70 || load >= 0.85 {
             let t_blend = ((throttle - 0.70) / 0.25).clamp(0.0, 1.0);
             let l_blend = ((load - 0.70) / 0.25).clamp(0.0, 1.0);
             let wot_blend = t_blend.max(l_blend);
-            return self.stoich_afr + wot_blend * (self.wot_afr - self.stoich_afr);
-        }
-
-        // Moderate speed and light-to-medium load: lean cruise (only at part throttle)
-        if throttle < 0.50 && (1_500.0..=3_800.0).contains(&rpm) && (0.25..=0.65).contains(&load) {
+            self.stoich_afr + wot_blend * (self.wot_afr - self.stoich_afr)
+        } else if throttle < 0.50
+            && (1_500.0..=3_800.0).contains(&rpm)
+            && (0.25..=0.65).contains(&load)
+        {
             let rpm_factor = (1.0 - ((rpm - 2_650.0) / 1_150.0).abs()).clamp(0.0, 1.0);
             let load_factor = (1.0 - ((load - 0.45) / 0.20).abs()).clamp(0.0, 1.0);
             let cruise_blend = rpm_factor * load_factor;
-            return self.stoich_afr + cruise_blend * (self.cruise_afr - self.stoich_afr);
-        }
+            self.stoich_afr + cruise_blend * (self.cruise_afr - self.stoich_afr)
+        } else {
+            self.idle_afr
+        };
 
-        // Idle or light low-speed load: stoichiometric
-        self.idle_afr
+        (base + self.afr_trim).clamp(9.0, 22.0)
     }
 }
 
@@ -958,5 +1018,43 @@ mod tests {
             .with_limiter_cut_type(LimiterCut::Spark);
         assert_eq!(ecu.limiter_mode, LimiterMode::RotatingStutter);
         assert_eq!(ecu.limiter_cut_type, LimiterCut::Spark);
+    }
+
+    #[test]
+    fn manual_calibration_trims_modify_spark_and_afr() {
+        let mut ecu = EngineControlUnit::new(7_000.0);
+        let base_adv = ecu.schedule_spark_advance(0.5, 3_000.0);
+        let base_afr = ecu.target_afr(0.5, 3_000.0, 0.4);
+
+        // Nudge spark advance by +3 degrees
+        ecu.nudge_spark_trim(3.0);
+        let trimmed_adv = ecu.schedule_spark_advance(0.5, 3_000.0);
+        assert!((trimmed_adv - (base_adv + 3.0)).abs() < 1e-6);
+
+        // Nudge AFR by -1.2 (enrich)
+        ecu.nudge_afr_trim(-1.2);
+        let trimmed_afr = ecu.target_afr(0.5, 3_000.0, 0.4);
+        assert!((trimmed_afr - (base_afr - 1.2)).abs() < 1e-6);
+
+        // Reset trims
+        ecu.reset_trims();
+        assert_eq!(ecu.spark_trim, 0.0);
+        assert_eq!(ecu.afr_trim, 0.0);
+        assert_eq!(ecu.schedule_spark_advance(0.5, 3_000.0), base_adv);
+        assert_eq!(ecu.target_afr(0.5, 3_000.0, 0.4), base_afr);
+    }
+
+    #[test]
+    fn cylinder_health_toggling_cycles_states() {
+        let mut ecu = EngineControlUnit::new(7_000.0);
+        assert_eq!(ecu.cylinder_health(2), CylinderHealth::healthy());
+        ecu.toggle_cylinder_health(2);
+        assert_eq!(ecu.cylinder_health(2), CylinderHealth::dead_plug());
+        ecu.toggle_cylinder_health(2);
+        assert_eq!(ecu.cylinder_health(2), CylinderHealth::dead_injector());
+        ecu.toggle_cylinder_health(2);
+        assert_eq!(ecu.cylinder_health(2), CylinderHealth::dead());
+        ecu.toggle_cylinder_health(2);
+        assert_eq!(ecu.cylinder_health(2), CylinderHealth::healthy());
     }
 }

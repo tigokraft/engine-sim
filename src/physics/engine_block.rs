@@ -291,6 +291,19 @@ impl PhaseRing {
         self.cells.iter().fold(0.0f64, |a, c| a.max(c.pressure))
     }
 
+    /// Crank angle at which cylinder pressure peaks [deg, 0..720].
+    pub fn peak_pressure_angle(&self) -> f64 {
+        let mut best_i = 0;
+        let mut best_p = 0.0f64;
+        for (i, cell) in self.cells.iter().enumerate() {
+            if cell.pressure > best_p {
+                best_p = cell.pressure;
+                best_i = i;
+            }
+        }
+        best_i as f64 + 0.5
+    }
+
     /// Net indicated work over the logged cycle, `integral P dV` [J].
     ///
     /// Trapezoidal over the 720 cells with `dV = (dV/dtheta) dtheta`, which is
@@ -1668,6 +1681,47 @@ impl EngineBlock {
     pub fn latch_now(&mut self) {
         self.master.latch = self.model.latch(&self.master.cylinder, self.omega);
     }
+
+    /// Location of peak cylinder pressure relative to compression TDC (360 deg) [deg ATDC].
+    pub fn lpp_deg_atdc(&self) -> f64 {
+        let angle = self.ring.peak_pressure_angle();
+        if angle >= 360.0 {
+            angle - 360.0
+        } else {
+            angle + 360.0
+        }
+    }
+
+    /// Volumetric efficiency of the master cylinder [-].
+    ///
+    /// Ratio of trapped air mass to the theoretical air mass occupying the cylinder displacement
+    /// at ambient intake conditions: eta_v = m_trapped / (rho_amb * V_disp_cyl).
+    pub fn volumetric_efficiency(&self) -> f64 {
+        let r_air = 287.058; // specific gas constant [J/(kg K)]
+        let t_amb = self.environment.temperature.max(200.0);
+        let p_amb = self.environment.pressure.max(50_000.0);
+        let rho_amb = p_amb / (r_air * t_amb);
+        let cyl_disp = self.model.geometry.displacement().max(1e-6);
+        let trapped = self.master.cylinder.mass.max(0.0);
+        (trapped / (rho_amb * cyl_disp)).clamp(0.0, 3.0)
+    }
+
+    /// Brake specific fuel consumption [g / (kW h)].
+    pub fn bsfc_g_kwh(&self, rpm: f64, brake_power_kw: f64) -> f64 {
+        if brake_power_kw <= 0.1 || rpm <= 100.0 {
+            return 0.0;
+        }
+        let afr = match self.model.combustion {
+            HeatRelease::Spark(_) => self.ecu.target_afr(0.8, rpm, 1.0),
+            HeatRelease::Compression(_) => 18.0, // lean diesel combustion
+        }
+        .max(8.0);
+        let trapped_fuel = self.master.cylinder.mass / afr;
+        let n_cyl = self.firing.len() as f64;
+        let fuel_kg_s = trapped_fuel * (rpm / 120.0) * n_cyl;
+        let bsfc = (fuel_kg_s * 3_600.0 * 1_000.0) / brake_power_kw;
+        bsfc.clamp(100.0, 2_000.0)
+    }
 }
 
 #[cfg(test)]
@@ -2422,6 +2476,26 @@ mod tests {
         assert!(
             (dead_evo - manifold_p).abs() < 1e-3,
             "dead cylinder EVO pressure ({dead_evo:.1}) must equal manifold ({manifold_p:.1})"
+        );
+    }
+
+    #[test]
+    fn lpp_and_volumetric_efficiency_diagnostics() {
+        let mut block = EngineBlock::cross_plane_v8(Environment::default());
+        for _ in 0..600 {
+            block.update(1.0 / 240.0, 3_000.0);
+        }
+
+        let lpp = block.lpp_deg_atdc();
+        assert!(
+            (5.0..30.0).contains(&lpp),
+            "LPP must sit safely after compression TDC (360 deg) in expansion: got {lpp:.1} deg ATDC"
+        );
+
+        let eta_v = block.volumetric_efficiency();
+        assert!(
+            (0.5..1.5).contains(&eta_v),
+            "naturally aspirated volumetric efficiency must be plausible: got {eta_v:.2}"
         );
     }
 }

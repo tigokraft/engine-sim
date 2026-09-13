@@ -649,6 +649,29 @@ impl EngineThermal {
         chamber_wall_temperature(self.block.temperature, chamber_heat, area)
     }
 
+    /// Coolant bulk temperature [K].
+    pub fn coolant_temperature(&self) -> f64 {
+        self.block.temperature
+    }
+
+    /// Cylinder head metal temperature [K].
+    pub fn head_temperature(&self) -> f64 {
+        self.block.temperature + (1.0 - self.cold_fraction()) * 8.0
+    }
+
+    /// Oil gallery pressure [Pa] driven by crankshaft-driven pump with relief valve.
+    pub fn oil_pressure(&self, rpm: f64) -> f64 {
+        if rpm <= 0.0 {
+            return 0.0;
+        }
+        let visc = OilViscosity::default().friction_multiplier(self.oil_temperature());
+        let speed_ratio = (rpm / 1000.0).max(0.1);
+        let dynamic_bar = (1.5 + speed_ratio * 0.8) * visc.sqrt();
+        let relief_bar = 5.5;
+        let p_bar = dynamic_bar.min(relief_bar);
+        p_bar * 100_000.0
+    }
+
     /// How cold the engine still is, `1` at ambient and `0` on the thermostat [-].
     ///
     /// What a fast-idle schedule and a warm-up enrichment are both written
@@ -781,6 +804,24 @@ mod tests {
         assert!(
             chamber_wall_temperature(363.15, 1e9, area) <= MAX_WALL_TEMPERATURE,
             "the head must not be allowed past its material limit"
+        );
+    }
+
+    #[test]
+    fn oil_pressure_scales_with_rpm_and_viscosity() {
+        let thermal =
+            EngineThermal::soaked(150.0, &ExhaustSystem::default_for_cylinders(4, 1), 293.15);
+        assert_eq!(thermal.oil_pressure(0.0), 0.0);
+        let p_idle = thermal.oil_pressure(850.0);
+        let p_mid = thermal.oil_pressure(3_500.0);
+        assert!(
+            p_idle > 100_000.0,
+            "idle oil pressure must exceed 1 bar: {p_idle} Pa"
+        );
+        assert!(p_mid > p_idle, "oil pressure must rise with engine rpm");
+        assert!(
+            p_mid <= 560_000.0,
+            "oil pressure relief valve must cap at ~5.5 bar: {p_mid} Pa"
         );
     }
 }
