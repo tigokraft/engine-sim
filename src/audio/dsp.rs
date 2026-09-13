@@ -4976,11 +4976,13 @@ mod tests {
         // blowdown is already under way at sample zero fired before the window,
         // not inside it.
         synth.render(&mut buffer, 2);
-        let mut above: Vec<bool> = (0..n).map(|i| synth.excitations[i] > threshold).collect();
+        let mut above: Vec<bool> = (0..n)
+            .map(|i| synth.excitations[i] > threshold * synth.launch.value())
+            .collect();
         for _ in 1..samples {
             synth.render(&mut buffer, 2);
             for i in 0..n {
-                let now = synth.excitations[i] > threshold;
+                let now = synth.excitations[i] > threshold * synth.launch.value();
                 if now && !above[i] {
                     fires[i] += 1;
                 }
