@@ -1141,6 +1141,21 @@ impl Pop {
     }
 }
 
+/// Corner of the backfire pulse's bandlimiting lowpass, as a fraction of the
+/// sample rate [-].
+///
+/// A pop's carrier is broadband noise, uncorrelated from one sample to the
+/// next and therefore full-bandwidth on its own regardless of how gently the
+/// envelope around it rises. Reaching the output clipper still that wide, its
+/// harmonics fold back over Nyquist as the inharmonic rasp the pops were
+/// measured with. A real backfire's crack lives well under 10 kHz, so 0.2 of
+/// the sample rate (9.6 kHz at 48 kHz) keeps it, and the tenth-order cascade
+/// below has fallen to the render's own noise floor well before 0.45 * fs.
+const BACKFIRE_LOWPASS_FRACTION: f32 = 0.20;
+
+/// Butterworth Q values for the pulse's tenth-order (five-biquad) lowpass [-].
+const BACKFIRE_LOWPASS_Q: [f32; 5] = [0.5062, 0.5612, 0.7071, 1.1013, 3.1962];
+
 /// Fixed pool of overlapping pops.
 ///
 /// Pops overlap whenever one is still ringing as the next lights off, which a
@@ -1152,6 +1167,12 @@ impl Pop {
 struct PopPool {
     slots: [Pop; 4],
     next: usize,
+    /// Bandlimits the pool's combined output. Shared across slots rather than
+    /// one per pop: filtering is linear, so filtering the sum of overlapping
+    /// pops is identical to filtering each and summing, at a quarter of the
+    /// state. Retuned, not reset, on every trigger so state carries through a
+    /// stutter of overlapping pops without a click.
+    bandlimit: [Biquad; 5],
 }
 
 impl PopPool {
@@ -1164,6 +1185,10 @@ impl PopPool {
         noise_depth: f32,
         age: f32,
     ) {
+        let cutoff = BACKFIRE_LOWPASS_FRACTION * sample_rate;
+        for (filter, q) in self.bandlimit.iter_mut().zip(BACKFIRE_LOWPASS_Q) {
+            filter.set_coeffs(BiquadCoeffs::lowpass(sample_rate, cutoff, q));
+        }
         // Prefer an idle slot; fall back to round-robin stealing.
         let slot = self
             .slots
@@ -1182,12 +1207,19 @@ impl PopPool {
                 sum += slot.process(noise.next_bipolar());
             }
         }
-        sum
+        let stage1 = self.bandlimit[0].process(sum);
+        let stage2 = self.bandlimit[1].process(stage1);
+        let stage3 = self.bandlimit[2].process(stage2);
+        let stage4 = self.bandlimit[3].process(stage3);
+        self.bandlimit[4].process(stage4)
     }
 
     fn reset(&mut self) {
         self.slots = [Pop::default(); 4];
         self.next = 0;
+        for filter in self.bandlimit.iter_mut() {
+            filter.reset();
+        }
     }
 }
 
