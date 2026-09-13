@@ -336,6 +336,29 @@ pub struct CylinderIndex {
     pub firing_offset: f64,
 }
 
+/// Bank angle from the block's own reference axis, one side of a vee [rad].
+///
+/// A single-bank engine is upright: every cylinder's bore axis coincides with
+/// the block's own reference axis, angle zero. Every vee this crate builds is
+/// a 90-degree vee — nothing here records a shallower or wider one — so a
+/// second bank splits symmetrically at plus or minus 45 degrees. This is the
+/// one geometric fact [`FiringOrder::shaking_force`] rests on beyond firing
+/// order and phase, and the reason a crossplane and a flatplane V8, which
+/// share both bank angle and bank split, can still differ in the force they
+/// put into the block: the two banks' phase relationship, not the angle, is
+/// what changes between them.
+pub fn bank_angle(bank: u8, bank_count: usize) -> f64 {
+    if bank_count <= 1 {
+        return 0.0;
+    }
+    let half_vee = std::f64::consts::FRAC_PI_4;
+    if bank == 0 {
+        -half_vee
+    } else {
+        half_vee
+    }
+}
+
 /// The firing arrangement of a whole block.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FiringOrder {
@@ -449,6 +472,31 @@ impl FiringOrder {
                 }
             })
             .collect()
+    }
+
+    /// Reciprocating shaking-force resultant the whole block feels this
+    /// instant, resolved onto the block's own in-plane axes [N]: `x` across
+    /// the vee, `y` along the axis a single-bank engine's cylinders all share.
+    ///
+    /// Every cylinder's own inertia force acts along its own bore axis only;
+    /// this reads each one out of `geometry` at its own crank phase — the same
+    /// `theta_master - dtheta_firing_i` convention the module doc above uses to
+    /// index the phase ring — and projects it through [`bank_angle`] before
+    /// summing, the same way [`crate::audio`]'s per-sample synthesis sums
+    /// `pressure_slope_at` over the cylinders. A single bank's cylinders all
+    /// share one axis, so this collapses to a plain sum along `y`; a vee's two
+    /// banks point apart, and it is that projection — not the firing order —
+    /// that lets a crossplane and a flatplane V8 differ here.
+    pub fn shaking_force(&self, geometry: &CylinderGeometry, theta: f64, omega: f64) -> (f64, f64) {
+        let bank_count = self.bank_count();
+        let (mut x, mut y) = (0.0, 0.0);
+        for cylinder in &self.cylinders {
+            let force = geometry.inertia_force(theta - cylinder.firing_offset, omega);
+            let angle = bank_angle(cylinder.bank, bank_count);
+            x += force * angle.sin();
+            y += force * angle.cos();
+        }
+        (x, y)
     }
 
     /// Cross-plane V8, firing order 1-8-7-2-6-5-4-3.

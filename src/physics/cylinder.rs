@@ -252,6 +252,25 @@ impl CylinderGeometry {
             * self.d2position_dtheta2(theta)
             * self.dposition_dtheta(theta)
     }
+
+    /// Reciprocating shaking force along the cylinder's own bore axis [N].
+    ///
+    /// ```text
+    /// F_i(theta) = -m * omega^2 * x''(theta)
+    /// ```
+    ///
+    /// The reaction the accelerating piston (and the share of the rod lumped
+    /// with it) presses back into the block through the cylinder wall and main
+    /// bearings, at the same near-constant-speed approximation as
+    /// [`CylinderGeometry::inertia_torque`]. This is the mechanism that shakes
+    /// the case the engine is bolted to; it says nothing about where this
+    /// cylinder's axis points or how it phases against any other cylinder's —
+    /// resolving several of these onto the block's own axes, at their own
+    /// crank phase and bank angle, is what
+    /// [`crate::physics::engine_block::FiringOrder::shaking_force`] does.
+    pub fn inertia_force(&self, theta: f64, omega: f64) -> f64 {
+        -self.reciprocating_mass * omega * omega * self.d2position_dtheta2(theta)
+    }
 }
 
 /// Working-gas properties, blended between fresh charge and burned products.
