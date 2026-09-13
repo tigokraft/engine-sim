@@ -1142,6 +1142,7 @@ mod tests {
                 "engines/ferrari_458_gt3.toml",
                 EnginePreset::ferrari_458_gt3(),
             ),
+            ("engines/r8_lms_gt3.toml", EnginePreset::r8_lms_gt3()),
         ];
 
         for (path, preset) in &presets {

@@ -1266,6 +1266,70 @@ impl EnginePreset {
             limiter_cut: LimiterCut::Spark,
         }
     }
+
+    /// 5.2 litre Audi R8 LMS GT3 naturally aspirated 90-degree V10 race engine.
+    ///
+    /// Uneven-bank 72-degree firing pattern with individual throttles and
+    /// short, high-mounted race extractors screaming to 8800 rpm, paired with
+    /// intense straight-cut transmission whine.
+    pub fn r8_lms_gt3() -> Self {
+        Self {
+            name: "Audi R8 LMS GT3",
+            note: "5.2L 90 deg V10 at 8800 rpm: uneven-bank acoustic fire and straight-cut race gear scream.",
+            model: CylinderModel {
+                geometry: CylinderGeometry::new(0.0845, 0.0928, 0.1540, 12.5),
+                valves: ValveTrain {
+                    intake: ValveEvent::new(deg(706.0), deg(274.0), 0.0125, 0.0380, 0.68),
+                    exhaust: ValveEvent::new(deg(484.0), deg(270.0), 0.0115, 0.0325, 0.65),
+                },
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    deg(344.0),
+                    deg(49.0),
+                    5.0,
+                    2.1,
+                    0.98,
+                )),
+                ..CylinderModel::default()
+            },
+            firing: FiringOrder::v10(),
+            induction: Induction::NaturallyAspirated,
+            mechanical: MechanicalSpec {
+                gear_whine: Some(ImpulsiveSpec::order(36.0, 0.30)),
+                timing_chain: Some(ImpulsiveSpec::order(24.0, 0.20)),
+                intake_valve: Some(ImpulsiveSpec::per_cylinder(0.50)),
+                ..MechanicalSpec::default()
+            },
+            exhaust: ExhaustSystem {
+                primaries: vec![PipeSection::from_diameter(0.35, 0.040, 910.0); 10],
+                collector: Collector::from_diameter(5, 0.065, 0.15),
+                secondary: vec![],
+                crossover: Crossover::XPipe { position: 0.65 },
+                silencers: vec![Silencer::Straight],
+                tailpipe: PipeSection::from_diameter(0.80, 0.065, 700.0),
+                tailpipe_flanged: true,
+                cutout: true,
+            },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.18, 0.046, 310.0); 10],
+                plenum_volume: 0.0,
+                throttle: ThrottleLayout::IndividualBodies { bore: 0.050 },
+                airbox: None,
+                snorkel: None,
+                trumpet_flanged: true,
+            },
+            block_mass: 210.0,
+            bore_spacing: 0.090,
+            redline: 8_800.0,
+            float_rpm: default_float_rpm(8_800.0),
+            idle: 1_050.0,
+            inertia: 0.19,
+            load: (4.8, 0.014, 5.5e-5),
+            aperture_positions: AperturePositions::mid_engine_dual(),
+            anti_lag: false,
+            limiter_mode: LimiterMode::RotatingStutter,
+            limiter_cut: LimiterCut::Spark,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
