@@ -223,6 +223,35 @@ impl CylinderGeometry {
     pub fn mean_piston_speed(&self, rpm: f64) -> f64 {
         2.0 * self.stroke * rpm / 60.0
     }
+
+    /// Reciprocating inertia torque reflected onto the crank [N*m].
+    ///
+    /// ```text
+    /// tau_i(theta) = -m * omega^2 * x''(theta) * x'(theta)
+    /// ```
+    ///
+    /// Piston acceleration at near-constant crank speed is `x_ddot = omega^2 *
+    /// x''(theta)` — the angular-acceleration (`alpha`) term is second order in
+    /// an already small quantity, and is left out. The inertia *force* along
+    /// the bore is `-m * x_ddot`; by the virtual-work relation between a force
+    /// along the slider and the torque it reflects onto the crank
+    /// (`tau * omega = F * x_dot`, `x_dot = omega * x'(theta)`), that force
+    /// reflects as `F * x'(theta)`, which is this expression. It carries no
+    /// bank angle and no sum over cylinders — it acts on the crank the engine
+    /// already has, not on the case bolted around it — which is what keeps it
+    /// a separate mechanism from the shaking force that shakes the block.
+    ///
+    /// Zero net work over a full revolution: `x'' * x'` is `d/dtheta[(x')^2 /
+    /// 2]`, the derivative of a periodic function, so it integrates to zero
+    /// over any whole number of periods. It ripples the crank speed; it does
+    /// not add or remove energy from it.
+    pub fn inertia_torque(&self, theta: f64, omega: f64) -> f64 {
+        -self.reciprocating_mass
+            * omega
+            * omega
+            * self.d2position_dtheta2(theta)
+            * self.dposition_dtheta(theta)
+    }
 }
 
 /// Working-gas properties, blended between fresh charge and burned products.
