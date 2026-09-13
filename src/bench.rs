@@ -1069,6 +1069,71 @@ impl EnginePreset {
             limiter_cut: LimiterCut::Spark,
         }
     }
+
+    /// 3.8 litre Porsche 911 GT3 Cup (Type 997.2) Mezger flat-six race engine.
+    ///
+    /// The legendary dry-sump Mezger race block with titanium connecting rods,
+    /// solid lifter valvetrain chatter, equal-length race headers, and a searing
+    /// 8500 rpm redline rooted in Porsche's 1998 Le Mans-winning 911 GT1.
+    pub fn gt3_cup_997() -> Self {
+        Self {
+            name: "Porsche 911 GT3 Cup (997.2)",
+            note: "3.8L Mezger flat-six at 8500 rpm: dry-sump mechanical clatter and GT1 lineage.",
+            model: CylinderModel {
+                geometry: CylinderGeometry::new(0.1027, 0.0764, 0.1300, 12.6),
+                valves: ValveTrain {
+                    intake: ValveEvent::new(deg(704.0), deg(270.0), 0.0122, 0.0400, 0.67),
+                    exhaust: ValveEvent::new(deg(486.0), deg(265.0), 0.0112, 0.0340, 0.64),
+                },
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    deg(343.0),
+                    deg(51.0),
+                    5.0,
+                    2.1,
+                    0.98,
+                )),
+                ..CylinderModel::default()
+            },
+            firing: FiringOrder::boxer_six(),
+            induction: Induction::NaturallyAspirated,
+            mechanical: MechanicalSpec {
+                gear_whine: Some(ImpulsiveSpec::order(32.0, 0.30)),
+                intake_valve: Some(ImpulsiveSpec::per_cylinder(0.60)),
+                exhaust_valve: Some(ImpulsiveSpec::per_cylinder(0.60)),
+                timing_chain: Some(ImpulsiveSpec::order(24.0, 0.25)),
+                ..MechanicalSpec::default()
+            },
+            exhaust: ExhaustSystem {
+                primaries: vec![PipeSection::from_diameter(0.40, 0.042, 890.0); 6],
+                collector: Collector::from_diameter(3, 0.058, 0.16),
+                secondary: vec![],
+                crossover: Crossover::None,
+                silencers: vec![Silencer::Straight],
+                tailpipe: PipeSection::from_diameter(0.80, 0.058, 660.0),
+                tailpipe_flanged: true,
+                cutout: true,
+            },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.18, 0.046, 310.0); 6],
+                plenum_volume: 3.2e-3,
+                throttle: ThrottleLayout::IndividualBodies { bore: 0.048 },
+                airbox: Some(PipeSection::from_diameter(0.14, 0.080, 300.0)),
+                snorkel: Some(PipeSection::from_diameter(0.22, 0.075, 300.0)),
+                trumpet_flanged: true,
+            },
+            block_mass: 155.0,
+            bore_spacing: 0.118,
+            redline: 8_500.0,
+            float_rpm: default_float_rpm(8_500.0),
+            idle: 1_150.0,
+            inertia: 0.16,
+            load: (4.2, 0.013, 5.0e-5),
+            aperture_positions: AperturePositions::rear_engine_dual(),
+            anti_lag: false,
+            limiter_mode: LimiterMode::RotatingStutter,
+            limiter_cut: LimiterCut::Spark,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
