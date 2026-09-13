@@ -1180,6 +1180,13 @@ impl Driveline {
         self.manual_cut || self.on_the_limiter()
     }
 
+    /// Whether drive torque is cut this frame by manual cut or by the ECU rev limiter.
+    pub fn is_cutting(&self, block: &EngineBlock) -> bool {
+        self.manual_cut
+            || block.ecu.active_cut != LimiterCut::None
+            || (self.rpm >= self.redline && block.ecu.limiter_cut_type != LimiterCut::None)
+    }
+
     /// Moves the pedal, clamped to its travel.
     pub fn nudge_throttle(&mut self, delta: f64) {
         self.throttle_target = (self.throttle_target + delta).clamp(0.0, 1.0);
@@ -1242,7 +1249,7 @@ impl Driveline {
                 // The block solves torque for a speed, not for a throttle, so the pedal
                 // is applied here. See the module docs.
                 self.torque = block.mean_brake_torque(self.rpm);
-                let drive = if self.cutting() {
+                let drive = if self.is_cutting(block) {
                     0.0
                 } else {
                     self.torque * (0.05 + 0.95 * effective)
@@ -1266,7 +1273,7 @@ impl Driveline {
 
                 let effective = self.throttle;
                 self.torque = block.mean_brake_torque(self.rpm);
-                let drive = if self.cutting() {
+                let drive = if self.is_cutting(block) {
                     0.0
                 } else {
                     self.torque * (0.05 + 0.95 * effective)
