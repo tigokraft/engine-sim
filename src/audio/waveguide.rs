@@ -2546,6 +2546,7 @@ impl ExhaustNetwork {
             // The mouth's reflection filter already holds part of the round
             // trip; leave it in the pipe as well and the tailpipe plays flat.
             tailpipe.set_boundary_phase_delay(mouth.phase_delay_samples());
+            tailpipe.set_steepening(exhaust.cutout || exhaust.is_open_headers());
             tailpipe.tune(gamma, r, stations.tailpipe);
             tailpipes.push(tailpipe);
             mouths.push(mouth);
@@ -2664,6 +2665,9 @@ impl ExhaustNetwork {
     /// Sets whether the exhaust cutout bypass junction is open.
     pub fn set_cutout(&mut self, open: bool) {
         self.cutout_open = open;
+        for tp in &mut self.tailpipes {
+            tp.set_steepening(open);
+        }
     }
 
     /// Returns whether the exhaust cutout is currently open.
@@ -3967,5 +3971,34 @@ mod tests {
             high_open > high_closed * 2.0,
             "opening cutout bypass must raise high-order spectral content: open={high_open}, closed={high_closed}"
         );
+    }
+
+    #[test]
+    fn open_headers_and_cutout_enable_tailpipe_steepening() {
+        use crate::physics::plumbing::ExhaustSystem;
+
+        let primaries =
+            vec![crate::physics::plumbing::PipeSection::from_diameter(0.60, 0.040, 850.0); 4];
+        let collector = crate::physics::plumbing::Collector::from_diameter(4, 0.060, 0.15);
+        let exhaust = ExhaustSystem::open_headers(primaries, collector);
+        let cylinders = vec![
+            crate::audio::dsp::CylinderTap {
+                evo_phase: 0.0,
+                bank: 0,
+            },
+            crate::audio::dsp::CylinderTap {
+                evo_phase: 0.5,
+                bank: 0,
+            },
+        ];
+        let snapshot = crate::audio::dsp::EngineSnapshot::default();
+        let mut network = ExhaustNetwork::new(&exhaust, &cylinders, 1, 48_000.0, &snapshot);
+        assert!(network.tailpipes[0].steepening());
+
+        network.set_cutout(false);
+        assert!(!network.tailpipes[0].steepening());
+
+        network.set_cutout(true);
+        assert!(network.tailpipes[0].steepening());
     }
 }
