@@ -18,7 +18,7 @@ use crate::audio::{
 };
 use crate::bench::EnginePreset;
 use crate::physics::control::{LimiterCut, LimiterMode};
-use crate::physics::cylinder::{deg, CylinderGeometry};
+use crate::physics::cylinder::{default_reciprocating_mass, deg, CylinderGeometry};
 use crate::physics::engine_block::{CylinderIndex, FiringOrder};
 use crate::physics::plumbing::{
     Collector, Crossover, ExhaustSystem, IntakeSystem, MufflerGeometry, PipeSection, Silencer,
@@ -92,6 +92,11 @@ pub struct CylinderConfig {
     pub exhaust_diameter: f64,
     #[serde(default = "default_exhaust_discharge")]
     pub exhaust_discharge_coeff: f64,
+    /// Reciprocating mass override [kg]; absent lets [`CylinderGeometry::new`]
+    /// default it from `bore`, which is why no existing engine file has to
+    /// name one.
+    #[serde(default)]
+    pub reciprocating_mass: Option<f64>,
 }
 
 fn default_intake_discharge() -> f64 {
@@ -394,6 +399,12 @@ impl EngineConfig {
             exhaust_lift: valves.exhaust.max_lift,
             exhaust_diameter: valves.exhaust.diameter,
             exhaust_discharge_coeff: valves.exhaust.discharge_coefficient,
+            // Only named when it differs from what `bore` alone would give,
+            // so round-tripping a preset that never set one does not clutter
+            // its file with a value that was always implicit.
+            reciprocating_mass: (cyl_geom.reciprocating_mass
+                != default_reciprocating_mass(cyl_geom.bore))
+            .then_some(cyl_geom.reciprocating_mass),
         };
 
         let combustion = match &preset.model.combustion {
@@ -651,12 +662,15 @@ impl EngineConfig {
         let name: &'static str = Box::leak(self.identity.name.clone().into_boxed_str());
         let note: &'static str = Box::leak(self.identity.note.clone().into_boxed_str());
 
-        let geometry = CylinderGeometry::new(
+        let mut geometry = CylinderGeometry::new(
             self.cylinder.bore,
             self.cylinder.stroke,
             self.cylinder.rod_length,
             self.cylinder.compression_ratio,
         );
+        if let Some(mass) = self.cylinder.reciprocating_mass {
+            geometry = geometry.with_reciprocating_mass(mass);
+        }
 
         let valves = ValveTrain {
             intake: ValveEvent::new(
