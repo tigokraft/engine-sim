@@ -33,6 +33,92 @@ the midrange drained out underneath.
 
 ---
 
+## Measured, 2026-09-13
+
+Four symptoms were reported together — "straight piped still sounds muffled",
+"pops sound raspy", "engines sound electronic", "the actual engine is very low".
+They are not four problems. They are one spectrum and two bugs.
+
+`examples/diagnose_sound` on the cross-plane V8, 3000 rpm loaded, octave-band
+share of total energy:
+
+```
+        31.5     63    125    250    500     1k     2k     4k     8k    16k
+full   -19.2   -3.7  -12.6   -3.3  -15.7  -19.3  -33.5  -33.6  -42.0  -52.8
+```
+
+Two tall bands — 63 Hz carries the crank order, 250 Hz the firing order at
+200 Hz — and then a **30 dB cliff** into a spectrum that is empty from 2 kHz up.
+A signal with two strong partials and nothing between them is not a machine, it
+is two oscillators, and that is the whole of "sounds electronic". Crest 13.1 dB,
+full mix RMS **-41.7 dBFS**, which is the whole of "the engine is very low".
+
+The same render during a spark cut:
+
+```
+        31.5     63    125    250    500     1k     2k     4k     8k    16k
+cut    -26.3  -18.6  -21.4  -15.8  -11.7   -3.2   -6.8   -7.9  -15.1  -27.2
+```
+
+RMS **-28.6 dBFS**: the pops are **13 dB louder than the engine**, and their
+energy sits at 1-4 kHz, exactly where the engine has none. So the mix is a quiet
+two-tone hum punctuated by the only bright thing in it, 13 dB hot. Turning the
+engine up to a useful level turns the pops up with it. That is "raspy pops" and
+"engine very low" as the same observation.
+
+`examples/acoustic_bench` reports the pops' attack as **20.8 us** — one sample at
+48 kHz, a step function — fed into a soft clipper. `BackfireVoice` is triggered
+with an attack of `0.00018` s and no bandlimiting, on a `CONTROL_BLOCK` grid of
+16 samples, which is 0.33 ms of trigger jitter on a 0.18 ms attack. Stage 10d of
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) called this exactly — "a
+0.16 ms attack into a soft clipper at 48 kHz folds" — and it was the one bullet
+of that stage never done.
+
+And the straight pipe:
+
+```
+cargo run --release --example acoustic_bench -- --engine cross_plane_v8 --exhaust muffled
+cargo run --release --example acoustic_bench -- --engine cross_plane_v8 --exhaust straight-pipe
+cmp /tmp/ab_muffled.wav /tmp/ab_straight-pipe.wav   # IDENTICAL FILES
+```
+
+Byte for byte, with the header correctly printing "Straight Pipe (No silencers)"
+for the second. The cause is in
+[`ExhaustNetwork::step`](../src/audio/waveguide.rs): when `cutout_open` is set,
+the silencer chain is skipped entirely and `bank_down` goes straight to the
+tailpipe. `EnginePreset::cross_plane_v8()` and `twin_turbo_v8()` both ship
+`cutout: true`, so their silencers were never in circuit in either mode, and
+`into_straight_pipe()` sets `cutout = true` as well — the same bypass, expressed
+twice. The control experiment closes it: `inline_4`, which has `cutout: false`,
+renders **differently** between the two modes.
+
+The same field is read three ways. `src/bench.rs` takes it from the preset,
+`src/main.rs` and `src/analysis/script.rs` both hardcode `false`. So the
+interactive dashboard, the render scripts and the bench disagree about whether
+any given engine has its cutout open.
+
+Two further things fall out of the same measurement:
+
+- `flat_plane_v8` carries `Silencer::Straight`, and `SilencerElement::extend_chain`
+  appends nothing for it. That preset is acoustically a straight pipe in
+  "muffled" mode by construction, before the cutout is considered.
+- Where a silencer *is* in circuit, it makes things **louder**: the inline-4
+  muffled renders 9.7 dB hotter than straight-piped and 10 dB brighter at 4 kHz.
+  `ExpansionChamber` is a pair of lossless scattering junctions around a cavity,
+  so it reflects and stores but does not dissipate, and in a network whose only
+  sink is the mouth the reflected energy comes back out anyway. A reactive
+  muffler with no loss term is a resonator.
+
+Finally, `examples/diagnose_sound` matches `--preset` against hyphenated literals
+(`"flat-plane-v8"`) and falls through to the cross-plane V8 for anything else,
+silently. Asking it for a preset by its catalogue name gets a different engine
+with no warning, which makes every measurement taken through it suspect.
+
+**Read this section before T1.** It is the evidence T1 was written to look for,
+already gathered.
+
+---
+
 ## Working method
 
 These stages are cheap to get wrong expensively. The failure mode is reading
@@ -139,18 +225,24 @@ apply unchanged, plus one:
 ## Ordering
 
 ```
+T5 cutout and silencers ─ bugs; do first, they are cheap and they gate T4
+   │
 T0 broadband metrics ──── gate for everything below
    │
    ├── T1 midrange audit ──── the actual fix; needs T0 to be provable
+   ├── T6 bandlimit the pops ─ independent of T1, same audible complaint
    │
    ├── T2 reciprocating inertia ─── independent of T1, different mechanism
    │      └── T3 valve float ────── cheap, reuses T2's kinematics
    │
-   └── T4 exhaust tuning surface ── independent; makes the pipe model usable
+   └── T4 exhaust tuning surface ── needs T5; a bench over a bypassed
+                                    silencer measures nothing
 ```
 
-T0 then T1 is the critical path. T2 through T4 add character that is currently
-absent; they do not fix the balance and must not be mistaken for it.
+T5, T0, then T1 is the critical path. T5 is first because it is three small
+corrections to code that is already written, and because every exhaust
+measurement taken before it is invalid. T2, T3 and T4 add character that is
+currently absent; they do not fix the balance and must not be mistaken for it.
 
 ---
 
@@ -540,6 +632,179 @@ test single pipe resonates at the quarter wave prediction
 > the exhaust section, with the flat-plane V8 worked through as an example.
 
 ---
+
+---
+
+# Stage T5 — The cutout, the silencers, and the preset that lies
+
+**Goal.** Make the exhaust configuration mean what it says.
+
+**Why.** Three defects that together make every exhaust mode indistinguishable
+on two of the eleven presets, and make every measurement taken through
+`diagnose_sound` suspect. None of them is hard; all of them invalidate work done
+around them, which is why they come before everything else.
+
+**Files.** `src/audio/waveguide.rs`, `src/physics/plumbing.rs`, `src/bench.rs`,
+`src/main.rs`, `src/analysis/script.rs`, `examples/diagnose_sound.rs`.
+
+**Design.**
+
+- **One source of truth for the cutout.** `exhaust_cutout` is read from the
+  preset in `src/bench.rs`, and hardcoded `false` in `src/main.rs` and
+  `src/analysis/script.rs`. Pick the preset as the source, thread it through
+  both other paths, and delete the literals. A field that means different things
+  in three call sites is a dead port by the rule in `AGENTS.md`.
+- **`cutout: true` is a fitment, not a state.** `ExhaustSystem::cutout` currently
+  conflates "this system has a cutout valve fitted" with "the valve is open".
+  Split it: `cutout_fitted` on the geometry, and an open/closed state that
+  arrives per frame in the snapshot, defaulting to closed. A car with a cutout
+  does not drive around with it open.
+- **`into_straight_pipe` must not set the cutout.** Clearing the silencer list
+  already is the straight pipe. Setting `cutout = true` as well means the mode
+  is expressed twice, and makes it indistinguishable from a preset that had the
+  cutout open to begin with. Remove the line. Consider the same for
+  `into_open_headers`, which has a genuine reason to keep it — there is no
+  silencer chain left to bypass, so it is harmless there but still redundant.
+- **Give `ExpansionChamber` a loss term.** Two lossless scattering junctions
+  around a cavity reflect and store; they cannot attenuate, so in a network
+  whose only sink is the mouth a muffler comes out *louder* — measured at 9.7 dB
+  on the inline-4. Add a transmission loss to the chamber walls and a flow-loss
+  term at the area discontinuity. `AbsorptiveSilencer` already has
+  `sabine_attenuation_db_per_m`; the reactive chamber needs its equivalent.
+- **`flat_plane_v8` should carry a real silencer.** `Silencer::Straight` appends
+  nothing to the chain, so that preset is a straight pipe in muffled mode and
+  has no muffled mode to compare against. Give it a chamber.
+- **Fix `--preset` in `diagnose_sound`.** It matches hyphenated literals and
+  silently falls through to the cross-plane V8. Match against the catalogue by
+  name the way `examples/measure.rs` does, and fail loudly on an unknown name
+  rather than rendering a different engine.
+
+**Tests.**
+
+- For every catalogue preset with a non-`Straight` silencer, muffled and
+  straight-pipe renders differ. This is the test that would have caught it.
+- An expansion chamber's transmission loss is positive at its tuned frequency,
+  and total radiated energy with a silencer fitted is strictly less than without.
+- The cutout defaults closed on every path: a preset with a cutout fitted
+  renders identically to one without until the snapshot opens it.
+- Opening the cutout bypasses the chain and raises radiated high-frequency
+  energy.
+- `diagnose_sound --preset <unknown>` exits non-zero instead of rendering.
+
+**Commits.**
+
+```
+separate cutout fitment from cutout state
+default the exhaust cutout closed on every path
+stop into_straight_pipe from opening the cutout
+add transmission loss to the expansion chamber
+give the flat-plane v8 a real silencer
+fail loudly on an unknown diagnose preset
+test silenced and straight pipe renders differ
+```
+
+**Prompt.**
+
+> Implement Stage T5 of `docs/TIMBRE_PLAN.md`. Read that stage, the Measured
+> section near the top of the file, and the Working method section.
+>
+> Start by reproducing the finding: render `cross_plane_v8` through
+> `examples/acoustic_bench` with `--exhaust muffled` and `--exhaust
+> straight-pipe` and confirm with `cmp` that the WAVs are byte-identical. Do not
+> start fixing until you have seen that.
+>
+> The cutout is the root of it: `ExhaustNetwork::step` skips the whole silencer
+> chain when `cutout_open`, two presets ship it permanently open, and
+> `into_straight_pipe` opens it again. Split fitment from state and default the
+> state closed everywhere, including `src/main.rs` and `src/analysis/script.rs`
+> where it is currently a hardcoded `false`.
+>
+> Then give `ExpansionChamber` a loss term, because a muffler that makes the
+> engine 9.7 dB louder is not a muffler. Keep it physical — wall transmission
+> and a flow loss at the area step — not a fudge gain.
+>
+> Every recorded fingerprint will move when the silencers come back into
+> circuit. Re-record them and report what changed; do not suppress the diff.
+
+---
+
+# Stage T6 — Bandlimit the pops
+
+**Goal.** Stop the backfire being the brightest and loudest thing in the mix.
+
+**Why.** Measured at 13 dB above the engine, with an attack the bench reports as
+20.8 us — one sample at 48 kHz, which is a step function into a soft clipper.
+Everything above Nyquist in that step folds back down as inharmonic content,
+and inharmonic content on a transient is heard as rasp. It is also the only part
+of the mix with energy at 1-4 kHz, so it does not sit in the engine's sound, it
+replaces it.
+
+This is the one bullet of Stage 10d in
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) that was never done. Doing it
+there would have been cheaper.
+
+**Files.** `src/audio/dsp.rs`, `src/audio/filters.rs`.
+
+**Design.**
+
+- **Bandlimit the trigger.** The 0.00018 s attack is not wrong as a physical
+  rise time — a real backfire front is that fast — but it must be synthesised
+  bandlimited rather than as a raw ramp. Either generate the pulse at 4x and
+  decimate through the existing half-band filter, or shape it with a
+  minimum-phase lowpass at Nyquist. Prove the result has no energy above
+  `0.45 * fs` before it reaches the clipper.
+- **Take the trigger off the control grid.** `CONTROL_BLOCK` is 16 samples,
+  0.33 ms, which is nearly twice the attack it schedules, so the pop's onset
+  jitters by more than its own rise time and its amplitude quantises with it.
+  Carry a sample-accurate sub-block offset on the trigger the way the crank
+  phase already is.
+- **Re-level against the engine, once T1 has restored the midrange.** The
+  `backfire_level * 2.0` at the trigger site is a doubled gain with no stated
+  derivation. The target is a pop that peaks a few dB above the engine, not
+  13 dB. Do this *after* T1, and state the measured contrast in the commit.
+- Leave the physics alone. `blowdown_delta` and `unburnt_fuel` during a cut are
+  behaving correctly; this is entirely a synthesis defect.
+
+**Tests.**
+
+- The backfire pulse, rendered alone, has no energy above `0.45 * fs` within
+  1 dB of the noise floor.
+- Two pops triggered one sample apart differ by one sample of delay and nothing
+  else — no amplitude quantisation.
+- Peak contrast between a limiter-bounce section and the steady-state engine
+  falls within a stated band, and the test names the number.
+- Crest factor of the limiter section does not collapse: bandlimiting must not
+  turn the pop into a thud.
+
+**Commits.**
+
+```
+bandlimit the backfire pulse
+trigger backfires on a sample accurate offset
+test the backfire has no energy above nyquist
+level the backfire against the engine
+```
+
+**Prompt.**
+
+> Implement Stage T6 of `docs/TIMBRE_PLAN.md`. Read that stage, the Measured
+> section, and the Working method section.
+>
+> The complaint is "the pops sound raspy". The cause is a one-sample step into a
+> soft clipper: `examples/acoustic_bench` reports the attack as 20.8 us, and
+> `BackfireVoice` is triggered with a 0.00018 s attack, unbandlimited, on a
+> 16-sample control grid.
+>
+> Bandlimit the pulse and make the trigger sample-accurate. Keep the physical
+> rise time — a backfire front really is that fast — and solve it by
+> oversampling or by min-phase shaping, not by slowing the attack down. A pop
+> that has lost its crack is a worse failure than a pop that rasps.
+>
+> Do the re-levelling commit last and only after Stage T1 has landed; levelling
+> the pop against an engine that is still missing its midrange sets the wrong
+> target. If T1 is not committed, do the first three commits and say in your
+> final message that the fourth is deferred.
+
 
 ## Not in this plan
 
