@@ -1153,6 +1153,66 @@ pub fn resonances(samples: &[f32], sample_rate: f64, count: usize) -> Vec<Peak> 
 }
 
 // ---------------------------------------------------------------------------
+// Broadband balance
+// ---------------------------------------------------------------------------
+
+/// ISO octave-band centre frequencies a fingerprint's spectral balance is read
+/// at, 31.5 Hz through 16 kHz [Hz].
+pub const OCTAVE_CENTERS_HZ: [f64; 10] = [
+    31.5, 63.0, 125.0, 250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 8_000.0, 16_000.0,
+];
+
+/// Energy share per octave band, each in dB relative to the render's total
+/// spectral energy.
+///
+/// Share, not absolute level, on the same principle as an order [`Balance`]:
+/// a stage that changes overall loudness must not shift these numbers, only a
+/// stage that moves energy between bands may. Read off the same Welch-averaged
+/// power spectrum [`AverageSpectrum`] builds for a resonance search, so a band
+/// edge that falls between two bins is settled the same way a peak's placement
+/// is — from the power actually captured there, not from an analytic model of
+/// where an octave "should" start.
+///
+/// [`SILENCE_DB`] for a band with no energy at all, and for the whole table
+/// when the render is shorter than one analysis window.
+///
+/// This is the metric `order::Balance` cannot be: a balance is read only at
+/// the fixed set of frequencies the firing order predicts, so it is blind to
+/// energy that moved to a frequency no order sits at. An octave band asks
+/// about the whole spectrum instead, in bands wide enough that a bin's exact
+/// placement cannot be gamed.
+pub fn octave_bands(samples: &[f32], sample_rate: f64) -> [f64; 10] {
+    let mut shares = [SILENCE_DB; 10];
+    let spectrum = AverageSpectrum::of(samples, sample_rate);
+    if spectrum.frames == 0 {
+        return shares;
+    }
+
+    let bin = spectrum.bin_hz();
+    let total: f64 = spectrum.power.iter().sum();
+    if total <= 0.0 {
+        return shares;
+    }
+
+    for (share, &center) in shares.iter_mut().zip(OCTAVE_CENTERS_HZ.iter()) {
+        let lo = center / std::f64::consts::SQRT_2;
+        let hi = center * std::f64::consts::SQRT_2;
+        let first = (lo / bin).ceil() as usize;
+        let last = ((hi / bin).floor() as usize).min(spectrum.power.len().saturating_sub(1));
+        if first > last {
+            continue;
+        }
+        let band: f64 = spectrum.power[first..=last].iter().sum();
+        // `db` turns an amplitude ratio into 20 log10 of it; a square root
+        // turns the power ratio this band actually is into that amplitude
+        // ratio, so the result is 10 log10(band / total) without a second
+        // logarithm helper to keep in step with the one `db` already defines.
+        *share = db((band / total).sqrt());
+    }
+    shares
+}
+
+// ---------------------------------------------------------------------------
 // Resonance placement
 // ---------------------------------------------------------------------------
 
@@ -1437,6 +1497,32 @@ mod tests {
             .map(|_| {
                 state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 (state >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+            })
+            .collect()
+    }
+
+    /// A fixed draw of pink noise: equal power per octave, `1/f`.
+    ///
+    /// Paul Kellet's economy filter — a bank of six one-pole stages on white
+    /// noise, chosen so their corners overlap and the sum approximates a
+    /// `1/sqrt(f)` amplitude response across the whole audible band to within
+    /// half a decibel. That is what an octave-band test needs: real pink
+    /// noise, not a single pole's `1/f^2` power slope.
+    fn pink_noise(seconds: f64) -> Vec<f32> {
+        let white = noise(seconds);
+        let mut b = [0.0f32; 7];
+        white
+            .into_iter()
+            .map(|white| {
+                b[0] = 0.99886 * b[0] + white * 0.0555179;
+                b[1] = 0.99332 * b[1] + white * 0.0750759;
+                b[2] = 0.96900 * b[2] + white * 0.1538520;
+                b[3] = 0.86650 * b[3] + white * 0.3104856;
+                b[4] = 0.55000 * b[4] + white * 0.5329522;
+                b[5] = -0.7616 * b[5] - white * 0.0168980;
+                let pink = b[0] + b[1] + b[2] + b[3] + b[4] + b[5] + b[6] + white * 0.5362;
+                b[6] = white * 0.115926;
+                pink * 0.11
             })
             .collect()
     }
@@ -2047,5 +2133,70 @@ mod tests {
         let spectrum = AverageSpectrum::of(&tone(200.0, 0.5, 0.05), RATE);
         assert_eq!(spectrum.frames(), 0);
         assert!(spectrum.peaks(8, MIN_PROMINENCE_DB).is_empty());
+    }
+
+    /// Pink noise carries equal power in every octave by construction — that
+    /// is what "pink" means — so a correct octave-band reading has to come
+    /// back flat.
+    #[test]
+    fn pink_noise_reads_flat_across_the_bands() {
+        let shares = octave_bands(&pink_noise(6.0), RATE);
+        let mean = shares.iter().sum::<f64>() / shares.len() as f64;
+        for (i, &share) in shares.iter().enumerate() {
+            assert!(
+                (share - mean).abs() < 1.0,
+                "band {} ({} Hz) read {share:.2} dB against a {mean:.2} dB mean",
+                i,
+                OCTAVE_CENTERS_HZ[i]
+            );
+        }
+    }
+
+    /// A pure tone puts almost all of its energy in the one band it falls in
+    /// and its two neighbours, and none worth mentioning anywhere else.
+    #[test]
+    fn a_pure_tone_concentrates_in_its_own_band_and_its_neighbours() {
+        let shares = octave_bands(&tone(1_000.0, 0.5, 4.0), RATE);
+
+        // Linear power, not decibels, to sum a "mostly" claim honestly.
+        let power = |db: f64| 10f64.powf(db / 10.0);
+        let near: f64 = shares[4..=6].iter().map(|&s| power(s)).sum();
+        let total: f64 = shares.iter().map(|&s| power(s)).sum();
+        assert!(
+            near / total > 0.90,
+            "the 500 Hz, 1 kHz and 2 kHz bands hold only {:.1} % of the energy",
+            100.0 * near / total
+        );
+
+        // Every other band is a Hann window's sidelobe leakage and nothing
+        // else — far enough down to be negligible, though a finite window
+        // never reaches the clamp floor exactly the way true silence does.
+        for (i, &share) in shares.iter().enumerate() {
+            if (4..=6).contains(&i) {
+                continue;
+            }
+            assert!(
+                share < -60.0,
+                "band {} ({} Hz) read {share:.1} dB for a 1 kHz tone",
+                i,
+                OCTAVE_CENTERS_HZ[i]
+            );
+        }
+    }
+
+    /// A share is a ratio to the render's own total energy, so a gain change
+    /// must not move it — the same invariance an order [`Balance`] has to its
+    /// own reference order.
+    #[test]
+    fn octave_share_does_not_move_with_output_gain() {
+        let quiet = octave_bands(&tone(440.0, 0.25, 4.0), RATE);
+        let loud = octave_bands(&tone(440.0, 0.5, 4.0), RATE);
+        for (i, (&q, &l)) in quiet.iter().zip(loud.iter()).enumerate() {
+            assert!(
+                (q - l).abs() < 0.05,
+                "band {i} moved {:.3} dB on a 6 dB gain change",
+                l - q
+            );
+        }
     }
 }
