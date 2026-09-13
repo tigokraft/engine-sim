@@ -757,6 +757,11 @@ pub struct WaveguidePipe {
     /// simple wave in this gas [-]. Cached because it is wanted every sample
     /// and `gamma` moves at control rate.
     nonlinearity: f32,
+    /// Last pressure this pipe's downstream end emitted [Pa].
+    ///
+    /// The state a front is running into, which is half of what decides how
+    /// fast that front travels; see [`WaveguidePipe::shocked_read`].
+    emitted: f32,
 }
 
 impl WaveguidePipe {
@@ -835,6 +840,7 @@ impl WaveguidePipe {
             temperature,
             steepening: false,
             nonlinearity: nonlinearity(gamma),
+            emitted: 0.0,
         }
     }
 
@@ -1087,15 +1093,30 @@ impl WaveguidePipe {
     fn shocked_read(&mut self, transit: f32) -> f32 {
         let b = self.nonlinearity;
         let span = (transit * b / (1.0 + b)).min(transit - 3.0);
+        let line = &mut self.forward_line;
         if span < 1.0 {
-            return self.forward_line.read(transit);
+            let out = line.read(transit);
+            self.emitted = out;
+            return out;
         }
+        // Rankine-Hugoniot: a front does not travel at the speed of the crest
+        // behind it but at the mean of the speeds of the two states it
+        // separates, so the pressure in the residual is the mean of the
+        // characteristic's own and the one the pipe last emitted — the state it
+        // is running into. On a smooth wave the two are the same number and
+        // this is the simple-wave result unchanged. On a shocked front they are
+        // not: the front arrives later than the crest alone would put it, and
+        // the sample that comes out is one further down the flank. That is the
+        // shock's dissipation, and it is the reason a blowdown does not stay a
+        // step all the way to the mouth.
+        let ahead = self.emitted;
         let residual = |line: &DelayLine, k: f32| -> f32 {
-            b * (transit - k) * line.read_linear(transit - k) - k * REFERENCE_PRESSURE_PA
+            let p = 0.5 * (line.read_linear(transit - k) + ahead);
+            b * (transit - k) * p - k * REFERENCE_PRESSURE_PA
         };
         let steps = span as i32;
         let mut k = steps;
-        let mut h_above = residual(&self.forward_line, k as f32);
+        let mut h_above = residual(line, k as f32);
         // Nothing in the window is slow enough to have a root: the whole front
         // is past the shock condition and arrives at the window edge.
         let mut advance = span;
@@ -1105,7 +1126,7 @@ impl WaveguidePipe {
             advance = -(steps as f32);
             while k > -steps {
                 let below = k - 1;
-                let h_below = residual(&self.forward_line, below as f32);
+                let h_below = residual(line, below as f32);
                 if h_below >= 0.0 {
                     let denom = h_below - h_above;
                     let frac = if denom > 1e-12 { h_below / denom } else { 0.0 };
@@ -1116,7 +1137,30 @@ impl WaveguidePipe {
                 k = below;
             }
         }
-        self.forward_line.read_lagrange3(transit - advance)
+        let out = line.read_lagrange3(transit - advance);
+
+        // And what the front loses by being a front. A shock is not a lossless
+        // feature of a wave: it carries an entropy jump, and the crest is eaten
+        // by it as it runs. The same group that decides how far a crest
+        // advances decides how fast a front can be, because they are the same
+        // statement read two ways —
+        //
+        // $$\sigma = \frac{\gamma+1}{2\gamma} \frac{D \, |\Delta p|}{P_0}$$
+        //
+        // is the number of sample-steps' worth of steepening this section asks
+        // of a jump of `dp` per sample. At `sigma = 1` the section has used up
+        // exactly the slope it had, which is the shock formation condition;
+        // past it the front is asking to become steeper than a step, and what a
+        // real gas does instead is dissipate the difference. So the jump is
+        // divided by how far past the condition it is, which is the sawtooth
+        // decay law with the length and the pressure it is actually carrying
+        // and no constant of its own. Below the condition nothing is touched:
+        // a wave that has not shocked does not pay for a shock.
+        let jump = out - ahead;
+        let sigma = b * transit * jump.abs() * (1.0 / REFERENCE_PRESSURE_PA);
+        let out = if sigma > 1.0 { out / sigma } else { out };
+        self.emitted = out;
+        out
     }
 
     /// Injects waves incident on the pipe boundaries into the travelling delay lines:
@@ -1130,6 +1174,7 @@ impl WaveguidePipe {
 
     /// Resets all delay line state to silence.
     pub fn reset(&mut self) {
+        self.emitted = 0.0;
         self.forward_line.reset();
         self.backward_line.reset();
         self.forward_loss.reset();
