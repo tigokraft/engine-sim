@@ -384,7 +384,15 @@ impl EnginePreset {
                 collector: Collector::from_diameter(4, 0.065, 0.18),
                 secondary: vec![],
                 crossover: Crossover::XPipe { position: 0.80 },
-                silencers: vec![Silencer::Straight],
+                // `Silencer::Straight` appended nothing to the chain, so this
+                // preset was acoustically a straight pipe in muffled mode by
+                // construction — no muffled mode to compare against at all.
+                // Same chamber V10 carries, on a similar-diameter primary.
+                silencers: vec![Silencer::ExpansionChamber {
+                    length: 0.40,
+                    area_ratio: 3.5,
+                    stages: 2,
+                }],
                 tailpipe: PipeSection::from_diameter(0.9, 0.065, 650.0),
                 tailpipe_flanged: false,
                 cutout_fitted: false,

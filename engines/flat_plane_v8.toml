@@ -119,7 +119,10 @@ type = "XPipe"
 position = 0.8
 
 [[exhaust.silencers]]
-type = "Straight"
+type = "ExpansionChamber"
+length = 0.4
+area_ratio = 3.5
+stages = 2
 
 [exhaust.tailpipe]
 length = 0.9
