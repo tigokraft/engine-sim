@@ -9,7 +9,8 @@ Read the stage you are working on before touching code; each stage carries its o
 prompt, file list, formulas and required tests.
 
 How the engine *sounds* is a second, narrower plan:
-[docs/TIMBRE_PLAN.md](docs/TIMBRE_PLAN.md). Read its **Working method** section
+[docs/TIMBRE_PLAN.md](docs/TIMBRE_PLAN.md), and what it cannot yet *say* is a
+third: [docs/MECHANISM_PLAN.md](docs/MECHANISM_PLAN.md). Read its **Working method** section
 before any session that touches `src/audio` — it records what is already
 implemented, so it is not rediscovered, and how to diagnose a tonal problem by
 rendering rather than by reading code.
