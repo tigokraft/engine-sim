@@ -48,7 +48,7 @@ Checked 2026-09-13. Do not rediscover these.
 ```
 M1 vehicle load ──┬── lights up spark and AFR schedules that already take load
                   │
-                  ├── M2 boost and turbine ──── needs M1 for a real load line
+                  ├── M2 → see TURBO_PLAN.md, which needs M1 for a load line
                   │
                   └── M4 cam and the idle limit cycle
                             │
@@ -159,104 +159,18 @@ test the same rpm in two gears schedules different spark
 
 # Stage M2 — Boost and the turbine
 
-**Goal.** Make a turbocharged engine a turbocharged engine rather than an
-atmospheric one with a whistle.
+**Superseded by [TURBO_PLAN.md](TURBO_PLAN.md).**
 
-**Why.** `src/audio/mod.rs` says it plainly: *"The block itself is atmospheric
-either way — there is no turbine, no compressor and no boost anywhere in the
-solver."* `TurboModel` is a first-order lag on engine speed times throttle,
-producing a number that pitches a whistle. Nothing else.
+This stage was a single-stage sketch of forced induction. It turned out to be
+the only piece of work that changes the physics, the acoustics and the control
+system at once, and a third of it is worse than none of it — a compressor with
+no turbine is a boost number nothing pays for, and a turbine with no compressor
+is a restriction with no reward. It is now eight stages of its own.
 
-Three consequences, and the third is the one people actually hear:
-
-1. A turbo engine traps the same mass as an atmospheric one, so it makes the
-   same torque and the same blowdown pressure. The preset's extra power is not
-   simulated, it is asserted.
-2. Shaft speed is a proxy of a proxy, so there is no lag from an actual pulse
-   train: no spool on a downshift, no fall-off when the wastegate opens, no
-   difference between a small housing and a large one beyond a time constant
-   somebody typed.
-3. **There is no turbine in the exhaust path.** A turbine is a large acoustic
-   obstruction between the collector and the rest of the system — it scatters,
-   absorbs and smears the blowdown pulse. That is *why* a turbo car sounds muted
-   and whooshy rather than hard, and it is entirely absent here. This is the
-   single largest reason the turbo presets do not sound turbocharged, and it is
-   a waveguide element, not a voice.
-
-**Files.** `src/physics/intake.rs`, `src/physics/plumbing.rs`,
-`src/audio/waveguide.rs`, `src/audio/mod.rs`, `src/bench/config.rs`.
-
-**Design.**
-
-- **Turbine as a network element.** A `Turbine` in the exhaust chain between the
-  collector and the downpipe, built the way `ExpansionChamber` and
-  `AbsorptiveSilencer` already are: a two-port that returns
-  `(upstream, transmitted)`. It is mostly a resistive termination with a
-  frequency-dependent transmission — high orders scatter into the wheel and are
-  lost, low orders pass. Give it a real loss term from the start; see what
-  [TIMBRE_PLAN.md's T5](TIMBRE_PLAN.md) had to fix in `ExpansionChamber`.
-- **Compressor map, coarsely.** Pressure ratio as a function of corrected shaft
-  speed and corrected mass flow, with a surge line and a choke line. A crude map
-  with the right topology beats an accurate time constant, because surge and
-  choke are what the driver hears.
-- **Close the loop.** Compressor outlet pressure feeds the intake plenum, which
-  raises trapped mass, which raises torque and exhaust enthalpy, which drives
-  the turbine, which accelerates the shaft. That loop *is* lag; delete the
-  asymmetric time constants once it runs, rather than keeping both.
-- **Wastegate and blow-off become real.** Both currently exist only as voices.
-  A wastegate bleeds turbine flow to hold a target pressure ratio; a blow-off
-  vents compressor outlet on a shut throttle. Each should move the physics and
-  let the existing voice key off the actual event.
-- **Charge cooling.** An intercooler is a temperature drop between compressor
-  and plenum, and it changes trapped mass and knock margin. One parameter,
-  large effect, and knock is already solved and voiced.
-- Keep `TurboModel` as the fallback for a preset that does not define a map, so
-  nothing in the catalogue breaks mid-stage.
-
-**Tests.**
-
-- Boost raises trapped mass and brake torque at constant speed and throttle.
-- Shaft speed lags a throttle step, and the lag is longer for a larger wheel
-  inertia — not because a constant says so.
-- A turbine in the chain attenuates high orders more than low ones; total
-  radiated energy downstream is strictly less than without it.
-- Opening the wastegate lowers boost and lowers shaft speed.
-- Surge is entered by crossing the map's surge line, not by a throttle
-  threshold.
-- Intercooling lowers charge temperature and raises the knock margin.
-
-**Commits.**
-
-```
-add a turbine element to the exhaust network
-add a compressor map with surge and choke lines
-feed compressor outlet pressure to the intake plenum
-drive the turbine from exhaust enthalpy
-make the wastegate bleed turbine flow
-make the blow-off valve vent compressor outlet
-add intercooler charge cooling
-test boost raises trapped mass
-test the turbine attenuates high orders
-```
-
-**Prompt.**
-
-> Implement Stage M2 of `docs/MECHANISM_PLAN.md`. Read that stage, Stage M1, and
-> `docs/TIMBRE_PLAN.md`'s Working method section.
->
-> Build the turbine element **first** and measure it before touching the
-> compressor. It is the half that changes what a turbo engine sounds like, it is
-> independent of the boost loop, and it is testable on its own. Give it a real
-> dissipative term — read what T5 of the timbre plan had to fix in
-> `ExpansionChamber` and do not repeat it.
->
-> Then close the boost loop and delete the asymmetric spool constants in
-> `TurboModel`; keeping both a real loop and a hand-tuned lag is how the two
-> disagree later. Leave `TurboModel` reachable as the fallback for presets with
-> no map so the catalogue keeps building.
->
-> Say in your final message what the turbine did to the octave-band table of a
-> turbo preset, against the same preset without one.
+The one thing worth carrying across as a summary: the largest audible gap is not
+boost, it is that **there is no turbine in the exhaust path**. That is
+[TB0](TURBO_PLAN.md), it is independent of everything else, and it is the stage
+to do first.
 
 ---
 
