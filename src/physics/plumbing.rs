@@ -123,6 +123,11 @@ impl Collector {
             taper_length,
         }
     }
+
+    /// Internal bore diameter of the collector outlet [m].
+    pub fn outlet_diameter(&self) -> f64 {
+        2.0 * (self.outlet_area / PI).sqrt()
+    }
 }
 
 /// Acoustic crossover connecting exhaust banks.
@@ -250,6 +255,48 @@ pub struct IntakeSystem {
 }
 
 impl ExhaustSystem {
+    /// Creates an open-headers exhaust configuration.
+    ///
+    /// The primaries merge at the collector and discharge directly to atmosphere
+    /// through a short header exit stub (60 mm), with no silencers, no expansion
+    /// chambers, and no long tailpipe.
+    pub fn open_headers(primaries: Vec<PipeSection>, collector: Collector) -> Self {
+        let outlet_d = collector.outlet_diameter();
+        Self {
+            primaries,
+            collector,
+            secondary: Vec::new(),
+            crossover: Crossover::None,
+            silencers: Vec::new(),
+            tailpipe: PipeSection::from_diameter(0.06, outlet_d, 800.0),
+            tailpipe_flanged: false,
+            cutout: true,
+        }
+    }
+
+    /// Converts this exhaust system into an open-headers configuration.
+    pub fn into_open_headers(mut self) -> Self {
+        let outlet_d = self.collector.outlet_diameter();
+        self.silencers.clear();
+        self.secondary.clear();
+        self.crossover = Crossover::None;
+        self.tailpipe = PipeSection::from_diameter(0.06, outlet_d, 800.0);
+        self.cutout = true;
+        self
+    }
+
+    /// Converts this exhaust system into an unbaffled straight pipe system (no silencers).
+    pub fn into_straight_pipe(mut self) -> Self {
+        self.silencers.clear();
+        self.cutout = true;
+        self
+    }
+
+    /// Returns whether this exhaust system is an open-headers setup (no silencers and short tailpipe).
+    pub fn is_open_headers(&self) -> bool {
+        self.silencers.is_empty() && self.tailpipe.length <= 0.15
+    }
+
     /// Area of a primary runner [m^2].
     ///
     /// When primaries vary slightly in area, this returns their arithmetic mean.
@@ -603,5 +650,32 @@ mod tests {
         let c = 580.0;
         let expected = 2.0 * length / c;
         assert!((exhaust.primary_round_trip_seconds(c) - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn open_headers_removes_silencers_and_shortens_tailpipe() {
+        let primary = PipeSection::from_diameter(0.50, 0.044, 800.0);
+        let collector = Collector::from_diameter(4, 0.060, 0.15);
+        let muffled = ExhaustSystem {
+            primaries: vec![primary; 4],
+            collector,
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![Silencer::ExpansionChamber {
+                length: 0.60,
+                area_ratio: 5.0,
+                stages: 2,
+            }],
+            tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
+            tailpipe_flanged: false,
+            cutout: false,
+        };
+        assert!(!muffled.is_open_headers());
+
+        let open = muffled.into_open_headers();
+        assert!(open.is_open_headers());
+        assert!(open.silencers.is_empty());
+        assert!(open.tailpipe.length <= 0.10);
+        assert!(open.cutout);
     }
 }
