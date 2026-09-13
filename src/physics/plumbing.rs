@@ -297,6 +297,11 @@ impl ExhaustSystem {
         self.silencers.is_empty() && self.tailpipe.length <= 0.15
     }
 
+    /// Returns whether this exhaust system is a straight pipe setup (no silencers, full-length tailpipe).
+    pub fn is_straight_pipe(&self) -> bool {
+        self.silencers.is_empty() && !self.is_open_headers()
+    }
+
     /// Area of a primary runner [m^2].
     ///
     /// When primaries vary slightly in area, this returns their arithmetic mean.
@@ -677,5 +682,31 @@ mod tests {
         assert!(open.silencers.is_empty());
         assert!(open.tailpipe.length <= 0.10);
         assert!(open.cutout);
+    }
+
+    #[test]
+    fn straight_pipe_removes_silencers_and_preserves_tailpipe() {
+        let primary = PipeSection::from_diameter(0.50, 0.044, 800.0);
+        let collector = Collector::from_diameter(4, 0.060, 0.15);
+        let muffled = ExhaustSystem {
+            primaries: vec![primary; 4],
+            collector,
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![Silencer::ExpansionChamber {
+                length: 0.60,
+                area_ratio: 5.0,
+                stages: 2,
+            }],
+            tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
+            tailpipe_flanged: false,
+            cutout: false,
+        };
+        let straight = muffled.into_straight_pipe();
+        assert!(straight.is_straight_pipe());
+        assert!(!straight.is_open_headers());
+        assert!(straight.silencers.is_empty());
+        assert!((straight.tailpipe.length - 1.5).abs() < 1e-12);
+        assert!(straight.cutout);
     }
 }
