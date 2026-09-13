@@ -75,57 +75,57 @@ cutout = true
 
 [[exhaust.primaries]]
 length = 0.35
-diameter = 0.04
+diameter = 0.038
 temperature = 910.0
 
 [[exhaust.primaries]]
 length = 0.35
-diameter = 0.04
+diameter = 0.038
 temperature = 910.0
 
 [[exhaust.primaries]]
 length = 0.35
-diameter = 0.04
+diameter = 0.038
 temperature = 910.0
 
 [[exhaust.primaries]]
 length = 0.35
-diameter = 0.04
+diameter = 0.038
 temperature = 910.0
 
 [[exhaust.primaries]]
 length = 0.35
-diameter = 0.04
+diameter = 0.038
 temperature = 910.0
 
 [[exhaust.primaries]]
 length = 0.35
-diameter = 0.04
+diameter = 0.038
 temperature = 910.0
 
 [[exhaust.primaries]]
 length = 0.35
-diameter = 0.04
+diameter = 0.038
 temperature = 910.0
 
 [[exhaust.primaries]]
 length = 0.35
-diameter = 0.04
+diameter = 0.038
 temperature = 910.0
 
 [[exhaust.primaries]]
 length = 0.35
-diameter = 0.04
+diameter = 0.038
 temperature = 910.0
 
 [[exhaust.primaries]]
 length = 0.35
-diameter = 0.04
+diameter = 0.038
 temperature = 910.0
 
 [exhaust.collector]
 inlets = 5
-outlet_diameter = 0.065
+outlet_diameter = 0.062
 taper_length = 0.15
 
 [exhaust.crossover]
@@ -137,7 +137,7 @@ type = "Straight"
 
 [exhaust.tailpipe]
 length = 0.8
-diameter = 0.065
+diameter = 0.062
 temperature = 700.0
 
 [intake]

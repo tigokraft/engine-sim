@@ -6,7 +6,7 @@ note = "4.5L flat-plane V8 screaming to 9200 rpm: tuned 4-into-1 race extractors
 mass = 170.0
 bore_spacing = 0.104
 inertia = 0.17
-redline = 9200.0
+redline = 8950.0
 idle = 1100.0
 load = [
     4.5,
