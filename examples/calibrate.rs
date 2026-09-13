@@ -1216,6 +1216,27 @@ fn markdown(all: &[Calibrated]) -> String {
          honest report: a peak found more than {PLACEMENT_WINDOW_PCT:.0} % from \
          a prediction is a different mode, not that one in the wrong place.\n"
     );
+    let _ = writeln!(
+        out,
+        "7. **Wave steepening is wired into the primaries and does nothing.** \
+         `WaveguidePipe::set_steepening` advances a crest by `factor * p * 2` \
+         samples and clamps that to two, with `factor` 0.20 and `p` the pipe's \
+         own normalised pressure — so anywhere above about five per cent of a \
+         blowdown the advance is pinned at two samples, constant across the \
+         whole pulse, and a constant delay does not steepen anything. Measured: \
+         setting the factor to zero outright moves crest factor by under a \
+         tenth of a decibel and every order by under half a decibel, at 1200, \
+         3000 and 6000 rpm alike. The plan calls this the mechanism behind a \
+         race engine sounding hard rather than merely loud, and the catalogue \
+         is not getting it. Scaling the advance from the gas instead — a crest \
+         gains `(gamma+1)/(2 gamma) * p / P_0` of the transit time, which is the \
+         simple-wave result and needs no constant — asks at blowdown for a crest \
+         that arrives before its own pulse was launched, so the clamp becomes \
+         the whole model and the clamp is a tone knob. What it wants is a \
+         formulation that steepens the *front* under a shock condition rather \
+         than phase-modulating the waveform sample by sample, which is a Stage \
+         10c rewrite and not a constant.\n"
+    );
 
     for c in all {
         let (seconds, (slow, fast)) = c.span;
