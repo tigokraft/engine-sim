@@ -1,0 +1,237 @@
+[identity]
+name = "Flat-plane V8"
+note = "Even 180 deg on both banks: two inline-fours sharing a crank."
+
+[block]
+mass = 180.0
+bore_spacing = 0.104
+inertia = 0.3
+redline = 8600.0
+idle = 900.0
+load = [
+    5.0,
+    0.014,
+    0.000065,
+]
+anti_lag = false
+limiter_mode = "RotatingStutter"
+limiter_cut = "Spark"
+
+[cylinder]
+bore = 0.094
+stroke = 0.081
+rod_length = 0.142
+compression_ratio = 12.5
+intake_open_deg = 699.9999999999999
+intake_duration_deg = 239.99999999999997
+intake_lift = 0.01
+intake_diameter = 0.037
+intake_discharge_coeff = 0.65
+exhaust_open_deg = 499.99999999999994
+exhaust_duration_deg = 239.99999999999997
+exhaust_lift = 0.009
+exhaust_diameter = 0.031
+exhaust_discharge_coeff = 0.6
+
+[combustion]
+type = "Spark"
+spark_angle_deg = 342.0
+duration_deg = 52.0
+efficiency_parameter = 5.0
+form_factor = 2.1
+combustion_efficiency = 0.97
+fuel_lhv = 44000000.0
+air_fuel_ratio = 14.7
+
+[firing]
+sequence = [
+    1,
+    5,
+    3,
+    7,
+    4,
+    8,
+    2,
+    6,
+]
+banks = [
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    1,
+]
+
+[exhaust]
+tailpipe_flanged = false
+cutout = false
+
+[[exhaust.primaries]]
+length = 0.42
+diameter = 0.041
+temperature = 880.0
+
+[[exhaust.primaries]]
+length = 0.42
+diameter = 0.041
+temperature = 880.0
+
+[[exhaust.primaries]]
+length = 0.42
+diameter = 0.041
+temperature = 880.0
+
+[[exhaust.primaries]]
+length = 0.42
+diameter = 0.041
+temperature = 880.0
+
+[[exhaust.primaries]]
+length = 0.42
+diameter = 0.041
+temperature = 880.0
+
+[[exhaust.primaries]]
+length = 0.42
+diameter = 0.041
+temperature = 880.0
+
+[[exhaust.primaries]]
+length = 0.42
+diameter = 0.041
+temperature = 880.0
+
+[[exhaust.primaries]]
+length = 0.42
+diameter = 0.041
+temperature = 880.0
+
+[exhaust.collector]
+inlets = 4
+outlet_diameter = 0.065
+taper_length = 0.18
+
+[exhaust.crossover]
+type = "XPipe"
+position = 0.8
+
+[[exhaust.silencers]]
+type = "Straight"
+
+[exhaust.tailpipe]
+length = 0.9
+diameter = 0.065
+temperature = 650.0
+
+[intake]
+plenum_volume = 0.0
+trumpet_flanged = false
+
+[[intake.runners]]
+length = 0.18
+diameter = 0.048
+temperature = 310.0
+
+[[intake.runners]]
+length = 0.18
+diameter = 0.048
+temperature = 310.0
+
+[[intake.runners]]
+length = 0.18
+diameter = 0.048
+temperature = 310.0
+
+[[intake.runners]]
+length = 0.18
+diameter = 0.048
+temperature = 310.0
+
+[[intake.runners]]
+length = 0.18
+diameter = 0.048
+temperature = 310.0
+
+[[intake.runners]]
+length = 0.18
+diameter = 0.048
+temperature = 310.0
+
+[[intake.runners]]
+length = 0.18
+diameter = 0.048
+temperature = 310.0
+
+[[intake.runners]]
+length = 0.18
+diameter = 0.048
+temperature = 310.0
+
+[intake.throttle]
+type = "IndividualBodies"
+bore = 0.048
+
+[induction]
+type = "NaturallyAspirated"
+
+[mechanical.intake_valve]
+timing = "per_cylinder"
+order = 0.0
+level = 0.5
+
+[mechanical.exhaust_valve]
+timing = "per_cylinder"
+order = 0.0
+level = 0.5
+
+[mechanical.piston_slap]
+timing = "per_cylinder"
+order = 0.0
+level = 0.4000000059604645
+
+[mechanical.injector]
+timing = "per_cylinder"
+order = 0.0
+level = 0.3499999940395355
+
+[mechanical.timing_chain]
+timing = "crank_order"
+order = 24.0
+level = 0.2199999988079071
+
+[mechanical.gear_whine]
+timing = "crank_order"
+order = 36.0
+level = 0.25
+
+[mechanical.accessory]
+timing = "crank_order"
+order = 1.3700000047683716
+level = 0.20000000298023224
+
+[acoustics]
+tailpipes = [
+    [
+    -0.35,
+    -2.1,
+    0.45,
+],
+    [
+    0.35,
+    -2.1,
+    0.45,
+],
+]
+intake = [
+    0.0,
+    0.25,
+    0.75,
+]
+block = [
+    0.0,
+    -0.4,
+    0.45,
+]

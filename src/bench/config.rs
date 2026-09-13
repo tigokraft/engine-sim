@@ -1015,7 +1015,22 @@ impl EnginePreset {
 
     /// Reads and parses an engine preset from a TOML file.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
-        let content = fs::read_to_string(path)?;
+        let path_ref = path.as_ref();
+        let content = match fs::read_to_string(path_ref) {
+            Ok(c) => c,
+            Err(e) => {
+                if path_ref.is_relative() {
+                    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+                        let full = Path::new(&manifest).join(path_ref);
+                        fs::read_to_string(full)?
+                    } else {
+                        return Err(Box::new(e));
+                    }
+                } else {
+                    return Err(Box::new(e));
+                }
+            }
+        };
         Ok(Self::from_toml(&content)?)
     }
 
@@ -1030,6 +1045,48 @@ impl EnginePreset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_and_validate_all_catalogue_toml_files() {
+        let presets = [
+            ("engines/inline_4.toml", EnginePreset::inline_four()),
+            (
+                "engines/cross_plane_v8.toml",
+                EnginePreset::cross_plane_v8(),
+            ),
+            ("engines/flat_plane_v8.toml", EnginePreset::flat_plane_v8()),
+            ("engines/v10.toml", EnginePreset::v10()),
+            ("engines/v12.toml", EnginePreset::v12()),
+            (
+                "engines/2_rotor_wankel.toml",
+                EnginePreset::two_rotor_wankel(),
+            ),
+            (
+                "engines/turbo_inline_4.toml",
+                EnginePreset::turbo_inline_four(),
+            ),
+            ("engines/twin_turbo_v8.toml", EnginePreset::twin_turbo_v8()),
+            (
+                "engines/turbo_inline_6.toml",
+                EnginePreset::turbo_inline_six(),
+            ),
+            (
+                "engines/turbodiesel_i4.toml",
+                EnginePreset::turbo_diesel_four(),
+            ),
+            ("engines/big_single.toml", EnginePreset::big_single()),
+        ];
+
+        for (path, preset) in &presets {
+            preset
+                .to_file(path)
+                .expect("failed to write preset to file");
+            let loaded = EnginePreset::from_file(path).expect("failed to read preset from file");
+            assert_eq!(loaded.name, preset.name);
+            assert_eq!(loaded.firing.len(), preset.firing.len());
+            assert_eq!(loaded.redline, preset.redline);
+        }
+    }
 
     #[test]
     fn engine_config_roundtrip_all_catalogue_presets() {

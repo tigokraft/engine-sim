@@ -192,19 +192,25 @@ impl EnginePreset {
     /// the two inline-fours and the two V8s sit near enough to each other to
     /// hear what a compressor does to a note.
     pub fn catalogue() -> Vec<EnginePreset> {
-        vec![
-            Self::inline_four(),
-            Self::cross_plane_v8(),
-            Self::flat_plane_v8(),
-            Self::v10(),
-            Self::v12(),
-            Self::two_rotor_wankel(),
-            Self::turbo_inline_four(),
-            Self::twin_turbo_v8(),
-            Self::turbo_inline_six(),
-            Self::turbo_diesel_four(),
-            Self::big_single(),
-        ]
+        type PresetSource = (&'static str, fn() -> EnginePreset);
+        let engine_files: [PresetSource; 11] = [
+            ("engines/inline_4.toml", Self::inline_four),
+            ("engines/cross_plane_v8.toml", Self::cross_plane_v8),
+            ("engines/flat_plane_v8.toml", Self::flat_plane_v8),
+            ("engines/v10.toml", Self::v10),
+            ("engines/v12.toml", Self::v12),
+            ("engines/2_rotor_wankel.toml", Self::two_rotor_wankel),
+            ("engines/turbo_inline_4.toml", Self::turbo_inline_four),
+            ("engines/twin_turbo_v8.toml", Self::twin_turbo_v8),
+            ("engines/turbo_inline_6.toml", Self::turbo_inline_six),
+            ("engines/turbodiesel_i4.toml", Self::turbo_diesel_four),
+            ("engines/big_single.toml", Self::big_single),
+        ];
+
+        engine_files
+            .into_iter()
+            .map(|(path, fallback)| Self::from_file(path).unwrap_or_else(|_| fallback()))
+            .collect()
     }
 
     /// 2.0 litre inline four.
