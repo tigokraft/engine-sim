@@ -2033,6 +2033,46 @@ mod tests {
     }
 
     #[test]
+    fn boxer_six_offsets_alternate_banks_evenly() {
+        let boxer = FiringOrder::boxer_six();
+        assert_eq!(boxer.len(), 6);
+        approx(boxer.interval.to_degrees(), 120.0, 1e-12);
+        assert_eq!(boxer.bank_count(), 2);
+
+        // Sequence is 1-6-2-4-3-5.
+        // Firing times [deg]:
+        // Cyl 1 (bank 0): 0 deg
+        // Cyl 6 (bank 1): 120 deg
+        // Cyl 2 (bank 0): 240 deg
+        // Cyl 4 (bank 1): 360 deg
+        // Cyl 3 (bank 0): 480 deg
+        // Cyl 5 (bank 1): 600 deg
+        // Sorted by cylinder number 1..=6:
+        // [0.0, 240.0, 480.0, 360.0, 600.0, 120.0]
+        let expected = [0.0, 240.0, 480.0, 360.0, 600.0, 120.0];
+        for (cyl, want) in boxer.cylinders.iter().zip(expected) {
+            approx(cyl.firing_offset.to_degrees(), want, 1e-9);
+        }
+
+        // Bank 0 (1, 2, 3) and Bank 1 (4, 5, 6) each have three cylinders
+        // firing at exact 240-degree intervals.
+        for gap in boxer.bank_gaps(0) {
+            approx(gap.to_degrees(), 240.0, 1e-9);
+        }
+        for gap in boxer.bank_gaps(1) {
+            approx(gap.to_degrees(), 240.0, 1e-9);
+        }
+
+        // Alternating bank sequence: 0, 1, 0, 1, 0, 1.
+        let bank_pattern: Vec<u8> = boxer
+            .sequence
+            .iter()
+            .map(|&n| boxer.cylinders.iter().find(|c| c.number == n).unwrap().bank)
+            .collect();
+        assert_eq!(bank_pattern, vec![0, 1, 0, 1, 0, 1]);
+    }
+
+    #[test]
     fn every_cylinder_lands_on_a_distinct_phase_cell() {
         let env = Environment::default();
         let block = EngineBlock::cross_plane_v8(env);
