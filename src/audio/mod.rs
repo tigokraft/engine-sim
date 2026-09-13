@@ -875,6 +875,9 @@ impl SynthConfig {
             })
             .collect();
 
+        let mut uniform = Self::uniform(sample_rate, block.firing.len().max(1), bank_count);
+        uniform.mechanical.float_rpm =
+            Some(crate::physics::cylinder::default_float_rpm(block.ecu.redline) as f32);
         Self {
             cylinders,
             bank_count,
@@ -886,7 +889,7 @@ impl SynthConfig {
                 cylinders_per_bank,
             ),
             reciprocating: block.model.geometry,
-            ..Self::uniform(sample_rate, block.firing.len().max(1), bank_count)
+            ..uniform
         }
     }
 

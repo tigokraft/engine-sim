@@ -728,6 +728,14 @@ pub struct MechanicalSpec {
     pub gear_whine: Option<ImpulsiveSpec>,
     /// Accessory drive: non-integer order belt/pulley rumble.
     pub accessory: Option<ImpulsiveSpec>,
+    /// Valve float threshold speed [rev/min].
+    ///
+    /// Above this speed, the valve spring can no longer keep the lifter on
+    /// the cam lobe profile, causing the valve to separate and crash back
+    /// down onto the seat with excessive impact velocity. If absent (`None`),
+    /// defaults to [`crate::physics::cylinder::default_float_rpm`] of the
+    /// engine's redline.
+    pub float_rpm: Option<f32>,
 }
 
 impl Default for MechanicalSpec {
@@ -740,6 +748,7 @@ impl Default for MechanicalSpec {
             timing_chain: Some(ImpulsiveSpec::order(19.0, 0.25)),
             gear_whine: Some(ImpulsiveSpec::order(31.0, 0.20)),
             accessory: Some(ImpulsiveSpec::order(1.37, 0.20)),
+            float_rpm: None,
         }
     }
 }
@@ -766,6 +775,7 @@ impl MechanicalSpec {
             timing_chain: None,
             gear_whine: Some(ImpulsiveSpec::order(23.0, 0.30)),
             accessory: Some(ImpulsiveSpec::order(1.37, 0.25)),
+            float_rpm: None,
         }
     }
 
@@ -780,7 +790,14 @@ impl MechanicalSpec {
             timing_chain: None,
             gear_whine: Some(ImpulsiveSpec::order(3.0, 0.30)),
             accessory: Some(ImpulsiveSpec::order(1.37, 0.20)),
+            float_rpm: None,
         }
+    }
+
+    /// Sets the valve float threshold speed [rev/min].
+    pub fn with_float_rpm(mut self, float_rpm: f32) -> Self {
+        self.float_rpm = Some(float_rpm);
+        self
     }
 }
 
@@ -1030,7 +1047,10 @@ impl SynthConfig {
     }
 
     /// Attaches a mechanical noise rig configuration.
-    pub fn with_mechanical(mut self, mechanical: MechanicalSpec) -> Self {
+    pub fn with_mechanical(mut self, mut mechanical: MechanicalSpec) -> Self {
+        if mechanical.float_rpm.is_none() {
+            mechanical.float_rpm = self.mechanical.float_rpm;
+        }
         self.mechanical = mechanical;
         self
     }
@@ -1733,6 +1753,10 @@ pub struct ImpulsiveSource {
     pub body: ModalBank,
     pub level_law: LevelLaw,
     pub base_level: f32,
+    pub base_frequency: f32,
+    pub base_q: f32,
+    pub current_frequency: f32,
+    pub float_rpm: Option<f32>,
     pub gain: Smoothed,
     pub event_hz: Smoothed,
     sample_rate: f32,
@@ -1757,6 +1781,10 @@ impl ImpulsiveSource {
             body,
             level_law,
             base_level,
+            base_frequency: 0.0,
+            base_q: 0.0,
+            current_frequency: 0.0,
+            float_rpm: None,
             gain: Smoothed::new(0.0, sample_rate, 0.040),
             event_hz: Smoothed::new(0.0, sample_rate, 0.030),
             sample_rate,
@@ -1884,6 +1912,10 @@ impl MechanicalVoice {
                 s.level,
             );
             src.phase = 0.0;
+            src.base_frequency = 3_800.0;
+            src.base_q = 1.4;
+            src.current_frequency = 3_800.0;
+            src.float_rpm = spec.float_rpm;
             src
         });
 
@@ -1898,6 +1930,10 @@ impl MechanicalVoice {
                 s.level,
             );
             src.phase = 0.5;
+            src.base_frequency = 2_600.0;
+            src.base_q = 1.1;
+            src.current_frequency = 2_600.0;
+            src.float_rpm = spec.float_rpm;
             src
         });
 

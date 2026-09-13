@@ -56,6 +56,18 @@ pub fn default_reciprocating_mass(bore: f64) -> f64 {
     620.0 * bore.powi(3)
 }
 
+/// Default valve float threshold speed from redline alone [rev/min].
+///
+/// Above the speed where spring force can no longer hold the lifter to the cam,
+/// the valve separates from the profile, flies over the crest, and re-seats at
+/// excessive velocity. Rather than requiring spring rates, preloads and valve
+/// masses to be named in every preset, road engines sit near 1.06x redline:
+/// close enough that an over-rev bounces the valves, far enough that the limiter
+/// intervenes before separation during ordinary driving.
+pub fn default_float_rpm(redline: f64) -> f64 {
+    1.06 * redline
+}
+
 impl CylinderGeometry {
     /// Builds a geometry, clamping each parameter into a physically meaningful
     /// range so a bad CLI argument degrades instead of producing NaNs.
@@ -696,5 +708,11 @@ mod tests {
             let high = g.inertia_torque(theta, 400.0);
             approx(high, low * 4.0, low.abs() * 1e-9 + 1e-12);
         }
+    }
+
+    #[test]
+    fn default_float_rpm_derives_from_redline() {
+        assert!((default_float_rpm(7_000.0) - 7_420.0).abs() < 1e-6);
+        assert!((default_float_rpm(8_500.0) - 9_010.0).abs() < 1e-6);
     }
 }

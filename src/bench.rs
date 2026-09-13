@@ -31,7 +31,7 @@ use crate::audio::{
 };
 use crate::environment::Environment;
 use crate::physics::control::{LimiterCut, LimiterMode};
-use crate::physics::cylinder::{deg, CylinderGeometry};
+use crate::physics::cylinder::{default_float_rpm, deg, CylinderGeometry};
 use crate::physics::engine_block::{EngineBlock, FiringOrder};
 use crate::physics::plumbing::{
     Collector, Crossover, ExhaustSystem, IntakeSystem, PipeSection, Silencer, ThrottleLayout,
@@ -108,6 +108,8 @@ pub struct EnginePreset {
     pub bore_spacing: f64,
     /// Speed at which ignition is cut [rev/min].
     pub redline: f64,
+    /// Speed at which valve lifters separate from the cam profile [rev/min].
+    pub float_rpm: f64,
     /// Speed the idle governor holds [rev/min].
     pub idle: f64,
     /// Rotating inertia of crank, rods and flywheel [kg m^2].
@@ -157,9 +159,13 @@ impl EnginePreset {
 
     /// The synth configuration for this engine, voiced for its induction and mechanical spec.
     pub fn synth_config(&self, block: &EngineBlock, sample_rate: f32) -> SynthConfig {
+        let mut mechanical = self.mechanical;
+        if mechanical.float_rpm.is_none() {
+            mechanical.float_rpm = Some(self.float_rpm as f32);
+        }
         let mut config = SynthConfig::from_block(block, sample_rate)
             .with_induction(self.induction)
-            .with_mechanical(self.mechanical);
+            .with_mechanical(mechanical);
         config.structure = config.structure.with_bore_spacing(self.bore_spacing);
         config.aperture_positions = self.aperture_positions.clone();
         config
@@ -251,6 +257,7 @@ impl EnginePreset {
             // A production four on 96 mm centres: 5 mm of iron between the bores.
             bore_spacing: 0.096,
             redline: 7_400.0,
+            float_rpm: default_float_rpm(7_400.0),
             idle: 850.0,
             inertia: 0.22,
             load: (3.0, 0.010, 7.0e-5),
@@ -311,6 +318,7 @@ impl EnginePreset {
             // The small-block V8's 4.40 inch bore centres, and its 9 mm of deck iron.
             bore_spacing: 0.1118,
             redline: 7_000.0,
+            float_rpm: default_float_rpm(7_000.0),
             idle: 750.0,
             inertia: 0.45,
             load: (6.0, 0.020, 1.3e-4),
@@ -369,6 +377,7 @@ impl EnginePreset {
             // flat-plane sounds so much harder.
             bore_spacing: 0.104,
             redline: 8_600.0,
+            float_rpm: default_float_rpm(8_600.0),
             idle: 900.0,
             inertia: 0.30,
             load: (5.0, 0.014, 6.5e-5),
@@ -438,6 +447,7 @@ impl EnginePreset {
             // Siamesed: 2.75 mm of wall, which is about as thin as a block is cast.
             bore_spacing: 0.09,
             redline: 8_500.0,
+            float_rpm: default_float_rpm(8_500.0),
             idle: 900.0,
             inertia: 0.40,
             load: (6.0, 0.017, 8.0e-5),
@@ -500,6 +510,7 @@ impl EnginePreset {
             // Twelve of these make the longest block in the catalogue.
             bore_spacing: 0.1045,
             redline: 8_500.0,
+            float_rpm: default_float_rpm(8_500.0),
             idle: 800.0,
             inertia: 0.48,
             load: (7.0, 0.020, 1.2e-4),
@@ -584,6 +595,7 @@ impl EnginePreset {
             // intermediate plate between them.
             bore_spacing: 0.115,
             redline: 8_800.0,
+            float_rpm: default_float_rpm(8_800.0),
             idle: 950.0,
             inertia: 0.20,
             load: (4.0, 0.013, 7.0e-5),
@@ -638,6 +650,7 @@ impl EnginePreset {
             // The same architecture as the atmospheric four, per the note above.
             bore_spacing: 0.096,
             redline: 6_900.0,
+            float_rpm: default_float_rpm(6_900.0),
             idle: 820.0,
             inertia: 0.24,
             load: (2.6, 0.009, 5.5e-5),
@@ -708,6 +721,7 @@ impl EnginePreset {
             // A short-stroke turbo V8 on tight centres.
             bore_spacing: 0.09,
             redline: 7_100.0,
+            float_rpm: default_float_rpm(7_100.0),
             idle: 760.0,
             inertia: 0.44,
             load: (5.0, 0.016, 9.0e-5),
@@ -789,6 +803,7 @@ impl EnginePreset {
             // of the one barrel and its jacket rather than a centre distance.
             bore_spacing: 0.125,
             redline: 7_600.0,
+            float_rpm: default_float_rpm(7_600.0),
             idle: 1_250.0,
             // A tenth of a kilogram metre squared, which is a light flywheel on
             // a heavy piston: exactly the combination that ripples.
@@ -915,6 +930,7 @@ impl EnginePreset {
             // which is what a diesel four's short block costs.
             bore_spacing: 0.0885,
             redline: 5_000.0,
+            float_rpm: default_float_rpm(5_000.0),
             idle: 800.0,
             inertia: 0.40,
             load: (2.2, 0.008, 4.0e-5),
@@ -973,6 +989,7 @@ impl EnginePreset {
             // Ninety-one millimetres, the inline-six figure, and a long block with it.
             bore_spacing: 0.091,
             redline: 7_200.0,
+            float_rpm: default_float_rpm(7_200.0),
             idle: 780.0,
             inertia: 0.33,
             load: (3.6, 0.012, 7.0e-5),

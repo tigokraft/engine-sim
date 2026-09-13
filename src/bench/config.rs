@@ -18,7 +18,9 @@ use crate::audio::{
 };
 use crate::bench::EnginePreset;
 use crate::physics::control::{LimiterCut, LimiterMode};
-use crate::physics::cylinder::{default_reciprocating_mass, deg, CylinderGeometry};
+use crate::physics::cylinder::{
+    default_float_rpm, default_reciprocating_mass, deg, CylinderGeometry,
+};
 use crate::physics::engine_block::{CylinderIndex, FiringOrder};
 use crate::physics::plumbing::{
     Collector, Crossover, ExhaustSystem, IntakeSystem, MufflerGeometry, PipeSection, Silencer,
@@ -1002,6 +1004,7 @@ impl EngineConfig {
                 .accessory
                 .as_ref()
                 .map(ImpulsiveConfig::to_spec),
+            float_rpm: None,
         };
 
         let aperture_positions = AperturePositions {
@@ -1022,6 +1025,7 @@ impl EngineConfig {
             block_mass: self.block.mass,
             bore_spacing: self.block.bore_spacing,
             redline: self.block.redline,
+            float_rpm: default_float_rpm(self.block.redline),
             idle: self.block.idle,
             inertia: self.block.inertia,
             load: (self.block.load[0], self.block.load[1], self.block.load[2]),
