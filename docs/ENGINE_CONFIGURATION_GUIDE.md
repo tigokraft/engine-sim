@@ -393,6 +393,93 @@ Zero, one, or multiple silencers can be chained in sequence:
 - `diameter`: Tailpipe exit diameter ($m$).
 - `temperature`: Gas temperature at vehicle rear ($K$) (typically $500 - 700\text{ K}$).
 
+#### Tuning the Exhaust: the Resonance Sweep
+
+`ExhaustNetwork` computes every one of the relationships above already; `acoustic_bench --sweep`
+just reads them back as a table instead of a spectrum you have to squint at:
+
+- **Primary length** sets the quarter-wave peak, $f_1 = c(1 - M^2) / 4(L + \delta)$, with $\delta$
+  the Karal-Flugge end correction at the collector junction and $c$ the speed of sound *in that
+  primary's own gas*, which is not the tailpipe's — an 880 K primary and a 650 K tailpipe of the
+  same length tune 16 % apart.
+- **Primary diameter** sets $Z_0 = \rho c / A$, the collector junction's characteristic impedance,
+  and therefore how hard the junction reflects.
+- **Collector taper length** is the reflection ramp: short is peaky, long is broadband. It does not
+  move the primary's tuned frequency (the reflection sits at the junction, before the taper), so
+  a healthy sweep should show the *predicted* frequency essentially unchanged across it — watch
+  the `Prom.` (prominence) column fall instead, which is the broadband claim actually made visible.
+- **Tailpipe length and diameter** set the tailpipe's own quarter-wave and its radiation corner,
+  $f_c = c / (2 \pi a)$ — the brightness control, and the most under-used parameter in the
+  catalogue.
+- **Crossover position** is a delay in wavelengths, and is what separates a flat-plane rasp from a
+  crossplane burble.
+
+Run it against one preset and one parameter:
+
+```bash
+cargo run --release --example acoustic_bench -- --engine flat_plane_v8 --sweep primary-length
+```
+
+`--sweep <parameter>` accepts `primary-length`, `primary-diameter`, `collector-taper`,
+`tailpipe-length`, `tailpipe-diameter` or `crossover-position`; `--sweep-steps <n>` widens or
+narrows the table (default 5, log-spaced from half to double the preset's own value). The sweep
+ignores `--exhaust`, since forcing open-headers or straight-pipe first would overwrite the very
+geometry being swept.
+
+Every row prints the analytic prediction beside whatever the render actually produced, and says so
+plainly when the two disagree by more than a few percent, or when no peak was found near the
+prediction at all — that is the point of the tool, not a bug in it:
+
+```
+Value [m]  |    Predicted |     Measured |     Error |      Prom. | Note
+--------------------------------------------------------------------------------
+0.2100     |     800.6 Hz |     920.2 Hz |    +14.9% |    14.7 dB | diverges +14.9% -- mean-flow bias, end correction, or a junction the formula omits
+0.2970     |     570.8 Hz |     554.4 Hz |     -2.9% |    12.2 dB | agrees with the analytic mode
+0.4200     |     402.6 Hz |           -- |        -- |         -- | no peak found within the search window
+0.5940     |     280.8 Hz |           -- |        -- |         -- | no peak found within the search window
+0.8400     |     194.2 Hz |     170.2 Hz |    -12.4% |    16.6 dB | diverges -12.4% -- mean-flow bias, end correction, or a junction the formula omits
+```
+
+**Worked example.** The flat-plane V8 ships an 0.42 m primary at 880 K
+(`engines/flat_plane_v8.toml`, `[[exhaust.primaries]]`). Appendix A's formula, with the mean-flow
+term the gas is actually carrying at that geometry's own sweep midpoint, predicts **402.6 Hz** — not
+the round 354 Hz an offline hand calculation might suggest, because the collector here expands from
+a 41 mm primary into a 65 mm outlet, which the model gives the *flanged* end correction rather than
+the unflanged one, and because the mean flow at load is not zero. That much the sweep confirms on
+its own: it is why the tool computes the prediction from the same rendered gas state instead of a
+nominal temperature.
+
+What it *cannot* confirm at the baseline length is where the peak actually sits, because there
+isn't one within the search window: the row above shows `no peak found`. Reading the row either
+side of it (0.297 m agrees to −2.9 %, 0.84 m diverges by −12.4 %) shows why — the flat-plane V8's
+eight primaries feed one collector with a genuine area step, and downstream of that step the taper,
+the silencer chain and the tailpipe behave as their *own* compound quarter-wave run from the
+collector to the mouth, not as the primary's independent continuation of it.
+`examples/calibrate.rs`'s fuller resonance-placement table names this mode directly — "collector to
+mouth, quarter wave" — and finds it at 209.7 Hz against a 176.3 Hz prediction, close to where this
+preset's tailpipe-length sweep also lands. The naive per-segment formula is not wrong about the
+primary or the tailpipe in isolation; it is silent about the mode the two of them make together once
+a real area mismatch couples them, and the sweep's job is to say so rather than to quietly report
+the nearest peak as if it agreed.
+
+A single-cylinder preset (no collector area mismatch to couple through) tunes far more cleanly —
+compare `--engine big_single --sweep primary-length`, where most rows land within a few percent.
+
+`--mode` runs open-headers, straight-pipe and muffled on one preset and tabulates the share of
+total energy each leaves in the top of the spectrum (`analysis::orders::octave_bands`, not absolute
+level, since the three modes do not radiate the same overall loudness):
+
+```bash
+cargo run --release --example acoustic_bench -- --engine cross_plane_v8 --mode
+```
+
+The claim is that this share rises muffled → straight-pipe → open-headers, and the tool says so when
+it does not hold, rather than only printing the numbers: on the cross-plane V8 today it does not —
+straight-pipe currently reads brighter than open-headers. That preset's `ExpansionChamber` silencer
+has no loss term yet ([`docs/TIMBRE_PLAN.md`](TIMBRE_PLAN.md), Stage T5), so a bench run over it is
+measuring the gap T5 exists to close, and the tool flags exactly that rather than smoothing it into
+a pass.
+
 ---
 
 ### Intake Network (`[intake]`)
@@ -665,6 +752,9 @@ cargo run --release --example acoustic_bench -- --engine <engine_name>
 - `--exhaust straight-pipe`: Overrides exhaust geometry to straight pipe.
 - `--listener dyno`: Sets listener monitoring mode (`dyno`, `exhaust`, `cockpit`, `bystander`).
 - `--compare <path_to_audio.mp3>`: Compares 10-octave spectral balance (31.5 Hz to 16 kHz) against a real-world reference recording.
+- `--sweep <parameter>`: Sweeps one exhaust geometry parameter and prints its resonance table instead of rendering the dyno pull — see [Tuning the Exhaust: the Resonance Sweep](#tuning-the-exhaust-the-resonance-sweep) above.
+- `--sweep-steps <n>`: Points in the sweep (default `5`).
+- `--mode`: Compares open-headers, straight-pipe and muffled on one engine in a single table, instead of rendering the dyno pull.
 
 #### Benchmark Output Metrics:
 - **Peak Attack Rise Time**: Evaluates supersonic shock wavefront sharpness (Target: $< 200\text{ }\mu\text{s}$).
