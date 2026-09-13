@@ -885,6 +885,7 @@ impl SynthConfig {
                 block.model.geometry.bore,
                 cylinders_per_bank,
             ),
+            reciprocating: block.model.geometry,
             ..Self::uniform(sample_rate, block.firing.len().max(1), bank_count)
         }
     }

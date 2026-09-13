@@ -92,8 +92,10 @@ use crate::audio::filters::{
 };
 use crate::audio::intake_voice::IntakeNetwork;
 use crate::audio::propagation::{Aperture, AperturePositions, Listener, PropagationModel};
-use crate::audio::structure::{combustion_drive, StructuralPath, StructuralSpec};
+use crate::audio::structure::{combustion_drive, shaking_drive, StructuralPath, StructuralSpec};
 use crate::audio::waveguide::{ExhaustNetwork, ExhaustTemperatures};
+use crate::physics::cylinder::{CylinderGeometry, CYCLE_ANGLE};
+use crate::physics::engine_block::bank_angle;
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem, ThrottleLayout};
 
 pub use crate::physics::engine_block::CYCLE_TABLE;
@@ -826,6 +828,15 @@ pub struct SynthConfig {
     /// combustion, the mechanical rig and knock all reach the listener through
     /// it. See [`crate::audio::structure`].
     pub structure: StructuralSpec,
+    /// Slider-crank geometry the reciprocating shaking force is read from.
+    ///
+    /// The same [`CylinderGeometry`] the physics side solves the cycle with —
+    /// bore, stroke, rod length and reciprocating mass — reused directly
+    /// rather than re-derived, so the audio thread's shake and the physics
+    /// thread's kinematics can never drift apart into two approximations of
+    /// the same slider-crank. `reciprocating_mass` at zero makes
+    /// [`EngineSynth::fill_excitations`]'s shake term an exact no-op.
+    pub reciprocating: CylinderGeometry,
     /// Standard deviation of cycle-to-cycle variation at the threshold speed [-].
     ///
     /// See [`CCV_THRESHOLD_RPM`]. Applied to both the blowdown amplitude and the
@@ -937,6 +948,10 @@ impl SynthConfig {
             backfire_temperature_threshold: 900.0,
             // A 4-litre iron-decked V8 with pan and accessories: 80 Hz.
             structure: StructuralSpec::default(),
+            // `CylinderGeometry::default` carries the same 86x86mm slug the
+            // structural bore reference is built from, mass defaulted from its
+            // own bore.
+            reciprocating: CylinderGeometry::default(),
             // A healthy warm engine: COV of IMEP around 3 % where the lope
             // starts and 8 % at idle. A tired one would run higher, and this is
             // the knob that models it.
@@ -2897,6 +2912,13 @@ impl EngineSynth {
             tap.bank %= config.bank_count;
             tap.evo_phase = tap.evo_phase.rem_euclid(1.0);
         }
+        // Re-run the same clamp `with_reciprocating_mass` applies at
+        // construction, in case a caller set the field directly rather than
+        // through the builder — a negative or NaN mass would otherwise reach
+        // the hot path.
+        config.reciprocating = config
+            .reciprocating
+            .with_reciprocating_mass(config.reciprocating.reciprocating_mass);
 
         let snapshot = EngineSnapshot::default();
         // The same fallback the network builds its primaries with, so the
@@ -3509,13 +3531,16 @@ impl EngineSynth {
     /// the master cycle — which is the audio-side statement of the same thing
     /// the phase ring does on the physics side.
     ///
-    /// Returns the structural drive the whole engine is delivering this sample:
-    /// `dP/dtheta` summed over the cylinders at their own phases, in the cycle's
-    /// own units. Every cylinder hammers the same block, so unlike the exhaust —
-    /// which has one primary per cylinder — this is a single scalar, and the
-    /// firing order is in it by construction.
+    /// Returns the structural drive the whole engine is delivering this
+    /// sample, as two independent terms: `dP/dtheta` summed over the
+    /// cylinders at their own phases (the combustion term, in the cycle's own
+    /// units), and the reciprocating shaking-force resultant summed over the
+    /// same cylinders at the same phases (in newtons). Every cylinder hammers
+    /// the same block, so unlike the exhaust — which has one primary per
+    /// cylinder — each is a single scalar, and the firing order is in both by
+    /// construction.
     #[inline(always)]
-    fn fill_excitations(&mut self, turning: bool, cycle_hz: f32) -> f32 {
+    fn fill_excitations(&mut self, turning: bool, cycle_hz: f32) -> (f32, f32) {
         // Advanced whether or not the crank is, so a fade cannot be left
         // half-finished by a stopped engine and resume when it restarts.
         let blend = self.cycle.advance();
@@ -3548,10 +3573,15 @@ impl EngineSynth {
             // leaving the last frame's areas in place is as good an answer as
             // any; what matters is that they stop moving with nothing driving
             // them.
-            return 0.0;
+            return (0.0, 0.0);
         }
         let phase = self.cycle_phase();
         let mut rise = 0.0;
+        let mut shake = 0.0;
+        // Crank angular speed, `cycles/s * rad/cycle`, matching the master
+        // cycle's own phase convention — a "cycle" here is the full 720-degree
+        // four-stroke, not one crank turn.
+        let omega = cycle_hz as f64 * CYCLE_ANGLE;
         let c_intake = crate::audio::filters::speed_of_sound(
             crate::audio::intake_voice::INTAKE_AIR_GAMMA,
             crate::audio::intake_voice::INTAKE_GAS_CONSTANT,
@@ -3596,6 +3626,21 @@ impl EngineSynth {
             if alive {
                 rise += self.cycle.pressure_slope_at(combustion, blend) * variation.amplitude_scale;
             }
+            // Reciprocating inertia force, at the bare cylinder phase rather
+            // than `combustion`'s: the piston does not wait for the flame to
+            // develop, so this term is not retarded by cycle-to-cycle
+            // combustion variation the way the pressure-driven terms above
+            // are. `cylinder` is this cylinder's own crank phase as a fraction
+            // of the master 720-degree cycle, so scaling it by `CYCLE_ANGLE`
+            // recovers the true crank angle `piston_position` is defined on.
+            let theta = cylinder as f64 * CYCLE_ANGLE;
+            let force = self.config.reciprocating.inertia_force(theta, omega);
+            let angle = bank_angle(tap.bank as u8, self.config.bank_count);
+            // The structural path is mono and has no separate image for a
+            // sideways rock versus a vertical heave, so the two in-plane axes
+            // are collapsed onto one scalar here rather than carried as a
+            // vector any further.
+            shake += (force * (angle.sin() + angle.cos())) as f32;
             // The valve at the head of this cylinder's two runners.
             //
             // A runner's far end is a junction and its near end is the valve,
@@ -3696,7 +3741,7 @@ impl EngineSynth {
                 * self.noise.next_bipolar();
             self.intake_excitations[index] = p_rarefaction + p_slam + p_orifice;
         }
-        rise
+        (rise, shake)
     }
 
     /// Produces one stereo frame.
@@ -3707,7 +3752,8 @@ impl EngineSynth {
         // dP/dtheta in cycles, times cycles per second, is dP/dt — so the same
         // pressure curve drives the block harder at speed, which is why
         // combustion noise climbs with rpm on every engine ever measured.
-        let rise = self.fill_excitations(turning, cycle_hz) * cycle_hz;
+        let (rise, shake) = self.fill_excitations(turning, cycle_hz);
+        let rise = rise * cycle_hz;
         self.network.set_valve_loads(
             &self.exhaust_valve_areas,
             &self.cylinder_volumes,
@@ -3765,15 +3811,16 @@ impl EngineSynth {
         };
         let intake_rad =
             self.intake_network.step(&self.intake_excitations) / REFERENCE_INTAKE_PRESSURE;
-        // Combustion and the mechanical rig arrive at the block as one force,
-        // because the block cannot tell them apart: a lifter landing on a valve
-        // and a flame front arriving at the piston crown are both metal being
-        // hit, and both reach the listener only by shaking the casing. Knock
-        // joins them: end-gas going off is the chamber ringing against its own
-        // walls, and the walls are part of the same casting. Summing all three
-        // before the bank rather than after is not an optimisation — it is the
-        // statement that there is one structure, not three.
+        // Combustion, reciprocating inertia, the mechanical rig and knock all
+        // arrive at the block as one force, because the block cannot tell them
+        // apart: a lifter landing on a valve, a flame front arriving at the
+        // piston crown and a piston reversing at the top of its stroke are all
+        // metal being hit or hauled to a stop, and all of them reach the
+        // listener only by shaking the casing. Summing them before the bank
+        // rather than after is not an optimisation — it is the statement that
+        // there is one structure, not four.
         let drive = rise * self.combustion_scale
+            + shaking_drive(shake)
             + self.mechanical.process(&mut self.noise) * self.config.mechanical_level as f32
             + self.knock.process(&mut self.noise) * self.knock_scale;
         let block_rad = turbo
@@ -5429,6 +5476,10 @@ mod tests {
             let band = |level: f64| {
                 let mut config = SynthConfig::cross_plane_v8(FS);
                 config.structure_level = level;
+                // Isolate the combustion-driven modal response under test from
+                // the reciprocating shake, which is a second, independent
+                // source into the same bank with its own schedule against rpm.
+                config.reciprocating = config.reciprocating.with_reciprocating_mass(0.0);
                 let mut synth = EngineSynth::new(config);
                 synth.set_snapshot(snapshot);
                 render(&mut synth, 2 * 48_000);
@@ -5577,10 +5628,13 @@ mod tests {
         let level_for = |rise: f32| {
             let mut config = SynthConfig::cross_plane_v8(FS);
             // Everything but the block silenced, including the two other
-            // sources that drive it.
+            // sources that drive it and the reciprocating shake, which is a
+            // fourth source into the same drive that does not care about
+            // cylinder pressure at all.
             config.exhaust_level = 0.0;
             config.intake_level = 0.0;
             config.mechanical_level = 0.0;
+            config.reciprocating = config.reciprocating.with_reciprocating_mass(0.0);
             let mut synth = EngineSynth::new(config);
             synth.exhaust_level.snap(0.0);
             let mut snapshot = loaded_snapshot();
@@ -5626,6 +5680,9 @@ mod tests {
             config.exhaust_level = 0.0;
             config.intake_level = 0.0;
             config.structure_level = structure;
+            // A fourth source into the same drive, silenced along with
+            // combustion so the two under test are truly on their own.
+            config.reciprocating = config.reciprocating.with_reciprocating_mass(0.0);
             let mut synth = EngineSynth::new(config);
             synth.exhaust_level.snap(0.0);
             let mut snapshot = loaded_snapshot();
@@ -5986,6 +6043,11 @@ mod tests {
             let mut config = SynthConfig::cross_plane_v8(FS);
             config.exhaust_level = 0.0;
             config.intake_level = 0.0;
+            // Cold and hot run the same rpm, so the reciprocating shake is
+            // identical between them; left in, it would dilute the friction
+            // difference under test rather than change the comparison's
+            // direction, but this isolates the mechanism the test is named for.
+            config.reciprocating = config.reciprocating.with_reciprocating_mass(0.0);
             let mut synth = EngineSynth::new(config);
             synth.exhaust_level.snap(0.0);
             synth.set_snapshot(snapshot);

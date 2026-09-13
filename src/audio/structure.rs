@@ -442,6 +442,38 @@ pub fn combustion_drive(pressure_rate: f32, bore: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// Reciprocating shaking-force drive
+// ---------------------------------------------------------------------------
+
+/// Reciprocating shaking-force resultant that maps to unit structural drive
+/// [N].
+///
+/// The shipped cross-plane V8 — 94 mm bore, 0.51 kg reciprocating mass —
+/// resolves a resultant of about 500 N at redline once its own near-complete
+/// cancellation is accounted for, and a few newtons at idle: this reference
+/// sits just above the redline figure, so that engine's own shake stays
+/// clearly under unity even at the top of its rev range, in the same spirit
+/// as [`REFERENCE_PRESSURE_RATE`] leaving the steeper cases free to run above
+/// it. Unlike that reference this one needs no separate bore-area term: bore
+/// already sets [`crate::physics::cylinder::default_reciprocating_mass`], so
+/// a bigger cylinder already shakes harder before this constant is ever
+/// applied. A flat-plane engine, whose secondary forces do not cancel the way
+/// a crossplane crank's do, comes out well above unity here at the same
+/// speed and mass — a real difference between the two layouts, not an
+/// artefact of the reference.
+pub const REFERENCE_SHAKING_FORCE: f32 = 10_000.0;
+
+/// Structural drive from a reciprocating shaking-force resultant [-].
+///
+/// `force` in newtons, against the reference above. Linear, for the same
+/// reason [`combustion_drive`] is: the block cannot radiate a shake
+/// nonlinearly just because this crate normalised it.
+#[inline]
+pub fn shaking_drive(force: f32) -> f32 {
+    force / REFERENCE_SHAKING_FORCE
+}
+
+// ---------------------------------------------------------------------------
 // The filterbank
 // ---------------------------------------------------------------------------
 
