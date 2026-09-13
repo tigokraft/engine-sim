@@ -209,7 +209,18 @@ impl EnginePreset {
 
         engine_files
             .into_iter()
-            .map(|(path, fallback)| Self::from_file(path).unwrap_or_else(|_| fallback()))
+            .map(|(path, fallback)| match Self::from_file(path) {
+                Ok(preset) => preset,
+                Err(e) => {
+                    // Only silently fall back when the file is missing; a malformed
+                    // TOML that exists must not silently become another engine —
+                    // that hides invalid user configuration. Log the failure.
+                    if std::path::Path::new(path).exists() {
+                        eprintln!("warning: failed to load {path}: {e} — using built-in fallback");
+                    }
+                    fallback()
+                }
+            })
             .collect()
     }
 
@@ -237,7 +248,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.2, 0.054, 600.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.28, 0.042, 310.0); 4],
@@ -297,7 +308,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
                 tailpipe_flanged: false,
-                cutout: true,
+                cutout_fitted: true,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.38, 0.044, 310.0); 8],
@@ -351,10 +362,14 @@ impl EnginePreset {
                 collector: Collector::from_diameter(4, 0.065, 0.18),
                 secondary: vec![],
                 crossover: Crossover::XPipe { position: 0.80 },
-                silencers: vec![Silencer::Straight],
+                silencers: vec![Silencer::ExpansionChamber {
+                    length: 0.45,
+                    area_ratio: 4.0,
+                    stages: 2,
+                }],
                 tailpipe: PipeSection::from_diameter(0.9, 0.065, 650.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.18, 0.048, 310.0); 8],
@@ -424,7 +439,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.1, 0.062, 650.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.22, 0.046, 310.0); 10],
@@ -486,7 +501,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.0, 0.055, 650.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.14, 0.042, 310.0); 12],
@@ -569,7 +584,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.0, 0.060, 700.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.20, 0.052, 320.0); 2],
@@ -624,7 +639,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.2, 0.060, 600.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.24, 0.042, 310.0); 4],
@@ -694,7 +709,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.4, 0.065, 600.0),
                 tailpipe_flanged: false,
-                cutout: true,
+                cutout_fitted: true,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.26, 0.044, 310.0); 8],
@@ -774,7 +789,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(0.35, 0.048, 620.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.18, 0.048, 310.0)],
@@ -897,7 +912,7 @@ impl EnginePreset {
                 ],
                 tailpipe: PipeSection::from_diameter(1.3, 0.055, 450.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.22, 0.040, 320.0); 4],
@@ -959,7 +974,7 @@ impl EnginePreset {
                 }],
                 tailpipe: PipeSection::from_diameter(1.6, 0.070, 600.0),
                 tailpipe_flanged: false,
-                cutout: false,
+                cutout_fitted: false,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.30, 0.044, 310.0); 6],
@@ -1151,7 +1166,7 @@ impl Driveline {
             load: preset.load,
             pumping: CLOSED_THROTTLE_PMEP * preset.displacement() / (4.0 * PI),
             torque: 0.0,
-            exhaust_cutout: preset.exhaust.cutout,
+            exhaust_cutout: false,
             anti_lag: preset.anti_lag,
             dyno_mode: DynoMode::FreeRev,
             dyno_absorber_torque: 0.0,
@@ -1644,7 +1659,7 @@ mod tests {
             "cross_plane_v8 should carry a Roots supercharger"
         );
         assert!(
-            v8.exhaust.cutout,
+            v8.exhaust.cutout_fitted,
             "cross_plane_v8 should have an active exhaust cutout"
         );
 
@@ -1677,7 +1692,7 @@ mod tests {
 
         let tt_v8 = EnginePreset::twin_turbo_v8();
         assert!(
-            tt_v8.exhaust.cutout,
+            tt_v8.exhaust.cutout_fitted,
             "twin_turbo_v8 should have an active exhaust cutout"
         );
         assert!(
@@ -2437,5 +2452,84 @@ mod tests {
             }
             _ => panic!("expected SweepPull mode"),
         }
+    }
+
+    #[test]
+    fn fitted_cutout_closed_retains_silencers() {
+        let preset = EnginePreset::cross_plane_v8();
+        assert!(
+            preset.exhaust.cutout_fitted,
+            "cross_plane_v8 must have cutout fitted"
+        );
+        assert!(
+            !preset.exhaust.silencers.is_empty(),
+            "fitted cutout must not clear silencers"
+        );
+        // Driveline defaults to closed even when fitted
+        let driveline = Driveline::new(&preset);
+        assert!(
+            !driveline.exhaust_cutout,
+            "fitted cutout must default closed"
+        );
+        // Back pressure with closed must include silencer loss
+        let bp_closed = preset.exhaust.back_pressure(0.08, false);
+        let bp_open = preset.exhaust.back_pressure(0.08, true);
+        assert!(
+            bp_closed > bp_open,
+            "closed cutout must have higher back pressure: {bp_closed} vs {bp_open}"
+        );
+    }
+
+    #[test]
+    fn straight_pipe_differs_from_muffled_for_every_silenced_preset() {
+        for preset in EnginePreset::catalogue() {
+            let has_real_silencer = preset
+                .exhaust
+                .silencers
+                .iter()
+                .any(|s| !matches!(s, crate::physics::plumbing::Silencer::Straight));
+            if has_real_silencer {
+                let straight = preset.exhaust.clone().into_straight_pipe();
+                assert!(
+                    straight.silencers.is_empty(),
+                    "{} straight-pipe must clear silencers",
+                    preset.name
+                );
+                assert!(
+                    !preset.exhaust.silencers.is_empty(),
+                    "{} muffled must have silencers",
+                    preset.name
+                );
+                assert!(
+                    preset.exhaust.silencers != straight.silencers,
+                    "{} muffled and straight-pipe must differ",
+                    preset.name
+                );
+                // Flat-plane specifically must not be Straight
+                if preset.name == "Flat-plane V8" {
+                    assert!(
+                        has_real_silencer,
+                        "Flat-plane V8 must have a real silencer, not Straight"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn into_straight_pipe_does_not_toggle_cutout_state() {
+        let preset = EnginePreset::inline_four();
+        let without = preset.exhaust.clone();
+        assert!(!without.cutout_fitted);
+        let straight_without = without.clone().into_straight_pipe();
+        assert!(!straight_without.cutout_fitted);
+
+        let with = EnginePreset::cross_plane_v8().exhaust.clone();
+        assert!(with.cutout_fitted);
+        let straight_with = with.clone().into_straight_pipe();
+        assert!(
+            straight_with.cutout_fitted,
+            "fitted state must survive straight-pipe conversion"
+        );
     }
 }

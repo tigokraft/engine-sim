@@ -228,8 +228,8 @@ pub struct ExhaustConfig {
     pub tailpipe: PipeConfig,
     #[serde(default)]
     pub tailpipe_flanged: bool,
-    #[serde(default)]
-    pub cutout: bool,
+    #[serde(default, alias = "cutout")]
+    pub cutout_fitted: bool,
     /// Optional mode override: `"muffled"`, `"straight_pipe"`, or `"open_headers"`.
     #[serde(default)]
     pub mode: Option<String>,
@@ -514,7 +514,7 @@ impl EngineConfig {
             silencers,
             tailpipe,
             tailpipe_flanged: preset.exhaust.tailpipe_flanged,
-            cutout: preset.exhaust.cutout,
+            cutout_fitted: preset.exhaust.cutout_fitted,
             mode,
         };
 
@@ -843,7 +843,7 @@ impl EngineConfig {
             silencers,
             tailpipe,
             tailpipe_flanged: self.exhaust.tailpipe_flanged,
-            cutout: self.exhaust.cutout,
+            cutout_fitted: self.exhaust.cutout_fitted,
         };
 
         if let Some(mode) = &self.exhaust.mode {
@@ -1012,10 +1012,126 @@ impl EngineConfig {
     }
 }
 
+impl EngineConfig {
+    /// Validates physically invalid configuration values.
+    ///
+    /// Every limit has a software or physical reason:
+    /// - `>0` for lengths/diameters/volumes: zero would make area zero and
+    ///   cause division by zero in `pipe_area` or `collector_reflection`.
+    /// - `compression_ratio` 4..25: below 4 is not a combustion engine, above 25
+    ///   exceeds any production diesel and makes `clearance = stroke/(CR-1)`
+    ///   numerically unstable.
+    /// - `area_ratio >=1.0`: a contraction (`<1`) is not an expansion chamber.
+    /// - `temperature` 200..2000K: outside this the gas constant and speed of
+    ///   sound are non-physical and viscothermal formulas overflow.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.cylinder.bore <= 0.0
+            || self.cylinder.stroke <= 0.0
+            || self.cylinder.rod_length <= 0.0
+        {
+            return Err("cylinder bore/stroke/rod_length must be >0".to_string());
+        }
+        if !(4.0..=25.0).contains(&self.cylinder.compression_ratio) {
+            return Err(format!(
+                "compression_ratio {} out of physical range 4..25",
+                self.cylinder.compression_ratio
+            ));
+        }
+        if self.cylinder.intake_diameter <= 0.0 || self.cylinder.exhaust_diameter <= 0.0 {
+            return Err("valve diameters must be >0".to_string());
+        }
+        for p in &self.exhaust.primaries {
+            if p.length <= 0.0 {
+                return Err(format!("exhaust primary length {} must be >0", p.length));
+            }
+            if p.diameter <= 0.0 {
+                return Err(format!(
+                    "exhaust primary diameter {} must be >0",
+                    p.diameter
+                ));
+            }
+            if !(200.0..=2000.0).contains(&p.temperature) {
+                return Err(format!(
+                    "exhaust primary temperature {} out of 200..2000K",
+                    p.temperature
+                ));
+            }
+        }
+        if self.exhaust.collector.outlet_diameter <= 0.0 {
+            return Err("collector outlet_diameter must be >0".to_string());
+        }
+        if self.exhaust.collector.taper_length < 0.0 {
+            return Err("collector taper_length must be >=0".to_string());
+        }
+        for s in &self.exhaust.silencers {
+            if let SilencerConfig::ExpansionChamber {
+                area_ratio, length, ..
+            } = s
+            {
+                if *area_ratio < 1.0 {
+                    return Err(format!(
+                        "expansion chamber area_ratio {} must be >=1.0",
+                        area_ratio
+                    ));
+                }
+                if *length <= 0.0 {
+                    return Err(format!("expansion chamber length {} must be >0", length));
+                }
+            }
+            if let SilencerConfig::Absorptive {
+                diameter, length, ..
+            } = s
+            {
+                if *diameter <= 0.0 || *length <= 0.0 {
+                    return Err("absorptive silencer diameter/length must be >0".to_string());
+                }
+            }
+        }
+        if self.exhaust.tailpipe.length <= 0.0 || self.exhaust.tailpipe.diameter <= 0.0 {
+            return Err("tailpipe length/diameter must be >0".to_string());
+        }
+        if !(200.0..=2000.0).contains(&self.exhaust.tailpipe.temperature) {
+            return Err(format!(
+                "tailpipe temperature {} out of 200..2000K",
+                self.exhaust.tailpipe.temperature
+            ));
+        }
+        if self.intake.plenum_volume < 0.0 {
+            return Err("intake plenum_volume must be >=0".to_string());
+        }
+        for r in &self.intake.runners {
+            if r.length <= 0.0 || r.diameter <= 0.0 {
+                return Err("intake runner length/diameter must be >0".to_string());
+            }
+        }
+        if !(400.0..=15000.0).contains(&self.block.redline)
+            || !(200.0..=5000.0).contains(&self.block.idle)
+        {
+            return Err(format!(
+                "redline {} / idle {} out of plausible range",
+                self.block.redline, self.block.idle
+            ));
+        }
+        if self.block.redline <= self.block.idle {
+            return Err("redline must be > idle".to_string());
+        }
+        if self.block.inertia <= 0.0 {
+            return Err("inertia must be >0".to_string());
+        }
+        if self.firing.sequence.is_empty() {
+            return Err("firing sequence must not be empty".to_string());
+        }
+        Ok(())
+    }
+}
+
 impl EnginePreset {
     /// Deserializes an [`EnginePreset`] from a TOML string.
-    pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
+    pub fn from_toml(s: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let config: EngineConfig = toml::from_str(s)?;
+        config
+            .validate()
+            .map_err(|e| format!("invalid engine config: {e}"))?;
         Ok(config.to_preset())
     }
 
@@ -1043,7 +1159,7 @@ impl EnginePreset {
                 }
             }
         };
-        Ok(Self::from_toml(&content)?)
+        Self::from_toml(&content)
     }
 
     /// Saves this engine preset to a TOML file.
@@ -1129,6 +1245,96 @@ mod tests {
         let built = config.to_preset();
         assert!(built.exhaust.is_open_headers());
         assert!(built.exhaust.silencers.is_empty());
-        assert!(built.exhaust.cutout);
+        assert!(built.exhaust.cutout_fitted);
+    }
+
+    #[test]
+    fn invalid_geometry_is_rejected() {
+        let preset = EnginePreset::inline_four();
+        let mut config = EngineConfig::from_preset(&preset);
+        config.cylinder.compression_ratio = 2.0; // below physical 4
+        assert!(config.validate().is_err());
+        let toml_str = toml::to_string(&config).expect("serialize");
+        assert!(EnginePreset::from_toml(&toml_str).is_err());
+
+        let mut config2 = EngineConfig::from_preset(&preset);
+        config2.exhaust.primaries[0].length = 0.0;
+        assert!(config2.validate().is_err());
+
+        let mut config3 = EngineConfig::from_preset(&preset);
+        config3.exhaust.primaries[0].diameter = -0.01;
+        assert!(config3.validate().is_err());
+
+        let mut config4 = EngineConfig::from_preset(&preset);
+        config4.exhaust.silencers = vec![SilencerConfig::ExpansionChamber {
+            length: 0.4,
+            area_ratio: 0.8, // <1 invalid
+            stages: 1,
+        }];
+        assert!(config4.validate().is_err());
+    }
+
+    #[test]
+    fn malformed_toml_is_not_silent_fallback() {
+        let bad = r#"
+[identity]
+name = "Bad"
+note = "broken"
+
+[block]
+mass = 180
+bore_spacing = 0.09
+inertia = 0.3
+redline = 7000
+idle = 800
+load = [5.0, 0.01, 1e-4]
+
+[cylinder]
+bore = 0.086
+stroke = 0.086
+rod_length = 0.1345
+compression_ratio = 1.5
+intake_open_deg = 700
+intake_duration_deg = 240
+intake_lift = 0.01
+intake_diameter = 0.037
+exhaust_open_deg = 500
+exhaust_duration_deg = 240
+exhaust_lift = 0.009
+exhaust_diameter = 0.031
+
+[combustion]
+type = "Spark"
+spark_angle_deg = 340
+duration_deg = 60
+efficiency_parameter = 5.0
+form_factor = 2.0
+combustion_efficiency = 0.97
+
+[firing]
+sequence = [1, 3, 4, 2]
+banks = [0, 0, 0, 0]
+
+[exhaust]
+primaries = [{ length = 0.40, diameter = 0.038, temperature = 850.0 }]
+collector = { inlets = 4, outlet_diameter = 0.054, taper_length = 0.12 }
+crossover = { type = "None" }
+silencers = []
+tailpipe = { length = 1.2, diameter = 0.054, temperature = 600.0 }
+
+[intake]
+runners = [{ length = 0.28, diameter = 0.042, temperature = 310.0 }]
+plenum_volume = 0.0022
+throttle = { type = "Single", bore = 0.06 }
+
+[induction]
+type = "NaturallyAspirated"
+
+[acoustics]
+tailpipes = [[0.35, -2.2, 0.35]]
+intake = [0.2, 1.4, 0.65]
+block = [0.0, 0.8, 0.5]
+"#;
+        assert!(EnginePreset::from_toml(bad).is_err());
     }
 }

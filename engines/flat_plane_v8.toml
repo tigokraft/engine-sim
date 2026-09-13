@@ -67,7 +67,7 @@ banks = [
 
 [exhaust]
 tailpipe_flanged = false
-cutout = false
+cutout_fitted = false
 
 [[exhaust.primaries]]
 length = 0.42
@@ -119,7 +119,10 @@ type = "XPipe"
 position = 0.8
 
 [[exhaust.silencers]]
-type = "Straight"
+type = "ExpansionChamber"
+length = 0.45
+area_ratio = 4.0
+stages = 2
 
 [exhaust.tailpipe]
 length = 0.9

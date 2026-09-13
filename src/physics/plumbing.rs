@@ -219,7 +219,11 @@ pub struct ExhaustSystem {
     /// Whether the tailpipe exit features an acoustic flange (baffle reflection boundary).
     pub tailpipe_flanged: bool,
     /// Whether an active exhaust cutout / bypass junction is fitted.
-    pub cutout: bool,
+    ///
+    /// Geometry only: a car with a cutout does not drive around with it open.
+    /// The open/closed state arrives per frame in the snapshot and defaults to
+    /// closed when no state is supplied.
+    pub cutout_fitted: bool,
 }
 
 /// Layout and sizing of the engine throttle mechanism.
@@ -270,7 +274,7 @@ impl ExhaustSystem {
             silencers: Vec::new(),
             tailpipe: PipeSection::from_diameter(0.06, outlet_d, 800.0),
             tailpipe_flanged: false,
-            cutout: true,
+            cutout_fitted: true,
         }
     }
 
@@ -281,14 +285,17 @@ impl ExhaustSystem {
         self.secondary.clear();
         self.crossover = Crossover::None;
         self.tailpipe = PipeSection::from_diameter(0.06, outlet_d, 800.0);
-        self.cutout = true;
+        self.cutout_fitted = true;
         self
     }
 
     /// Converts this exhaust system into an unbaffled straight pipe system (no silencers).
+    ///
+    /// Clearing the silencer list already is the straight pipe; the cutout
+    /// bypass is a separate path and is not opened here. A muffled system
+    /// with a cutout fitted must stay muffled until the runtime state opens it.
     pub fn into_straight_pipe(mut self) -> Self {
         self.silencers.clear();
-        self.cutout = true;
         self
     }
 
@@ -443,8 +450,22 @@ impl ExhaustSystem {
 
     /// Sets whether the exhaust system is fitted with an active cutout bypass.
     pub fn with_cutout(mut self, cutout: bool) -> Self {
-        self.cutout = cutout;
+        self.cutout_fitted = cutout;
         self
+    }
+
+    /// Sets whether the exhaust system is fitted with an active cutout bypass.
+    ///
+    /// Named for the split introduced in Stage T5: `cutout_fitted` is geometry,
+    /// `cutout_open` is runtime state.
+    pub fn with_cutout_fitted(mut self, fitted: bool) -> Self {
+        self.cutout_fitted = fitted;
+        self
+    }
+
+    /// Whether a cutout bypass is fitted.
+    pub fn has_cutout(&self) -> bool {
+        self.cutout_fitted
     }
 
     /// Calculates steady-state exhaust back pressure [Pa] for a given mass flow [kg/s].
@@ -585,7 +606,7 @@ impl ExhaustSystem {
             silencers: vec![Silencer::Helmholtz(MufflerGeometry::default())],
             tailpipe: PipeSection::from_diameter(1.2, collector_outlet_d, 600.0),
             tailpipe_flanged: false,
-            cutout: false,
+            cutout_fitted: false,
         }
     }
 }
@@ -606,7 +627,7 @@ mod tests {
             silencers: vec![Silencer::Straight],
             tailpipe: PipeSection::from_diameter(1.0, 0.054, 600.0),
             tailpipe_flanged: false,
-            cutout: false,
+            cutout_fitted: false,
         };
 
         let a1 = primary.area;
@@ -629,7 +650,7 @@ mod tests {
             silencers: vec![],
             tailpipe: PipeSection::from_diameter(1.0, 0.065, 600.0),
             tailpipe_flanged: false,
-            cutout: false,
+            cutout_fitted: false,
         };
 
         let c = 550.0; // speed of sound on hot exhaust gas
@@ -649,7 +670,7 @@ mod tests {
             silencers: vec![],
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
-            cutout: false,
+            cutout_fitted: false,
         };
 
         let c = 580.0;
@@ -673,7 +694,7 @@ mod tests {
             }],
             tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
             tailpipe_flanged: false,
-            cutout: false,
+            cutout_fitted: false,
         };
         assert!(!muffled.is_open_headers());
 
@@ -681,7 +702,7 @@ mod tests {
         assert!(open.is_open_headers());
         assert!(open.silencers.is_empty());
         assert!(open.tailpipe.length <= 0.10);
-        assert!(open.cutout);
+        assert!(open.cutout_fitted);
     }
 
     #[test]
@@ -700,13 +721,77 @@ mod tests {
             }],
             tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
             tailpipe_flanged: false,
-            cutout: false,
+            cutout_fitted: false,
         };
         let straight = muffled.into_straight_pipe();
         assert!(straight.is_straight_pipe());
         assert!(!straight.is_open_headers());
         assert!(straight.silencers.is_empty());
         assert!((straight.tailpipe.length - 1.5).abs() < 1e-12);
-        assert!(straight.cutout);
+        // Straight pipe is not an automatic cutout open; fitted stays as it was.
+        assert!(!straight.cutout_fitted);
+    }
+
+    #[test]
+    fn cutout_fitted_does_not_imply_open() {
+        let primary = PipeSection::from_diameter(0.40, 0.040, 850.0);
+        let collector = Collector::from_diameter(4, 0.054, 0.12);
+        let with_cutout = ExhaustSystem {
+            primaries: vec![primary; 4],
+            collector,
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![Silencer::ExpansionChamber {
+                length: 0.45,
+                area_ratio: 4.5,
+                stages: 2,
+            }],
+            tailpipe: PipeSection::from_diameter(1.2, 0.054, 600.0),
+            tailpipe_flanged: false,
+            cutout_fitted: true,
+        };
+        // Fitted cutout must not bypass silencers on its own
+        assert!(with_cutout.cutout_fitted);
+        assert!(!with_cutout.silencers.is_empty());
+        assert!(!with_cutout.is_straight_pipe());
+        assert!(!with_cutout.is_open_headers());
+        // Back pressure with cutout closed must include silencer loss
+        let bp_closed = with_cutout.back_pressure(0.08, false);
+        let bp_open = with_cutout.back_pressure(0.08, true);
+        assert!(
+            bp_closed > bp_open,
+            "closed cutout must have higher back pressure: closed={bp_closed} open={bp_open}"
+        );
+    }
+
+    #[test]
+    fn into_straight_pipe_preserves_cutout_fitted_state() {
+        let primary = PipeSection::from_diameter(0.45, 0.040, 850.0);
+        let collector = Collector::from_diameter(4, 0.060, 0.15);
+        let without = ExhaustSystem {
+            primaries: vec![primary; 4],
+            collector,
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![Silencer::Helmholtz(MufflerGeometry::default())],
+            tailpipe: PipeSection::from_diameter(1.2, 0.060, 600.0),
+            tailpipe_flanged: false,
+            cutout_fitted: false,
+        };
+        let straight_without = without.clone().into_straight_pipe();
+        assert!(!straight_without.cutout_fitted);
+
+        let with = ExhaustSystem {
+            cutout_fitted: true,
+            ..without
+        };
+        let straight_with = with.into_straight_pipe();
+        assert!(
+            straight_with.cutout_fitted,
+            "fitted state must survive straight-pipe conversion"
+        );
+        // Both must be straight-pipe regardless of fitted
+        assert!(straight_without.is_straight_pipe());
+        assert!(straight_with.is_straight_pipe());
     }
 }

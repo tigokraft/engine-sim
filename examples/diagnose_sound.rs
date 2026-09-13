@@ -72,13 +72,38 @@ fn main() -> Result<()> {
         }
     }
 
-    let preset = match preset_name.as_str() {
-        "inline-4" | "inline-four" => EnginePreset::inline_four(),
-        "flat-plane-v8" => EnginePreset::flat_plane_v8(),
-        "v10" => EnginePreset::v10(),
-        "v12" => EnginePreset::v12(),
-        "2-rotor" | "2-rotor-wankel" => EnginePreset::two_rotor_wankel(),
-        _ => EnginePreset::cross_plane_v8(),
+    let preset = {
+        let catalogue = EnginePreset::catalogue();
+        // Match against catalogue names by normalised form, as `measure` does.
+        let normalized = preset_name.to_lowercase().replace([' ', '-'], "_");
+        if let Some(found) = catalogue.into_iter().find(|p| {
+            p.name.to_lowercase().replace([' ', '-'], "_") == normalized
+                || p.name.to_lowercase().replace(' ', "-") == preset_name.to_lowercase()
+        }) {
+            found
+        } else {
+            // Try explicit hyphenated literals for backwards compat, then fail loudly.
+            match preset_name.as_str() {
+                "inline-4" | "inline-four" => EnginePreset::inline_four(),
+                "flat-plane-v8" => EnginePreset::flat_plane_v8(),
+                "v10" => EnginePreset::v10(),
+                "v12" => EnginePreset::v12(),
+                "2-rotor" | "2-rotor-wankel" => EnginePreset::two_rotor_wankel(),
+                "cross-plane-v8" | "cross_plane_v8" => EnginePreset::cross_plane_v8(),
+                _ => {
+                    eprintln!(
+                        "unknown preset '{}' — available: {}",
+                        preset_name,
+                        EnginePreset::catalogue()
+                            .iter()
+                            .map(|p| p.name)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
     };
 
     println!("Target Engine: {}", preset.name);

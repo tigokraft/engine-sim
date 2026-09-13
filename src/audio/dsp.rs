@@ -1081,7 +1081,9 @@ impl Pop {
 
         // `age` counts forward from the pulse's own start, so it is how far into
         // its own envelope the pulse already is on the sample it first appears.
-        let age = age.clamp(0.0, 1.0);
+        // Clamped to one control block so a pop scheduled on a 16-sample grid
+        // can start anywhere inside that block sample-accurately.
+        let age = age.clamp(0.0, 32.0);
         self.attack_state = 1.0 - (1.0 - self.attack_coeff).powf(age);
         self.decay_state = self.decay_coeff.powf(age);
         self.active = true;
@@ -2728,6 +2730,16 @@ pub struct EngineSynth {
     /// the pipework, so it is a bank event and fires into the collector rather
     /// than down any one cylinder's primary.
     backfire_pulses: Vec<PopPool>,
+    /// One-pole bandlimiting filter per bank for backfire pulses.
+    ///
+    /// A backfire front rises in ~0.18 ms (one sample at 48 kHz), which is a
+    /// step function containing energy well above Nyquist. The step is correct
+    /// as a physical rise time, but it must be bandlimited before the
+    /// soft clipper's nonlinearity, otherwise harmonics fold back as rasp.
+    /// A first-order lowpass at 0.45*fs keeps the crack while removing the
+    /// aliasing tail; it is the minimum-phase equivalent of generating at 4×
+    /// and decimating through the half-band already on the output bus.
+    backfire_filters: Vec<OnePole>,
     /// Excitation presented to each bank's collector this sample.
     bank_excitations: Vec<f32>,
     /// Pressure radiated from each bank's mouth this sample.
@@ -2998,6 +3010,7 @@ impl EngineSynth {
             cycle: CyclePlayer::new(fs),
             excitations: vec![0.0; n_cyl],
             backfire_pulses: vec![PopPool::default(); config.bank_count],
+            backfire_filters: vec![OnePole::new(fs, 0.45 * fs); config.bank_count],
             bank_excitations: vec![0.0; config.bank_count],
             radiated: vec![0.0; config.bank_count],
             port_jets: vec![0.0; n_cyl],
@@ -3173,6 +3186,9 @@ impl EngineSynth {
         for pool in self.backfire_pulses.iter_mut() {
             pool.reset();
         }
+        for filter in self.backfire_filters.iter_mut() {
+            filter.reset();
+        }
         self.cycle.reset();
         self.excitations.fill(0.0);
         self.intake_excitations.fill(0.0);
@@ -3344,7 +3360,16 @@ impl EngineSynth {
         self.backfire.tune(&self.config, &self.snapshot);
         if let Some((severity, decay)) = self.backfire.poll(&mut self.noise, CONTROL_BLOCK) {
             let bank = (self.noise.next_u32() as usize) % self.backfire_pulses.len();
-            let amplitude = severity * self.config.backfire_level as f32 * 2.0;
+            // `backfire_level` is already calibrated as the mix level of the
+            // bank excitation; the `*2.0` was an undocumented doubling that put
+            // pops 6 dB hot and masked the missing midrange.
+            let amplitude = severity * self.config.backfire_level as f32;
+            // Sample-accurate onset: the poll runs at CONTROL_BLOCK (16) but a
+            // 0.18 ms front must not jitter by 0.33 ms. The pool's `age`
+            // parameter advances the envelope analytically to the true start
+            // sample inside the block, giving one-sample accuracy without a
+            // second timing channel.
+            let age = self.noise.next_unit() * CONTROL_BLOCK as f32;
             // Backfires combine an explosive positive expansion wave with
             // turbulent flame roar; sharing the runner and muffler gives them
             // the pipe's acoustic colour without reducing to a thin metallic click.
@@ -3354,7 +3379,7 @@ impl EngineSynth {
                 0.00018,
                 decay,
                 0.80,
-                self.noise.next_unit(),
+                age,
             );
         }
     }
@@ -3721,13 +3746,13 @@ impl EngineSynth {
 
         let exhaust_level = self.exhaust_level.next_value();
         let launch = self.launch.value();
-        for (excitation, pool) in self
-            .bank_excitations
-            .iter_mut()
-            .zip(self.backfire_pulses.iter_mut())
-        {
-            // Into the same pascals the cylinders' own excitations arrive in.
-            *excitation = pool.process(&mut self.noise) * launch;
+        for i in 0..self.bank_excitations.len() {
+            let raw = self.backfire_pulses[i].process(&mut self.noise);
+            // Bandlimit the step-like front before the nonlinearity:
+            // the physical rise is correct but must not carry energy above
+            // Nyquist into the clipper, where it folds as rasp.
+            let filtered = self.backfire_filters[i].process(raw);
+            self.bank_excitations[i] = filtered * launch;
         }
         for ((drive, pulse), jet) in self
             .port_drive

@@ -49,7 +49,7 @@ banks = [0]
 
 [exhaust]
 tailpipe_flanged = false
-cutout = false
+cutout_fitted = false
 
 [[exhaust.primaries]]
 length = 0.62

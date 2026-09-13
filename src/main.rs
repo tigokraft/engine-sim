@@ -390,10 +390,12 @@ fn simulation_thread(
             || rig.block.ecu.active_cut == LimiterCut::Spark
             || (rig.driveline.rpm >= rig.driveline.redline
                 && rig.block.ecu.limiter_cut_type == LimiterCut::Spark);
+        // Cutout defaults closed even when fitted; driveline holds the runtime
+        // state so all paths share one source of truth.
         let controls = EngineControls {
             throttle: rig.driveline.throttle.clamp(0.0, 1.0),
             spark_cut: is_spark_cut,
-            exhaust_cutout: false,
+            exhaust_cutout: rig.driveline.exhaust_cutout && rig.block.exhaust.cutout_fitted,
             anti_lag: false,
         };
         let snapshot = rig

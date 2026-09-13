@@ -2068,7 +2068,10 @@ fn meter_bar(value: f64, width: usize, colour: Color) -> TextLine<'static> {
 /// index into it *is* the crank angle, and the four strokes are its quarters:
 /// intake, compression, power, exhaust, with compression TDC at 360 degrees.
 fn stroke_colour(index: usize, total: usize) -> Color {
-    let quarter = if total == 0 { 0 } else { index * 4 / total };
+    let quarter = index
+        .checked_mul(4)
+        .and_then(|v| v.checked_div(total))
+        .unwrap_or(0);
     match quarter {
         0 => INTAKE_COLOR,
         1 => COMPRESSION_COLOR,

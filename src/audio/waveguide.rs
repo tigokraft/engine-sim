@@ -1371,11 +1371,45 @@ impl ScatteringJunction {
 /// Classical transmission loss for an expansion chamber of length $L$ and area ratio $m$:
 ///
 /// $$TL = 10 \log_{10} \left[ 1 + \frac{1}{4} \left(m - \frac{1}{m}\right)^2 \sin^2(k L) \right]$$
+/// Wall transmission and edge diffraction loss of a single expansion chamber [dB].
+///
+/// A reactive chamber's TL formula is lossless: at $kL = n\pi$ the TL is
+/// zero, and in a network whose only sink is the mouth the stored energy
+/// returns. Real chambers lose energy through two mechanisms the ideal
+/// junction does not capture:
+///
+/// - **Shell radiation:** the thin steel shell of the expansion volume
+///   vibrates and radiates a small fraction of the internal field. For an
+///   automotive muffler shell (~1 mm steel) this is 0.5–1.5 dB per pass
+///   through the chamber in the mid-band (Munjal, *Acoustics of Ducts
+///   and Mufflers*).
+/// - **Vortex shedding at the sharp area steps:** the abrupt expansion
+///   and contraction separate the flow and convert a fraction of the
+///   acoustic particle velocity into vorticity, which is convected away.
+///
+/// Together these give a broadband baseline loss independent of the
+/// reactive $\sin^2(kL)$ term.
+///
+/// **Empirical interim assumption:** the value below is *not* derived from
+/// shell thickness, material properties, or flow conditions. It is a budgeted
+/// 1.0 dB per stage ($g = 10^{-1/20} \approx 0.891$) applied to each direction
+/// through the cavity, chosen to make the reactive chamber attenuating on
+/// average rather than resonant in a network whose only other sink is the
+/// mouth. It preserves the reactive notch depth set by $m$ and $L$ via
+/// scattering. Proper geometry-derived wall transmission (shell mass law +
+/// edge vortex-shedding resistance $K=(1-1/m)^2$) is explicit future work and
+/// must replace this constant when that stage lands; the regression tests
+/// below are split so the ideal reactive behaviour can still be verified
+/// without the empirical baseline.
+const CHAMBER_WALL_LOSS_DB_PER_STAGE: f64 = 1.0;
+
 #[derive(Debug, Clone)]
 pub struct ExpansionChamber {
     junction_in: ScatteringJunction,
     cavity: WaveguidePipe,
     junction_out: ScatteringJunction,
+    /// Broadband amplitude surviving one pass through wall + edge loss [-].
+    wall_gain: f32,
     scatter_buf_in: [f32; 2],
     scatter_buf_out: [f32; 2],
 }
@@ -1400,13 +1434,26 @@ impl ExpansionChamber {
         let cavity = WaveguidePipe::new(length, a2, sample_rate, gamma, gas_constant, temperature);
         let junction_out = ScatteringJunction::from_areas(&[a2, a1]);
 
+        let wall_gain = 10.0f64.powf(-CHAMBER_WALL_LOSS_DB_PER_STAGE / 20.0) as f32;
+
         Self {
             junction_in,
             cavity,
             junction_out,
+            wall_gain,
             scatter_buf_in: [0.0; 2],
             scatter_buf_out: [0.0; 2],
         }
+    }
+
+    /// Amplitude surviving wall and edge loss per pass [-].
+    pub fn wall_gain(&self) -> f32 {
+        self.wall_gain
+    }
+
+    #[cfg(test)]
+    fn set_wall_gain_for_test(&mut self, gain: f32) {
+        self.wall_gain = gain;
     }
 
     /// Retunes propagation delay and acoustic admittance for current gas state.
@@ -1437,7 +1484,12 @@ impl ExpansionChamber {
         let p_into_cav_1 = self.scatter_buf_out[0];
         let p_out_plus = self.scatter_buf_out[1];
 
-        self.cavity.push_inputs(p_into_cav_0, p_into_cav_1);
+        // Wall and edge loss: each wave that enters the cavity has traversed
+        // the shell and diffracted at a sharp edge, losing a small broadband
+        // fraction as radiation and vorticity. Applied symmetrically so the
+        // chamber remains reciprocal.
+        self.cavity
+            .push_inputs(p_into_cav_0 * self.wall_gain, p_into_cav_1 * self.wall_gain);
 
         (p_in_minus, p_out_plus)
     }
@@ -2546,7 +2598,7 @@ impl ExhaustNetwork {
             // The mouth's reflection filter already holds part of the round
             // trip; leave it in the pipe as well and the tailpipe plays flat.
             tailpipe.set_boundary_phase_delay(mouth.phase_delay_samples());
-            tailpipe.set_steepening(exhaust.cutout || exhaust.is_open_headers());
+            tailpipe.set_steepening(exhaust.cutout_fitted || exhaust.is_open_headers());
             tailpipe.tune(gamma, r, stations.tailpipe);
             tailpipes.push(tailpipe);
             mouths.push(mouth);
@@ -2590,7 +2642,7 @@ impl ExhaustNetwork {
             pre_cross_down: vec![0.0; n_banks],
             collector_returns: vec![0.0; n_banks],
             chain_returns,
-            cutout_open: exhaust.cutout,
+            cutout_open: false,
         }
     }
 
@@ -3307,7 +3359,9 @@ mod tests {
     }
 
     #[test]
-    fn chamber_transmission_loss_matches_theory() {
+    fn chamber_reactive_transmission_matches_munjal() {
+        // Ideal/reactive part only — must hold without the empirical wall term.
+        //
         // A single-expansion chamber terminated anechoically has a closed-form
         // transmission loss that depends only on the area ratio and how many
         // wavelengths fit the cavity:
@@ -3315,10 +3369,10 @@ mod tests {
         //   TL = 10 log10[ 1 + (1/4) (m - 1/m)^2 sin^2(kL) ]
         //
         // It is zero whenever kL is a multiple of pi — the chamber is
-        // transparent at those frequencies, which is exactly why a single
-        // chamber cannot silence an engine on its own — and peaks at the
-        // quarter-wave points. Nothing in it is tunable, so it is a real check
-        // that the two area steps and the pipe between them scatter correctly.
+        // transparent at those frequencies — and peaks at the quarter-wave
+        // points. This test validates the reactive scattering (two area steps +
+        // pipe) alone, so the empirical wall loss is subtracted before comparison
+        // and cannot hide a regression in the junction physics.
         const FS: f32 = 48_000.0;
         const GAMMA: f32 = 1.4;
         const R: f32 = 287.0;
@@ -3336,8 +3390,6 @@ mod tests {
             10.0 * (1.0 + 0.25 * (m - 1.0 / m).powi(2) * s * s).log10()
         };
 
-        // Quarter-wave point (peak loss), half-wave point (transparent), and a
-        // frequency between the two.
         let quarter = c / (4.0 * cavity_length as f32);
         for f in [quarter, 2.0 * quarter, 0.5 * quarter, 1.5 * quarter] {
             let mut chamber = ExpansionChamber::new(
@@ -3349,10 +3401,11 @@ mod tests {
                 R,
                 TEMPERATURE,
             );
+            // Disable empirical wall loss for the ideal/reactive check — this
+            // test must validate the Munjal TL without the 1 dB baseline, so a
+            // regression in the scattering cannot be hidden by the empirical term.
+            chamber.set_wall_gain_for_test(1.0);
 
-            // Drive with a sine and read the transmitted wave. Handing the
-            // chamber a zero backward wave from downstream *is* the anechoic
-            // termination the analytic result assumes.
             let settle = 24_000;
             let measure = 24_000;
             let mut transmitted = vec![0.0f32; measure];
@@ -3367,11 +3420,83 @@ mod tests {
             let amplitude = magnitude_at(&transmitted, f, FS);
             let measured = -20.0 * amplitude.max(1e-9).log10();
             let expected = analytic(f);
-
             assert!(
                 (measured - expected).abs() < 1.0,
-                "at {f:.0} Hz (kL = {:.2} rad): {measured:.2} dB measured, {expected:.2} dB from theory",
+                "reactive TL at {f:.0} Hz (kL = {:.2} rad): {measured:.2} dB vs {expected:.2} dB theory (wall disabled)",
                 std::f32::consts::TAU * f / c * cavity_length as f32
+            );
+        }
+    }
+
+    #[test]
+    fn chamber_empirical_wall_loss_adds_baseline() {
+        // Explicitly verify the empirical interim loss, separate from the
+        // reactive theory. At kL = nπ the ideal TL is 0, so a chamber with the
+        // empirical wall gain should transmit less than an ideal (wall=1) one
+        // by approximately the configured 1.0 dB baseline — independent of the
+        // reactive notch depth.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.4;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 300.0;
+
+        let c = speed_of_sound(GAMMA, R, TEMPERATURE);
+        let pipe_area = std::f64::consts::PI * 0.030 * 0.030;
+        let cavity_length = 0.30f64;
+        let area_ratio = 4.0f64;
+
+        // Transparent frequencies: kL = nπ → sin(kL)=0 → ideal TL = 0
+        let transparent = [c / (2.0 * cavity_length as f32), c / cavity_length as f32];
+        for f in transparent {
+            let mut ideal = ExpansionChamber::new(
+                pipe_area,
+                area_ratio,
+                cavity_length,
+                FS,
+                GAMMA,
+                R,
+                TEMPERATURE,
+            );
+            ideal.set_wall_gain_for_test(1.0);
+            let mut with_wall = ExpansionChamber::new(
+                pipe_area,
+                area_ratio,
+                cavity_length,
+                FS,
+                GAMMA,
+                R,
+                TEMPERATURE,
+            );
+
+            let settle = 24_000;
+            let measure = 24_000;
+            let mut tx_ideal = vec![0.0f32; measure];
+            let mut tx_wall = vec![0.0f32; measure];
+            for i in 0..(settle + measure) {
+                let phase = std::f32::consts::TAU * f * i as f32 / FS;
+                let s = phase.sin();
+                let (_, out_ideal) = ideal.step(s, 0.0);
+                let (_, out_wall) = with_wall.step(s, 0.0);
+                if i >= settle {
+                    tx_ideal[i - settle] = out_ideal;
+                    tx_wall[i - settle] = out_wall;
+                }
+            }
+
+            let amp_ideal = magnitude_at(&tx_ideal, f, FS);
+            let amp_wall = magnitude_at(&tx_wall, f, FS);
+            let tl_ideal = -20.0 * amp_ideal.max(1e-9).log10();
+            let tl_wall = -20.0 * amp_wall.max(1e-9).log10();
+            let delta = tl_wall - tl_ideal;
+            let expected_wall = CHAMBER_WALL_LOSS_DB_PER_STAGE as f32;
+            assert!(
+                (delta - expected_wall).abs() < 1.2,
+                "wall-loss delta at {f:.0} Hz (transparent, ideal {tl_ideal:.2} dB): wall {tl_wall:.2} dB, delta {delta:.2} dB vs {expected_wall:.1} dB empirical",
+            );
+            // Also verify the empirical constant is the documented interim 1.0
+            assert!(
+                (CHAMBER_WALL_LOSS_DB_PER_STAGE - 1.0).abs() < 1e-9,
+                "wall loss must remain 1.0 dB interim empirical value"
             );
         }
     }
@@ -3512,7 +3637,7 @@ mod tests {
             silencers: vec![Silencer::Straight],
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
-            cutout: false,
+            cutout_fitted: false,
         };
 
         // A cross-plane V8's banks: cylinders 0, 2, 3, 7 on one, the rest on the other.
@@ -3920,7 +4045,7 @@ mod tests {
             ],
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
-            cutout: false,
+            cutout_fitted: false,
         };
 
         // 1. Back pressure must be strictly lower with cutout open than closed
