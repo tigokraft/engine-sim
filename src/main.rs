@@ -55,6 +55,7 @@ use rust_engine_sim::audio::{EngineAudio, EngineControls, SnapshotSource};
 use rust_engine_sim::bench::{Driveline, EnginePreset};
 use rust_engine_sim::environment::Environment;
 use rust_engine_sim::physics::engine_block::{EngineBlock, PHASE_CELLS};
+use rust_engine_sim::physics::LimiterCut;
 use rust_engine_sim::ui::telemetry::{
     AudioHealth, Command, CurveTrace, SharedTelemetry, SimEvent, Telemetry,
 };
@@ -385,9 +386,13 @@ fn simulation_thread(
         let output = rig.block.update(dt, rig.driveline.rpm);
         frames += 1;
 
+        let is_spark_cut = rig.driveline.manual_cut
+            || rig.block.ecu.active_cut == LimiterCut::Spark
+            || (rig.driveline.rpm >= rig.driveline.redline
+                && rig.block.ecu.limiter_cut_type == LimiterCut::Spark);
         let controls = EngineControls {
             throttle: rig.driveline.throttle.clamp(0.0, 1.0),
-            spark_cut: rig.driveline.cutting(),
+            spark_cut: is_spark_cut,
             exhaust_cutout: false,
             anti_lag: false,
         };
@@ -502,7 +507,8 @@ fn publish(
     shared.throttle = driveline.throttle;
     shared.throttle_target = driveline.throttle_target;
     shared.manual_cut = driveline.manual_cut;
-    shared.limiter = driveline.on_the_limiter();
+    shared.limiter = block.ecu.active_cut != LimiterCut::None
+        || (driveline.on_the_limiter() && block.ecu.limiter_cut_type != LimiterCut::None);
     shared.muted = muted;
 
     shared.map_pa = block.intake.pressure();
@@ -615,7 +621,7 @@ fn publish(
         .ecu
         .target_afr(load, driveline.rpm, driveline.throttle);
     shared.limiter_mode = block.ecu.limiter_mode;
-    shared.limiter_cut = block.ecu.active_cut;
+    shared.limiter_cut = block.ecu.limiter_cut_type;
     shared.cylinder_health.clear();
     shared
         .cylinder_health
