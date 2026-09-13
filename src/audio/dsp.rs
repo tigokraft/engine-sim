@@ -1695,6 +1695,21 @@ const MECHANICAL_RUMBLE_MAKEUP: f32 = 23.7;
 /// blocker underneath it — headroom spent there is inaudible.
 const MECHANICAL_RUMBLE_HZ: f32 = 380.0;
 
+/// Scaling of valve impact amplitude with float overspeed [1 / (rev/min)].
+///
+/// Above the valve float threshold speed, the valve separates from the cam
+/// profile, flies over the crest, and re-seats under spring force at velocity
+/// higher than the cam ramp intended. The impact impulse scales monotonically
+/// with overspeed `(rpm - float_rpm)`.
+const FLOAT_GAIN_PER_RPM: f32 = 0.005;
+
+/// Scaling of valve impact resonant frequency (brightness) with float overspeed [1 / (rev/min)].
+///
+/// Higher impact velocity sharpens the contact pulse, shifting the spectral
+/// centroid of the metallic seating ring upward into a brighter, harsher
+/// clatter.
+const FLOAT_FREQ_PER_RPM: f32 = 0.0006;
+
 // ---------------------------------------------------------------------------
 // Impulsive mechanical source primitive
 // ---------------------------------------------------------------------------
@@ -1815,7 +1830,31 @@ impl ImpulsiveSource {
         self.event_hz.set_target(hz);
 
         let law_gain = self.level_law.compute(snapshot, cycle_hz);
-        self.gain.set_target(self.base_level * law_gain);
+
+        let overspeed = match self.float_rpm {
+            Some(threshold) if snapshot.rpm > threshold => snapshot.rpm - threshold,
+            _ => 0.0,
+        };
+
+        if overspeed > 0.0 {
+            let amp_scale = 1.0 + FLOAT_GAIN_PER_RPM * overspeed;
+            self.gain.set_target(self.base_level * law_gain * amp_scale);
+
+            if self.base_frequency > 0.0 {
+                let float_freq = (self.base_frequency * (1.0 + FLOAT_FREQ_PER_RPM * overspeed))
+                    .min(self.sample_rate * 0.45);
+                self.body
+                    .retune(self.sample_rate, 0, float_freq, self.base_q);
+                self.current_frequency = float_freq;
+            }
+        } else {
+            self.gain.set_target(self.base_level * law_gain);
+            if self.current_frequency != self.base_frequency && self.base_frequency > 0.0 {
+                self.body
+                    .retune(self.sample_rate, 0, self.base_frequency, self.base_q);
+                self.current_frequency = self.base_frequency;
+            }
+        }
     }
 
     /// Renders one audio sample of this impulsive source.
