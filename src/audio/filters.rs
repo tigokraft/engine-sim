@@ -1299,6 +1299,25 @@ mod tests {
     }
 
     #[test]
+    fn lagrange_interpolation_is_exact_on_a_cubic() {
+        // A 4-point Lagrange read reproduces any polynomial of degree 3 or less
+        // exactly, which is the property a jumping reader needs: it can land
+        // anywhere between samples without a state that assumes it crept there.
+        let mut line = DelayLine::with_max_delay(64);
+        let curve = |x: f64| 0.5 * x * x * x - 3.0 * x * x + 2.0 * x + 7.0;
+        for i in 0..48 {
+            line.push(curve(i as f64) as f32);
+        }
+        // Delay d reads the sample pushed at index 47 - (d - 1).
+        for &d in &[8.0f32, 8.25, 8.5, 12.75, 20.5] {
+            let want = curve(48.0 - d as f64) as f32;
+            approx(line.read_lagrange3(d), want, 1e-2);
+        }
+        // Integer delays land on the stored sample itself.
+        approx(line.read_lagrange3(10.0), curve(38.0) as f32, 1e-3);
+    }
+
+    #[test]
     fn thiran_allpass_glide_has_no_measurable_amplitude_modulation() {
         // Linear interpolation in a delay line acts as a lowpass filter whose
         // cutoff moves with the fractional delay: at frac = 0.5 and high frequencies,
