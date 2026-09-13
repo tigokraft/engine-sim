@@ -364,6 +364,31 @@ impl Measured {
 /// Every figure is relative — an order against the firing order, a frequency
 /// against itself, a slope against an octave — so none of it moves when a
 /// master gain does, and a change here is a change in timbre.
+///
+/// # `octave_share` and `crest_db` are the one exception
+///
+/// Every other figure here is what `--fingerprints` actually printed. These
+/// two are not: they are the pre-Stage-0 target from the top of
+/// `docs/TIMBRE_PLAN.md`, reconstructed rather than measured, because no build
+/// from before the regression is at hand to measure directly — recovering one
+/// is Stage T1's bisect, not this stage's.
+///
+/// The reconstruction is the plan's own aggregate finding applied to each
+/// preset's own render: `--fingerprints` gave the true current octave share
+/// and crest factor, and 63 Hz, 2 kHz, 4 kHz and crest were then shifted by
+/// the deltas the plan measured on the 12 s drive cycle — `-7.3`, `+8.2`,
+/// `+8.4` and `+20.0` dB respectively — undoing the one known regression. The
+/// other six bands carry the current measurement unchanged, because nothing
+/// in the plan's evidence says they moved.
+///
+/// That makes this table wrong in a specific, bounded way: it assumes the
+/// regression was exactly these four numbers and nothing else, on every
+/// preset alike, which is certainly false in the details. It is the best
+/// reconstruction the evidence in the plan supports, and it is why
+/// [`Measured::drift`] is expected to report all four on every preset until
+/// Stage T1 lands — that failure is this stage's deliverable, not a bug in
+/// it. Replace it with a real pre-regression measurement the moment one
+/// exists.
 pub const RECORDED: &[Fingerprint] = &[
     Fingerprint {
         preset: "Inline-4",
@@ -381,9 +406,9 @@ pub const RECORDED: &[Fingerprint] = &[
         resonances: &[1483.3, 216.3, 3597.9],
         tilt_db_per_octave: -9.3,
         octave_share: &[
-            -8.3, -14.8, -13.6, -1.3, -17.6, -17.4, -26.8, -35.8, -41.6, -52.7,
+            -8.3, -22.1, -13.6, -1.3, -17.6, -17.4, -18.6, -27.4, -41.6, -52.7,
         ],
-        crest_db: 12.0,
+        crest_db: 32.0,
     },
     Fingerprint {
         preset: "Cross-plane V8",
@@ -409,9 +434,9 @@ pub const RECORDED: &[Fingerprint] = &[
         resonances: &[1536.0, 3900.3, 83.6],
         tilt_db_per_octave: -10.9,
         octave_share: &[
-            -18.3, -3.4, -8.2, -6.9, -9.2, -14.0, -27.6, -33.0, -44.1, -56.5,
+            -18.3, -10.7, -8.2, -6.9, -9.2, -14.0, -19.4, -24.6, -44.1, -56.5,
         ],
-        crest_db: 15.2,
+        crest_db: 35.2,
     },
     Fingerprint {
         preset: "Flat-plane V8",
@@ -437,9 +462,9 @@ pub const RECORDED: &[Fingerprint] = &[
         resonances: &[943.8, 1416.0, 209.5],
         tilt_db_per_octave: -9.7,
         octave_share: &[
-            -17.7, -6.9, -8.8, -4.0, -6.8, -16.9, -27.1, -36.5, -45.2, -53.6,
+            -17.7, -14.2, -8.8, -4.0, -6.8, -16.9, -18.9, -28.1, -45.2, -53.6,
         ],
-        crest_db: 13.9,
+        crest_db: 33.9,
     },
     Fingerprint {
         preset: "V10",
@@ -469,9 +494,9 @@ pub const RECORDED: &[Fingerprint] = &[
         resonances: &[1321.3, 2079.9, 519.3],
         tilt_db_per_octave: -7.9,
         octave_share: &[
-            -12.8, -9.1, -3.3, -13.9, -6.6, -16.0, -13.4, -25.8, -41.3, -52.1,
+            -12.8, -16.4, -3.3, -13.9, -6.6, -16.0, -5.2, -17.4, -41.3, -52.1,
         ],
-        crest_db: 15.9,
+        crest_db: 35.9,
     },
     Fingerprint {
         preset: "V12",
@@ -505,9 +530,9 @@ pub const RECORDED: &[Fingerprint] = &[
         resonances: &[1552.9, 1192.7, 274.9],
         tilt_db_per_octave: -14.2,
         octave_share: &[
-            -21.6, -11.9, -13.3, -2.6, -5.3, -15.4, -31.0, -40.0, -45.5, -55.5,
+            -21.6, -19.2, -13.3, -2.6, -5.3, -15.4, -22.8, -31.6, -45.5, -55.5,
         ],
-        crest_db: 12.0,
+        crest_db: 32.0,
     },
     Fingerprint {
         preset: "2-Rotor Wankel",
@@ -525,9 +550,9 @@ pub const RECORDED: &[Fingerprint] = &[
         resonances: &[53.6, 1144.6, 1826.1],
         tilt_db_per_octave: -10.1,
         octave_share: &[
-            -16.5, -4.4, -10.5, -3.3, -15.6, -15.8, -27.9, -37.8, -47.8, -60.4,
+            -16.5, -11.7, -10.5, -3.3, -15.6, -15.8, -19.7, -29.4, -47.8, -60.4,
         ],
-        crest_db: 14.4,
+        crest_db: 34.4,
     },
     Fingerprint {
         preset: "Turbo Inline-4",
@@ -545,9 +570,9 @@ pub const RECORDED: &[Fingerprint] = &[
         resonances: &[1636.3, 50.4, 1149.5],
         tilt_db_per_octave: -8.1,
         octave_share: &[
-            -11.6, -2.0, -12.3, -7.3, -16.3, -16.8, -26.4, -29.9, -27.7, -42.9,
+            -11.6, -9.3, -12.3, -7.3, -16.3, -16.8, -18.2, -21.5, -27.7, -42.9,
         ],
-        crest_db: 15.7,
+        crest_db: 35.7,
     },
     Fingerprint {
         preset: "Twin-turbo V8",
@@ -573,9 +598,9 @@ pub const RECORDED: &[Fingerprint] = &[
         resonances: &[104.5, 1786.8, 1112.0],
         tilt_db_per_octave: -8.7,
         octave_share: &[
-            -19.6, -8.1, -2.8, -6.8, -12.2, -15.1, -29.6, -26.8, -39.8, -59.3,
+            -19.6, -15.4, -2.8, -6.8, -12.2, -15.1, -21.4, -18.4, -39.8, -59.3,
         ],
-        crest_db: 15.4,
+        crest_db: 35.4,
     },
     Fingerprint {
         preset: "Turbo Inline-6",
@@ -597,9 +622,9 @@ pub const RECORDED: &[Fingerprint] = &[
         resonances: &[148.7, 1407.7, 1025.0],
         tilt_db_per_octave: -9.7,
         octave_share: &[
-            -15.4, -10.8, -1.7, -7.1, -20.6, -20.0, -27.6, -36.0, -50.6, -64.6,
+            -15.4, -18.1, -1.7, -7.1, -20.6, -20.0, -19.4, -27.6, -50.6, -64.6,
         ],
-        crest_db: 14.2,
+        crest_db: 34.2,
     },
     Fingerprint {
         preset: "Turbodiesel I4",
@@ -617,9 +642,9 @@ pub const RECORDED: &[Fingerprint] = &[
         resonances: &[3592.5, 408.7, 2036.4],
         tilt_db_per_octave: -5.0,
         octave_share: &[
-            -15.4, -9.2, -3.1, -11.7, -7.6, -12.1, -25.2, -15.4, -24.8, -47.9,
+            -15.4, -16.5, -3.1, -11.7, -7.6, -12.1, -17.0, -7.0, -24.8, -47.9,
         ],
-        crest_db: 14.2,
+        crest_db: 34.2,
     },
     Fingerprint {
         preset: "Big Single",
@@ -628,9 +653,9 @@ pub const RECORDED: &[Fingerprint] = &[
         resonances: &[116.0, 2096.0, 1197.4],
         tilt_db_per_octave: -7.5,
         octave_share: &[
-            -23.7, -12.6, -3.7, -10.0, -6.2, -8.7, -16.3, -20.6, -35.8, -46.6,
+            -23.7, -19.9, -3.7, -10.0, -6.2, -8.7, -8.1, -12.2, -35.8, -46.6,
         ],
-        crest_db: 18.4,
+        crest_db: 38.4,
     },
 ];
 
