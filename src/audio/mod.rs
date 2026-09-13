@@ -650,8 +650,9 @@ impl SnapshotSource {
 
         // The blowdown driver per cylinder. Clamped at zero because a negative difference
         // means the manifold is momentarily above the cylinder — reverse flow,
-        // which is a scavenging event, not an acoustic excitation. On a cut cylinder,
-        // combustion never lit so the blowdown delta is zero.
+        // which is a scavenging event, not an acoustic excitation. On a cut cylinder
+        // with fuel delivered, the compressed unburnt charge still expands and blows down
+        // when EVO opens (~35% of combustion blowdown). Only a fuel cut zeroes the blowdown.
         let mut blowdown_delta = [0.0f32; MAX_CYLINDERS];
         for (i, cyl) in block
             .firing
@@ -660,7 +661,7 @@ impl SnapshotSource {
             .enumerate()
             .take(MAX_CYLINDERS)
         {
-            if spark_cut || !block.ecu.is_spark_ok(i) {
+            if limiter_fuel || (!block.ecu.is_fuel_ok(i) && !block.ecu.is_spark_ok(i)) {
                 blowdown_delta[i] = 0.0;
                 continue;
             }
@@ -670,7 +671,12 @@ impl SnapshotSource {
                 .get(bank)
                 .map_or(manifold_pressure, |b| b.port_pressure());
             let evo_p = block.cylinder_evo_pressure(i);
-            blowdown_delta[i] = (evo_p - manifold_p).max(0.0) as f32;
+            let delta = (evo_p - manifold_p).max(0.0) as f32;
+            blowdown_delta[i] = if spark_cut || !block.ecu.is_spark_ok(i) {
+                delta * 0.35
+            } else {
+                delta
+            };
         }
 
         // Instantaneous induction flux summed over the cylinders that are
@@ -1310,12 +1316,17 @@ mod tests {
             burning.unburnt_fuel_mass
         );
 
-        // Ignition cut: the whole metered charge goes out unburnt.
+        // Ignition cut: the whole metered charge goes out unburnt, but compressed
+        // cylinder charge still blows down on EVO.
         let cut = source.sample(&block, 4_000.0, dt, EngineControls::on_the_limiter(1.0));
         assert!(cut.spark_cut);
-        assert_eq!(
-            cut.blowdown_delta[0], 0.0,
-            "a spark cut must zero the combustion blowdown delta"
+        assert!(
+            cut.blowdown_delta[0] > 0.0,
+            "an unburnt cut charge must still carry positive compression blowdown delta"
+        );
+        assert!(
+            cut.blowdown_delta[0] < burning.blowdown_delta[0],
+            "unburnt compression blowdown must be smaller than fired combustion blowdown"
         );
         assert!(
             burning.blowdown_delta[0] > 0.0,
