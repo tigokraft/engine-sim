@@ -5426,7 +5426,10 @@ mod tests {
         // unevenness is what "cross-plane" means), so the proof of lock is
         // that the same four-gap pattern repeats exactly every cycle, not
         // that the gaps are equal.
-        let gaps: Vec<i64> = firing.windows(2).map(|w| w[1] as i64 - w[0] as i64).collect();
+        let gaps: Vec<i64> = firing
+            .windows(2)
+            .map(|w| w[1] as i64 - w[0] as i64)
+            .collect();
         let cylinders_per_bank = 4;
         assert!(
             gaps.len() > cylinders_per_bank * 3,

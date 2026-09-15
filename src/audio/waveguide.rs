@@ -2317,10 +2317,8 @@ impl Turbine {
         let wheel_radius = (a_throat / std::f64::consts::PI).sqrt();
         let c = speed_of_sound(gamma, gas_constant, temperature);
 
-        let wheel_db_per_m =
-            sabine_attenuation_db_per_m(wheel_radius, TURBINE_WHEEL_ABSORPTION);
-        let dissipation_pass =
-            10f64.powf(-wheel_db_per_m * TURBINE_WHEEL_LENGTH / 20.0) as f32;
+        let wheel_db_per_m = sabine_attenuation_db_per_m(wheel_radius, TURBINE_WHEEL_ABSORPTION);
+        let dissipation_pass = 10f64.powf(-wheel_db_per_m * TURBINE_WHEEL_LENGTH / 20.0) as f32;
         let corner_hz = packing_corner_hz(wheel_radius, c);
 
         let breaks = turbine_dispersion_breaks_hz(wheel_radius as f32, c);
@@ -3356,12 +3354,9 @@ impl ExhaustNetwork {
             } else {
                 (self.bank_trans[0], self.bank_trans[1])
             };
-            let (b0_up, b1_up, b0_down, b1_down) = self.crossover.step(
-                in0,
-                in1,
-                self.turbine_returns[0],
-                self.turbine_returns[1],
-            );
+            let (b0_up, b1_up, b0_down, b1_down) =
+                self.crossover
+                    .step(in0, in1, self.turbine_returns[0], self.turbine_returns[1]);
             self.bank_down[0] = b0_down;
             self.bank_down[1] = b1_down;
             self.push_upstream(0, b0_up, crossed);
