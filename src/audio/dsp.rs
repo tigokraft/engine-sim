@@ -5092,9 +5092,9 @@ mod tests {
 
         // Five cycle tables — pressure, the two port flows and the two valve
         // areas — the per-cylinder blowdown, intake flow and primary
-        // temperature arrays, eighteen scalars and one padded bool. Every byte
+        // temperature arrays, nineteen scalars and one padded bool. Every byte
         // accounted for is a byte that is not a pointer.
-        let expected = 6 * CYCLE_TABLE * 4 + 3 * MAX_CYLINDERS * 4 + 18 * 4 + 4;
+        let expected = 6 * CYCLE_TABLE * 4 + 3 * MAX_CYLINDERS * 4 + 19 * 4 + 4;
         assert_eq!(std::mem::size_of::<EngineSnapshot>(), expected);
     }
 
