@@ -2711,6 +2711,25 @@ fn backfire_attack_seconds(fuel_excess: f32, node: InjectionNode) -> f32 {
     BACKFIRE_BASE_ATTACK_SECONDS * mass_scale * node_volume_scale(node)
 }
 
+/// The node an already-lit charge's flame front reaches next, for a companion
+/// ignition spawned by [`BackfireVoice::poll`].
+fn deeper_node(node: InjectionNode) -> InjectionNode {
+    match node {
+        InjectionNode::Port => InjectionNode::Collector,
+        InjectionNode::Collector => InjectionNode::PostSilencer,
+        InjectionNode::PostSilencer | InjectionNode::Tailpipe => InjectionNode::Tailpipe,
+    }
+}
+
+/// A companion ignition already scheduled by an earlier one, waiting for its
+/// own flame-travel delay to run out.
+#[derive(Debug, Clone, Copy)]
+struct PendingCompanion {
+    /// Control blocks remaining before this companion fires.
+    blocks_remaining: i32,
+    ignition: BackfireIgnition,
+}
+
 /// Decides when unburnt fuel in a hot runner lights off, and where.
 ///
 /// The physical story is specific: cut the spark while the throttle is still
@@ -2723,7 +2742,10 @@ fn backfire_attack_seconds(fuel_excess: f32, node: InjectionNode) -> f32 {
 /// The result is stochastic, because auto-ignition in a turbulent pipe is. This
 /// generates a Poisson-like process whose rate rises with how far past both
 /// thresholds the engine is, with a refractory period so a long cut becomes a
-/// crackle rather than a buzz.
+/// crackle rather than a buzz. Fuel accumulates, then lights, then the flame
+/// keeps propagating: a detected ignition can spawn one companion further down
+/// the pipe after its own short flame-travel delay, which is what turns a
+/// single detected event into the burst a real crackle is.
 #[derive(Debug, Clone, Copy)]
 struct BackfireVoice {
     severity: f32,
@@ -2734,6 +2756,7 @@ struct BackfireVoice {
     seconds_since_cut: f32,
     cooldown: usize,
     sample_rate: f32,
+    companion: Option<PendingCompanion>,
 }
 
 impl BackfireVoice {
@@ -2744,6 +2767,7 @@ impl BackfireVoice {
             seconds_since_cut: 0.0,
             cooldown: 0,
             sample_rate,
+            companion: None,
         }
     }
 
@@ -2776,6 +2800,18 @@ impl BackfireVoice {
     /// Polls once per control block; returns the next ignition to trigger, if
     /// one fires this block.
     fn poll(&mut self, noise: &mut Noise, block: usize) -> Option<BackfireIgnition> {
+        // A companion scheduled by an earlier ignition fires on its own clock:
+        // it is the same charge continuing to burn, not a new decision, and it
+        // runs even if the cut that lit it has since ended.
+        if let Some(pending) = &mut self.companion {
+            pending.blocks_remaining -= 1;
+            if pending.blocks_remaining <= 0 {
+                let ignition = pending.ignition;
+                self.companion = None;
+                return Some(ignition);
+            }
+        }
+
         self.cooldown = self.cooldown.saturating_sub(block);
         if self.severity <= 0.0 || self.cooldown > 0 {
             return None;
@@ -2790,13 +2826,38 @@ impl BackfireVoice {
         self.cooldown = (0.012 * self.sample_rate) as usize;
         let scale = 0.8 + 1.2 * noise.next_unit();
         let node = choose_injection_node(self.fuel_excess, self.seconds_since_cut);
-        Some(BackfireIgnition {
+        let ignition = BackfireIgnition {
             amplitude: self.severity * scale,
             // Pops in a pipe ring far longer than a blowdown crack does.
             decay: 0.006 + 0.014 * noise.next_unit(),
             attack: backfire_attack_seconds(self.fuel_excess, node),
             node,
-        })
+        };
+
+        // Roughly a third of the time enough of the charge survives past this
+        // ignition to catch again further down the pipe, at lower amplitude
+        // and after a short flame-travel delay. The random spacing this
+        // produces is what makes one detected ignition into a burst rather
+        // than a single click.
+        if self.companion.is_none() && noise.next_unit() < 0.35 {
+            let companion_node = deeper_node(node);
+            let companion_fuel_excess = self.fuel_excess * 0.5;
+            let delay_seconds = 0.002 + 0.008 * noise.next_unit();
+            let blocks = ((delay_seconds * self.sample_rate) / block as f32)
+                .round()
+                .max(1.0) as i32;
+            self.companion = Some(PendingCompanion {
+                blocks_remaining: blocks,
+                ignition: BackfireIgnition {
+                    amplitude: ignition.amplitude * 0.5,
+                    decay: 0.006 + 0.014 * noise.next_unit(),
+                    attack: backfire_attack_seconds(companion_fuel_excess, companion_node),
+                    node: companion_node,
+                },
+            });
+        }
+
+        Some(ignition)
     }
 }
 
@@ -5238,6 +5299,51 @@ mod tests {
                 "attack should grow with charge size at {node:?}"
             );
         }
+    }
+
+    #[test]
+    fn one_cut_fires_more_than_one_event_with_non_constant_spacing() {
+        // Fuel accumulates, then lights, then the flame keeps propagating: a
+        // single detected ignition can spawn a companion further down the
+        // pipe, which is what turns one cut into a burst rather than a click.
+        let mut primed = loaded_snapshot();
+        primed.spark_cut = true;
+        primed.unburnt_fuel_mass = 30.0e-6;
+        primed.exhaust_temperature = 1_150.0;
+        let config = SynthConfig::cross_plane_v8(FS);
+
+        let mut voice = BackfireVoice::new(FS);
+        let mut noise = Noise::new(11);
+
+        let blocks = 2 * 48_000 / CONTROL_BLOCK;
+        let mut fire_samples = Vec::new();
+        for b in 0..blocks {
+            voice.tune(&config, &primed);
+            if voice.poll(&mut noise, CONTROL_BLOCK).is_some() {
+                fire_samples.push(b * CONTROL_BLOCK);
+            }
+        }
+
+        assert!(
+            fire_samples.len() >= 2,
+            "a 2 s cut should fire more than one event: {}",
+            fire_samples.len()
+        );
+        let gaps: Vec<usize> = fire_samples.windows(2).map(|w| w[1] - w[0]).collect();
+        let all_equal = gaps.windows(2).all(|w| w[0] == w[1]);
+        assert!(
+            !all_equal,
+            "inter-event spacing should not be constant: {gaps:?}"
+        );
+        // A companion fires inside the primary ignition's own 12 ms
+        // refractory window, which a second independent Poisson draw cannot:
+        // finding a gap shorter than that is proof a companion fired.
+        let refractory_samples = (0.012 * FS) as usize;
+        assert!(
+            gaps.iter().any(|&g| g < refractory_samples),
+            "expected at least one companion inside the primary's refractory \
+             window ({refractory_samples} samples): {gaps:?}"
+        );
     }
 
     #[test]
