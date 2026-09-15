@@ -8,6 +8,8 @@
 //!   manifolds that turn one cylinder into a whole engine.
 //! - [`thermal`] — the lumped masses that give the block and every pipe section
 //!   a temperature of their own, so the engine can be cold.
+//! - [`vehicle`] — the gearbox, road load, and clutch that give the flywheel
+//!   something to pull against besides its own drag curve.
 
 pub mod control;
 pub mod cylinder;
@@ -16,6 +18,7 @@ pub mod intake;
 pub mod plumbing;
 pub mod thermal;
 pub mod thermodynamics;
+pub mod vehicle;
 
 pub use control::*;
 pub use plumbing::*;
