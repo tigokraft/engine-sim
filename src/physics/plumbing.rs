@@ -796,4 +796,21 @@ mod tests {
         assert!(!straight.cutout_fitted);
     }
 
+    #[test]
+    fn a_tighter_housing_gives_a_smaller_throat() {
+        let tight = TurbineGeometry {
+            housing_ar: 0.35,
+            blade_count: 9,
+        };
+        let open = TurbineGeometry {
+            housing_ar: 1.4,
+            blade_count: 9,
+        };
+        assert!(
+            tight.throat_area_ratio() < open.throat_area_ratio(),
+            "a smaller A/R should give a smaller throat: tight={:.3}, open={:.3}",
+            tight.throat_area_ratio(),
+            open.throat_area_ratio()
+        );
+    }
 }

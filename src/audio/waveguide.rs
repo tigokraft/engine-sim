@@ -4986,4 +4986,148 @@ mod tests {
         );
     }
 
+    fn turbo_test_geometry() -> crate::physics::plumbing::TurbineGeometry {
+        crate::physics::plumbing::TurbineGeometry {
+            housing_ar: 0.7,
+            blade_count: 9,
+        }
+    }
+
+    #[test]
+    fn a_tighter_housing_reflects_more_and_transmits_less() {
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.35;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 900.0;
+        let pipe_area = std::f64::consts::PI * 0.022 * 0.022;
+        let f = 400.0f32;
+
+        let probe = |housing_ar: f64| -> (f32, f32) {
+            let geometry = crate::physics::plumbing::TurbineGeometry {
+                housing_ar,
+                blade_count: 9,
+            };
+            let mut turbine = Turbine::new(&geometry, pipe_area, FS, GAMMA, R, TEMPERATURE);
+            let settle = 12_000;
+            let measure = 12_000;
+            let mut reflected = vec![0.0f32; measure];
+            let mut transmitted = vec![0.0f32; measure];
+            for i in 0..(settle + measure) {
+                let phase = std::f32::consts::TAU * f * i as f32 / FS;
+                let (r, t) = turbine.step(phase.sin(), 0.0);
+                if i >= settle {
+                    reflected[i - settle] = r;
+                    transmitted[i - settle] = t;
+                }
+            }
+            (
+                magnitude_at(&reflected, f, FS),
+                magnitude_at(&transmitted, f, FS),
+            )
+        };
+
+        let (tight_r, tight_t) = probe(0.35);
+        let (open_r, open_t) = probe(1.4);
+
+        assert!(
+            tight_r > open_r,
+            "a tighter housing should reflect more: tight={tight_r:.4}, open={open_r:.4}"
+        );
+        assert!(
+            tight_t < open_t,
+            "a tighter housing should transmit less: tight={tight_t:.4}, open={open_t:.4}"
+        );
+    }
+
+    #[test]
+    fn turbine_attenuates_high_orders_more_than_low_ones() {
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.35;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 900.0;
+        let pipe_area = std::f64::consts::PI * 0.022 * 0.022;
+        let geometry = turbo_test_geometry();
+
+        let transmission_loss_db = |f: f32| -> f32 {
+            let mut turbine = Turbine::new(&geometry, pipe_area, FS, GAMMA, R, TEMPERATURE);
+            let period = FS / f;
+            let settle = (period * 20.0).round() as usize;
+            let measure = (period * 40.0).round() as usize;
+            let mut transmitted = vec![0.0f32; measure];
+            for i in 0..(settle + measure) {
+                let phase = std::f32::consts::TAU * f * i as f32 / FS;
+                let (_, out) = turbine.step(phase.sin(), 0.0);
+                if i >= settle {
+                    transmitted[i - settle] = out;
+                }
+            }
+            let amplitude = magnitude_at(&transmitted, f, FS);
+            -20.0 * amplitude.max(1e-9).log10()
+        };
+
+        let low_loss = transmission_loss_db(150.0);
+        let high_loss = transmission_loss_db(4_000.0);
+
+        assert!(
+            high_loss > low_loss,
+            "a turbine should attenuate high orders harder than low ones: \
+             150 Hz loss {low_loss:.2} dB, 4,000 Hz loss {high_loss:.2} dB"
+        );
+    }
+
+    #[test]
+    fn turbine_radiates_less_energy_than_no_turbine() {
+        // Same shape of claim as `expansion_chamber_radiates_less_energy_than_no_silencer`:
+        // fitting the element must not make the engine louder overall.
+        use crate::physics::plumbing::{
+            Collector, Crossover, ExhaustSystem, PipeSection, Silencer, TurbineGeometry,
+        };
+
+        const FS: f32 = 48_000.0;
+
+        let exhaust = |turbine: Option<TurbineGeometry>| ExhaustSystem {
+            primaries: vec![PipeSection::from_diameter(0.45, 0.040, 850.0); 4],
+            collector: Collector::from_diameter(4, 0.060, 0.15),
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![Silencer::Straight],
+            tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
+            tailpipe_flanged: false,
+            cutout_fitted: false,
+            turbine,
+        };
+
+        let cylinders: Vec<crate::audio::dsp::CylinderTap> = (0..4)
+            .map(|i| crate::audio::dsp::CylinderTap {
+                evo_phase: i as f32 / 4.0,
+                bank: 0,
+            })
+            .collect();
+        let snapshot = crate::audio::dsp::EngineSnapshot::default();
+
+        let total_radiated_energy = |turbine: Option<TurbineGeometry>| -> f64 {
+            let system = exhaust(turbine);
+            let mut network = ExhaustNetwork::new(&system, &cylinders, 1, FS, &snapshot);
+            let mut radiated = [0.0f32; 1];
+            let bank_excitations = [0.0f32; 1];
+            let mut energy = 0.0f64;
+            for i in 0..(4 * FS as usize) {
+                let pulse = if i % 240 < 6 { 1.0 } else { 0.0 };
+                let excitations = [pulse, 0.0, 0.0, 0.0];
+                network.step(&excitations, &bank_excitations, &mut radiated);
+                energy += (radiated[0] as f64).powi(2);
+            }
+            energy
+        };
+
+        let fitted = total_radiated_energy(Some(turbo_test_geometry()));
+        let bare = total_radiated_energy(None);
+
+        assert!(
+            fitted < bare,
+            "a turbine must radiate less total energy than no turbine at all: \
+             fitted={fitted:.6}, bare={bare:.6}"
+        );
+    }
+
 }
