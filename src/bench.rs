@@ -1941,6 +1941,7 @@ impl Driveline {
 mod tests {
     use super::*;
     use crate::physics::engine_block::PHASE_CELLS;
+    use crate::physics::vehicle::Gear;
 
     /// Runs a preset at a fixed speed until its phase ring has filled.
     fn primed(preset: &EnginePreset, rpm: f64) -> EngineBlock {
@@ -2035,6 +2036,64 @@ mod tests {
                 preset.name,
                 driveline.rpm,
                 preset.redline,
+            );
+        }
+    }
+
+    #[test]
+    fn neutral_reproduces_the_free_revving_flywheel_to_integration_error() {
+        // Gearbox, road load and clutch exist now, but a gear has to be
+        // selected to reach any of them. In neutral, `update_in_gear` is
+        // never called, and the flywheel formula below is a literal copy of
+        // what `Driveline::update`'s `FreeRev` arm always did — so this
+        // proves the refactor left every existing fingerprint and dyno pull,
+        // all of which were recorded in neutral, comparable.
+        let preset = EnginePreset::cross_plane_v8();
+        let mut block = preset.block(Environment::default());
+        let mut driveline = Driveline::new(&preset);
+        assert_eq!(driveline.gearbox.gear, Gear::Neutral);
+        driveline.throttle_target = 0.6;
+        let dt = 1.0 / 240.0;
+
+        // An independent reference flywheel, stepped by the pre-Stage-M1
+        // formula and nothing else — no gearbox, no road load, no clutch.
+        let mut reference_rpm = driveline.rpm;
+        let mut reference_throttle = driveline.throttle;
+
+        for _ in 0..(240 * 8) {
+            driveline.update(&mut block, dt);
+            let reference_block = block.clone();
+            block.update(dt, driveline.rpm);
+
+            // Reference step, against the same block state Driveline saw.
+            let slew = 1.0 - (-dt / 0.12_f64).exp();
+            reference_throttle += (driveline.throttle_target - reference_throttle) * slew;
+            let target = driveline.idle_target(&reference_block);
+            let governor = ((target + 60.0 - reference_rpm) / 500.0).clamp(0.0, 0.30);
+            let effective = reference_throttle.max(governor);
+
+            let torque = reference_block.mean_brake_torque(reference_rpm);
+            let drive = if driveline.manual_cut
+                || reference_block.ecu.active_cut != LimiterCut::None
+                || (reference_rpm >= driveline.redline
+                    && reference_block.ecu.limiter_cut_type != LimiterCut::None)
+            {
+                0.0
+            } else {
+                torque * (0.05 + 0.95 * effective)
+            };
+            let (a, b, c) = driveline.load;
+            let omega = reference_rpm * PI / 30.0;
+            let load = a + b * omega + c * omega * omega + (1.0 - effective) * driveline.pumping;
+            let alpha = (drive - load) / driveline.inertia.max(1e-3);
+            let omega = (omega + alpha * dt).max(STALL_RPM * PI / 30.0);
+            reference_rpm = omega * 30.0 / PI;
+
+            assert!(
+                (driveline.rpm - reference_rpm).abs() < 1e-9,
+                "neutral drifted from the pre-M1 formula: {} vs reference {}",
+                driveline.rpm,
+                reference_rpm
             );
         }
     }
