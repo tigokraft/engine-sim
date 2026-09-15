@@ -2712,6 +2712,35 @@ pub fn mean_flow_mach(
     (u / c).clamp(-MAX_MEAN_FLOW_MACH, MAX_MEAN_FLOW_MACH)
 }
 
+/// A named point in the exhaust network an event can enter, distinct from a
+/// cylinder's own once-a-cycle blowdown.
+///
+/// The nodes are ordered by how much of the network still lies between them
+/// and the mouth. [`Self::Port`] enters at the same boundary a cylinder's
+/// blowdown does and travels the whole primary, collector, silencer chain and
+/// tailpipe before it radiates; [`Self::Tailpipe`] enters at the tailpipe's
+/// own exit and reaches the mouth with almost no pipe ahead of it. That
+/// difference in transit time — and in how much of the network's own
+/// resonance a reflection off the mouth carries back through on the way out —
+/// is the entire acoustic distinction between an event that ignites early and
+/// one that ignites late. The network does not need a second voice to express
+/// it, only a different place to feed one in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectionNode {
+    /// At the exhaust valve, the same boundary a cylinder's own blowdown
+    /// enters through. Indexed by cylinder.
+    Port,
+    /// At the bank's collector junction, downstream of every primary.
+    /// Indexed by bank.
+    Collector,
+    /// Downstream of the bank's last silencer element, at the tailpipe
+    /// entrance. Indexed by bank.
+    PostSilencer,
+    /// At the tailpipe exit, immediately upstream of the mouth. Indexed by
+    /// bank.
+    Tailpipe,
+}
+
 /// Complete physical 1D exhaust waveguide network.
 ///
 /// Instantiated from an [`ExhaustSystem`] geometry description:
@@ -2780,6 +2809,16 @@ pub struct ExhaustNetwork {
     /// was built from has a cutout fitted at all — see
     /// [`ExhaustSystem::cutout_fitted`](crate::physics::plumbing::ExhaustSystem::cutout_fitted).
     cutout_open: bool,
+
+    /// Pending [`InjectionNode::Port`] pressure per cylinder [Pa]. Added to
+    /// that cylinder's own blowdown for one sample and cleared after use.
+    port_injection: Vec<f32>,
+    /// Pending [`InjectionNode::Collector`] pressure per bank [Pa].
+    collector_injection: Vec<f32>,
+    /// Pending [`InjectionNode::PostSilencer`] pressure per bank [Pa].
+    post_silencer_injection: Vec<f32>,
+    /// Pending [`InjectionNode::Tailpipe`] pressure per bank [Pa].
+    tailpipe_injection: Vec<f32>,
 }
 
 impl ExhaustNetwork {
@@ -3019,6 +3058,10 @@ impl ExhaustNetwork {
             // state arrives per frame through `set_cutout`, driven from the
             // snapshot, which itself defaults closed.
             cutout_open: false,
+            port_injection: vec![0.0; n_cyl],
+            collector_injection: vec![0.0; n_banks],
+            post_silencer_injection: vec![0.0; n_banks],
+            tailpipe_injection: vec![0.0; n_banks],
         }
     }
 
@@ -3198,6 +3241,26 @@ impl ExhaustNetwork {
         }
     }
 
+    /// Adds a forward-travelling pressure event at a named node, on top of
+    /// whatever the cylinder cycle already drives that node with this sample.
+    ///
+    /// `index` is a cylinder index for [`InjectionNode::Port`] and a bank
+    /// index for the other three. One-shot: consumed the next time
+    /// [`Self::step`] runs and zeroed afterwards, so a caller wanting a
+    /// sustained or repeated event calls this again on the sample it wants it
+    /// to land.
+    pub fn inject(&mut self, node: InjectionNode, index: usize, pressure: f32) {
+        let buf = match node {
+            InjectionNode::Port => &mut self.port_injection,
+            InjectionNode::Collector => &mut self.collector_injection,
+            InjectionNode::PostSilencer => &mut self.post_silencer_injection,
+            InjectionNode::Tailpipe => &mut self.tailpipe_injection,
+        };
+        if let Some(slot) = buf.get_mut(index) {
+            *slot += pressure;
+        }
+    }
+
     /// Hands a bank's upstream-travelling wave back toward its collector: down
     /// the pre-crossover pipe where the geometry gave one, and through the
     /// one-sample connector where it did not.
@@ -3213,17 +3276,18 @@ impl ExhaustNetwork {
 
     /// Steps the entire waveguide network by one audio sample:
     /// - `excitations`: blowdown pressure pulse injected at each cylinder's port.
-    /// - `bank_excitations`: pressure released inside each bank's collector — an
-    ///   exhaust backfire is unburnt fuel lighting off in the pipework, not a
-    ///   cylinder event, so it belongs at the junction and not at a valve.
     /// - `radiated`: filled with the pressure radiated from each bank's mouth.
     ///
     /// A bank is a tailpipe, so the caller gets one radiated signal per bank and
     /// decides where each one sits in the image. Imaging is not the network's
     /// business, and folding it to stereo here would silently drop the outer
     /// banks of anything with more than two.
+    ///
+    /// Anything pending from [`Self::inject`] — a backfire, an anti-lag pop,
+    /// or any other event that is not the cylinder's own blowdown — is added
+    /// in at its own node during this step and cleared for the next one.
     #[inline(always)]
-    pub fn step(&mut self, excitations: &[f32], bank_excitations: &[f32], radiated: &mut [f32]) {
+    pub fn step(&mut self, excitations: &[f32], radiated: &mut [f32]) {
         let n_cyl = self.primaries.len();
         let crossed = !self.pre_cross_pipes.is_empty();
 
@@ -3245,7 +3309,8 @@ impl ExhaustNetwork {
                 excitations[i]
             } else {
                 0.0
-            };
+            } + self.port_injection[i];
+            self.port_injection[i] = 0.0;
             self.prim_in_0[i] = self.valves[i].step(excit, p_at_valve);
             self.prim_to_collector[i] = p_at_coll;
         }
@@ -3262,7 +3327,8 @@ impl ExhaustNetwork {
             } else {
                 self.collector_returns[b]
             };
-            let excitation = bank_excitations.get(b).copied().unwrap_or(0.0);
+            let excitation = self.collector_injection[b];
+            self.collector_injection[b] = 0.0;
             self.bank_trans[b] = self.collectors[b].step(
                 &self.bank_prim_in[b],
                 excitation,
@@ -3323,14 +3389,18 @@ impl ExhaustNetwork {
         //    still pass through the turbine first.
         for b in 0..self.bank_count {
             let (p_tail_up, p_tail_exit) = self.tailpipes[b].read_outputs();
+            let p_tail_exit = p_tail_exit + self.tailpipe_injection[b];
+            self.tailpipe_injection[b] = 0.0;
             let (p_mouth_refl, p_mouth_rad) = self.mouths[b].step(p_tail_exit);
+            let post_silencer_inj = self.post_silencer_injection[b];
+            self.post_silencer_injection[b] = 0.0;
 
             if self.cutout_open {
                 let (turbine_up, sig) = match &mut self.turbines[b] {
                     Some(turbine) => turbine.step(self.bank_down[b], p_tail_up),
                     None => (p_tail_up, self.bank_down[b]),
                 };
-                self.tailpipes[b].push_inputs(sig, p_mouth_refl);
+                self.tailpipes[b].push_inputs(sig + post_silencer_inj, p_mouth_refl);
                 self.turbine_returns[b] = turbine_up;
                 self.chain_returns[b][0] = p_tail_up;
             } else {
@@ -3351,7 +3421,7 @@ impl ExhaustNetwork {
                     self.chain_returns[b][k] = upstream;
                     sig = trans;
                 }
-                self.tailpipes[b].push_inputs(sig, p_mouth_refl);
+                self.tailpipes[b].push_inputs(sig + post_silencer_inj, p_mouth_refl);
                 self.chain_returns[b][n_sil] = p_tail_up;
 
                 // With no turbine fitted this must be a transparent
@@ -3985,12 +4055,11 @@ mod tests {
             let system = exhaust(silencers);
             let mut network = ExhaustNetwork::new(&system, &cylinders, 1, FS, &snapshot);
             let mut radiated = [0.0f32; 1];
-            let bank_excitations = [0.0f32; 1];
             let mut energy = 0.0f64;
             for i in 0..(4 * FS as usize) {
                 let pulse = if i % 240 < 6 { 1.0 } else { 0.0 };
                 let excitations = [pulse, 0.0, 0.0, 0.0];
-                network.step(&excitations, &bank_excitations, &mut radiated);
+                network.step(&excitations, &mut radiated);
                 energy += (radiated[0] as f64).powi(2);
             }
             energy
@@ -4165,7 +4234,6 @@ mod tests {
             let exhaust = system(crossover);
             let mut network = ExhaustNetwork::new(&exhaust, &cylinders, 2, FS, &snapshot);
             let mut excitations = vec![0.0f32; cylinders.len()];
-            let bank_excitations = vec![0.0f32; 2];
             let mut radiated = vec![0.0f32; 2];
 
             let mut near = 0.0f64;
@@ -4177,7 +4245,7 @@ mod tests {
                 if i == 0 {
                     excitations[0] = 1.0;
                 }
-                network.step(&excitations, &bank_excitations, &mut radiated);
+                network.step(&excitations, &mut radiated);
                 near += (radiated[0] as f64).powi(2);
                 far += (radiated[1] as f64).powi(2);
             }
@@ -4583,12 +4651,11 @@ mod tests {
 
             let mut high_energy = 0.0f64;
             let mut radiated = [0.0f32; 1];
-            let bank_excitations = [0.0f32; 1];
 
             for i in 0..9600 {
                 let pulse = if i % 240 < 6 { 1.0 } else { 0.0 };
                 let excitations = [pulse, 0.0, 0.0, 0.0];
-                network.step(&excitations, &bank_excitations, &mut radiated);
+                network.step(&excitations, &mut radiated);
 
                 if i >= 2400 {
                     for freq in [1500.0, 2000.0, 3000.0, 4000.0] {
@@ -4655,12 +4722,11 @@ mod tests {
             let mut network = ExhaustNetwork::new(&system, &cylinders, 1, FS, &snapshot);
             assert!(!network.is_cutout_open(), "must construct closed");
             let mut radiated = [0.0f32; 1];
-            let bank_excitations = [0.0f32; 1];
             let mut out = Vec::with_capacity(4800);
             for i in 0..4800 {
                 let pulse = if i % 240 < 6 { 1.0 } else { 0.0 };
                 let excitations = [pulse, 0.0, 0.0, 0.0];
-                network.step(&excitations, &bank_excitations, &mut radiated);
+                network.step(&excitations, &mut radiated);
                 out.push(radiated[0]);
             }
             out
@@ -4768,10 +4834,9 @@ mod tests {
         let capture = 4 * fs as usize; // 4 s: hundreds of round trips, 0.25 Hz Goertzel resolution
         let mut response = Vec::with_capacity(capture);
         let mut radiated = [0.0f32; 1];
-        let bank_excitations = [0.0f32; 1];
         for i in 0..capture {
             let excitations = [if i == 0 { 1.0 } else { 0.0 }];
-            network.step(&excitations, &bank_excitations, &mut radiated);
+            network.step(&excitations, &mut radiated);
             response.push(radiated[0]);
         }
 
@@ -4956,13 +5021,12 @@ mod tests {
         let high_frequency_share = |exhaust: &ExhaustSystem| -> f64 {
             let mut network = ExhaustNetwork::new(exhaust, &cylinders, 1, FS, &snapshot);
             let mut radiated = [0.0f32; 1];
-            let bank_excitations = [0.0f32; 1];
             let samples = 4 * FS as usize;
             let mut response = Vec::with_capacity(samples);
             for i in 0..samples {
                 let pulse = if i % 240 < 6 { 1.0 } else { 0.0 };
                 let excitations = [pulse, 0.0, 0.0, 0.0];
-                network.step(&excitations, &bank_excitations, &mut radiated);
+                network.step(&excitations, &mut radiated);
                 response.push(radiated[0]);
             }
             let bands = crate::analysis::orders::octave_bands(&response, FS as f64);
@@ -5109,12 +5173,11 @@ mod tests {
             let system = exhaust(turbine);
             let mut network = ExhaustNetwork::new(&system, &cylinders, 1, FS, &snapshot);
             let mut radiated = [0.0f32; 1];
-            let bank_excitations = [0.0f32; 1];
             let mut energy = 0.0f64;
             for i in 0..(4 * FS as usize) {
                 let pulse = if i % 240 < 6 { 1.0 } else { 0.0 };
                 let excitations = [pulse, 0.0, 0.0, 0.0];
-                network.step(&excitations, &bank_excitations, &mut radiated);
+                network.step(&excitations, &mut radiated);
                 energy += (radiated[0] as f64).powi(2);
             }
             energy

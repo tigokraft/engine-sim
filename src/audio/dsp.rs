@@ -93,7 +93,7 @@ use crate::audio::filters::{
 use crate::audio::intake_voice::IntakeNetwork;
 use crate::audio::propagation::{Aperture, AperturePositions, Listener, PropagationModel};
 use crate::audio::structure::{combustion_drive, shaking_drive, StructuralPath, StructuralSpec};
-use crate::audio::waveguide::{ExhaustNetwork, ExhaustTemperatures};
+use crate::audio::waveguide::{ExhaustNetwork, ExhaustTemperatures, InjectionNode};
 use crate::physics::cylinder::{CylinderGeometry, CYCLE_ANGLE};
 use crate::physics::engine_block::bank_angle;
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem, ThrottleLayout};
@@ -2853,8 +2853,6 @@ pub struct EngineSynth {
     /// the pipework, so it is a bank event and fires into the collector rather
     /// than down any one cylinder's primary.
     backfire_pulses: Vec<PopPool>,
-    /// Excitation presented to each bank's collector this sample.
-    bank_excitations: Vec<f32>,
     /// Pressure radiated from each bank's mouth this sample.
     radiated: Vec<f32>,
     /// Broadband pressure each port's jet is launching this sample [Pa].
@@ -3130,7 +3128,6 @@ impl EngineSynth {
             cycle: CyclePlayer::new(fs),
             excitations: vec![0.0; n_cyl],
             backfire_pulses: vec![PopPool::default(); config.bank_count],
-            bank_excitations: vec![0.0; config.bank_count],
             radiated: vec![0.0; config.bank_count],
             port_jets: vec![0.0; n_cyl],
             port_drive: vec![0.0; n_cyl],
@@ -3312,7 +3309,6 @@ impl EngineSynth {
         self.intake_valve_areas.fill(0.0);
         self.exhaust_port_flows.fill(0.0);
         self.intake_port_flows.fill(0.0);
-        self.bank_excitations.fill(0.0);
         self.radiated.fill(0.0);
         for smoother in self.blowdown_pa.iter_mut() {
             smoother.snap(0.0);
@@ -3883,13 +3879,10 @@ impl EngineSynth {
 
         let exhaust_level = self.exhaust_level.next_value();
         let launch = self.launch.value();
-        for (excitation, pool) in self
-            .bank_excitations
-            .iter_mut()
-            .zip(self.backfire_pulses.iter_mut())
-        {
+        for (bank, pool) in self.backfire_pulses.iter_mut().enumerate() {
             // Into the same pascals the cylinders' own excitations arrive in.
-            *excitation = pool.process(&mut self.noise) * launch;
+            let value = pool.process(&mut self.noise) * launch;
+            self.network.inject(InjectionNode::Collector, bank, value);
         }
         for ((drive, pulse), jet) in self
             .port_drive
@@ -3899,8 +3892,7 @@ impl EngineSynth {
         {
             *drive = pulse + jet;
         }
-        self.network
-            .step(&self.port_drive, &self.bank_excitations, &mut self.radiated);
+        self.network.step(&self.port_drive, &mut self.radiated);
         for (tp, &out) in self.tailpipe_pressures.iter_mut().zip(self.radiated.iter()) {
             *tp = out * (exhaust_level / launch);
         }
