@@ -10,6 +10,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Standard gravity [m/s^2].
+pub const STANDARD_GRAVITY: f64 = 9.806_65;
+
 // ---------------------------------------------------------------------------
 // Gearbox
 // ---------------------------------------------------------------------------
@@ -69,6 +72,74 @@ impl Gearbox {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Road load
+// ---------------------------------------------------------------------------
+
+/// Rolling resistance, aerodynamic drag, and grade: what the road costs.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RoadLoad {
+    /// Vehicle mass [kg].
+    pub vehicle_mass: f64,
+    /// Rolling resistance coefficient [-].
+    pub rolling_resistance: f64,
+    /// Drag area, `C_d * A` [m^2].
+    pub drag_area: f64,
+    /// Driven wheel radius [m].
+    pub wheel_radius: f64,
+    /// Road grade angle, positive uphill [rad].
+    pub grade: f64,
+}
+
+impl RoadLoad {
+    /// A generic 1.5 tonne road car on a level road.
+    pub fn generic_road_car() -> Self {
+        Self {
+            vehicle_mass: 1_500.0,
+            rolling_resistance: 0.012,
+            drag_area: 0.30 * 2.2,
+            wheel_radius: 0.32,
+            grade: 0.0,
+        }
+    }
+
+    /// Force the road pushes back with at a given road speed [N].
+    ///
+    /// ```text
+    /// F = m g C_rr + 0.5 rho C_d A v^2 + m g sin(grade)
+    /// ```
+    pub fn force(&self, speed_mps: f64, air_density: f64) -> f64 {
+        let rolling = self.vehicle_mass * STANDARD_GRAVITY * self.rolling_resistance;
+        let aero = 0.5 * air_density * self.drag_area * speed_mps * speed_mps;
+        let grade = self.vehicle_mass * STANDARD_GRAVITY * self.grade.sin();
+        rolling + aero + grade
+    }
+
+    /// That force reflected to the crank as a torque, through an overall
+    /// ratio (engine turns per output turn) [N m].
+    ///
+    /// Power is conserved across the gearbox: `T_wheel * omega_wheel =
+    /// T_crank * omega_crank`, and `omega_crank = omega_wheel * ratio`, so
+    /// `T_crank = T_wheel / ratio = F * r / ratio`.
+    pub fn crank_torque(&self, speed_mps: f64, air_density: f64, overall_ratio: f64) -> f64 {
+        self.force(speed_mps, air_density) * self.wheel_radius / overall_ratio.max(1e-6)
+    }
+
+    /// Road speed a crank speed implies through an overall ratio [m/s].
+    pub fn road_speed(&self, crank_omega: f64, overall_ratio: f64) -> f64 {
+        crank_omega * self.wheel_radius / overall_ratio.max(1e-6)
+    }
+
+    /// The vehicle's translational inertia, reflected to the crank through an
+    /// overall ratio, as an equivalent rotational inertia [kg m^2].
+    ///
+    /// `KE = 1/2 m v^2 = 1/2 m (omega_crank r / ratio)^2`, so the equivalent
+    /// inertia seen at the crank is `m (r / ratio)^2`.
+    pub fn reflected_inertia(&self, overall_ratio: f64) -> f64 {
+        self.vehicle_mass * (self.wheel_radius / overall_ratio.max(1e-6)).powi(2)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +170,109 @@ mod tests {
         assert_eq!(gearbox.overall_ratio(), None);
         gearbox.gear = Gear::Engaged(0);
         assert_eq!(gearbox.overall_ratio(), None);
+    }
+
+    // -- RoadLoad -----------------------------------------------------------
+
+    #[test]
+    fn road_force_matches_hand_computation() {
+        // 1500 kg, Crr 0.012, Cd*A 0.66, at 30 m/s, sea-level-ish air.
+        let road = RoadLoad {
+            vehicle_mass: 1_500.0,
+            rolling_resistance: 0.012,
+            drag_area: 0.66,
+            wheel_radius: 0.32,
+            grade: 0.0,
+        };
+        let air_density = 1.2041;
+        let rolling = 1_500.0 * STANDARD_GRAVITY * 0.012;
+        let aero = 0.5 * air_density * 0.66 * 30.0 * 30.0;
+        approx(road.force(30.0, air_density), rolling + aero, 1e-6);
+    }
+
+    #[test]
+    fn grade_adds_mg_sin_theta() {
+        let level = RoadLoad {
+            grade: 0.0,
+            ..RoadLoad::generic_road_car()
+        };
+        let uphill = RoadLoad {
+            grade: 0.05, // ~5 % grade, small angle
+            ..RoadLoad::generic_road_car()
+        };
+        let air_density = 1.2041;
+        let expected_extra = uphill.vehicle_mass * STANDARD_GRAVITY * 0.05_f64.sin();
+        approx(
+            uphill.force(20.0, air_density) - level.force(20.0, air_density),
+            expected_extra,
+            1e-6,
+        );
+    }
+
+    #[test]
+    fn steady_state_in_a_gear_balances_road_load_against_brake_torque() {
+        // Hand-computed case: a 1500 kg car, Crr 0.012, Cd*A 0.66, wheel
+        // radius 0.32 m, in a gear with overall ratio 10.0, holding 25 m/s.
+        let road = RoadLoad {
+            vehicle_mass: 1_500.0,
+            rolling_resistance: 0.012,
+            drag_area: 0.66,
+            wheel_radius: 0.32,
+            grade: 0.0,
+        };
+        let overall_ratio = 10.0;
+        let speed_mps = 25.0;
+        let air_density = 1.2041;
+
+        // F = m g Crr + 0.5 rho Cd*A v^2
+        let expected_force =
+            1_500.0 * STANDARD_GRAVITY * 0.012 + 0.5 * air_density * 0.66 * 25.0 * 25.0;
+        approx(road.force(speed_mps, air_density), expected_force, 1e-6);
+
+        // T_crank = F * r / ratio, and that is exactly the brake torque a
+        // flywheel at this speed needs to hold steady (alpha = 0): drive
+        // torque in, road torque reflected back out, nothing left over to
+        // accelerate against.
+        let expected_crank_torque = expected_force * road.wheel_radius / overall_ratio;
+        let crank_torque = road.crank_torque(speed_mps, air_density, overall_ratio);
+        approx(crank_torque, expected_crank_torque, 1e-6);
+
+        let crank_omega = speed_mps * overall_ratio / road.wheel_radius;
+        approx(road.road_speed(crank_omega, overall_ratio), speed_mps, 1e-9);
+        let alpha = (crank_torque - road.crank_torque(speed_mps, air_density, overall_ratio))
+            / 1.0 /* any positive inertia */;
+        approx(alpha, 0.0, 1e-12);
+    }
+
+    #[test]
+    fn two_gears_at_the_same_engine_speed_imply_different_road_speed_and_torque() {
+        let road = RoadLoad::generic_road_car();
+        let air_density = 1.2041;
+        let engine_omega = 300.0; // rad/s, ~2865 rpm
+        let low_gear_ratio = 12.0;
+        let high_gear_ratio = 6.0;
+
+        let low_gear_speed = road.road_speed(engine_omega, low_gear_ratio);
+        let high_gear_speed = road.road_speed(engine_omega, high_gear_ratio);
+        assert!(high_gear_speed > low_gear_speed);
+
+        let low_gear_torque = road.crank_torque(low_gear_speed, air_density, low_gear_ratio);
+        let high_gear_torque = road.crank_torque(high_gear_speed, air_density, high_gear_ratio);
+        assert!(
+            (low_gear_torque - high_gear_torque).abs() > 1e-6,
+            "gears must load the crank differently at the same engine speed"
+        );
+    }
+
+    #[test]
+    fn reflected_inertia_matches_kinetic_energy_equivalence() {
+        let road = RoadLoad::generic_road_car();
+        let overall_ratio = 8.0;
+        let crank_omega = 250.0;
+        let road_speed = road.road_speed(crank_omega, overall_ratio);
+
+        let vehicle_ke = 0.5 * road.vehicle_mass * road_speed * road_speed;
+        let equivalent_ke = 0.5 * road.reflected_inertia(overall_ratio) * crank_omega * crank_omega;
+        approx(vehicle_ke, equivalent_ke, 1e-6);
     }
 }
