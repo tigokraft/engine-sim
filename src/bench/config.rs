@@ -29,6 +29,7 @@ use crate::physics::plumbing::{
 use crate::physics::thermodynamics::{
     CylinderModel, DieselCombustion, HeatRelease, ValveEvent, ValveTrain, WiebeProfile, DIESEL_LHV,
 };
+use crate::physics::vehicle::{Clutch, Gearbox, RoadLoad};
 
 /// Root engine configuration matching the structure of `engines/*.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,6 +45,30 @@ pub struct EngineConfig {
     #[serde(default)]
     pub mechanical: MechanicalConfig,
     pub acoustics: AperturesConfig,
+    #[serde(default)]
+    pub driveline: DrivelineConfig,
+}
+
+/// Default gearbox, road load and clutch this engine is driven against.
+///
+/// Not per-engine tuned — see [`Gearbox::generic_six_speed`] and
+/// [`RoadLoad::generic_road_car`]. `#[serde(default)]` on its home field in
+/// [`EngineConfig`] means a hand-edited TOML from before Stage M1 still parses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DrivelineConfig {
+    pub gearbox: Gearbox,
+    pub road_load: RoadLoad,
+    pub clutch: Clutch,
+}
+
+impl Default for DrivelineConfig {
+    fn default() -> Self {
+        Self {
+            gearbox: Gearbox::generic_six_speed(),
+            road_load: RoadLoad::generic_road_car(),
+            clutch: Clutch::generic_road_car(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -688,6 +713,12 @@ impl EngineConfig {
             block: preset.aperture_positions.block,
         };
 
+        let driveline = DrivelineConfig {
+            gearbox: preset.gearbox.clone(),
+            road_load: preset.road_load,
+            clutch: preset.clutch,
+        };
+
         Self {
             identity,
             block,
@@ -699,6 +730,7 @@ impl EngineConfig {
             induction,
             mechanical,
             acoustics,
+            driveline,
         }
     }
 
@@ -1080,6 +1112,9 @@ impl EngineConfig {
             anti_lag: self.block.anti_lag,
             limiter_mode: self.block.limiter_mode,
             limiter_cut: self.block.limiter_cut,
+            gearbox: self.driveline.gearbox.clone(),
+            road_load: self.driveline.road_load,
+            clutch: self.driveline.clutch,
         }
     }
 }
