@@ -236,6 +236,19 @@ pub struct EngineSnapshot {
     /// that is inaudible under load and is most of what an idling engine
     /// actually radiates. See [`REFERENCE_FMEP`].
     pub friction_mep: f32,
+    /// How cold the block still is, `1` at ambient and `0` on the thermostat [-].
+    ///
+    /// [`EngineThermal::cold_fraction`](crate::physics::thermal::EngineThermal::cold_fraction)
+    /// at the boundary. A cold engine is *louder* mechanically, not quieter:
+    /// the clearances a warm block closes up are open, so the skirt has further
+    /// to travel before it lands on the bore and the lifter has further to fall
+    /// onto the valve. That is a change in impact velocity, which is a change
+    /// in the impulse, not in the filter it rings.
+    ///
+    /// Zero on every soaked engine, which is every engine the recorded
+    /// fingerprints were measured on — so everything keyed on this is exactly
+    /// neutral there, by construction rather than by calibration.
+    pub cold_fraction: f32,
     /// Whether ignition is currently cut (shift cut, launch control, overrun).
     pub spark_cut: bool,
     /// How far past 1.0 the Livengood-Wu knock integral went, `(I - 1).max(0)` [-].
@@ -344,6 +357,7 @@ impl Default for EngineSnapshot {
             turbo_surge: 0.0,
             unburnt_fuel_mass: 0.0,
             friction_mep: 0.0,
+            cold_fraction: 0.0,
             spark_cut: false,
             knock_intensity: 0.0,
             bore: 0.084,
@@ -424,6 +438,7 @@ impl EngineSnapshot {
         guard!(turbo_surge, 0.0, 1.0);
         guard!(unburnt_fuel_mass, 0.0, 1.0);
         guard!(friction_mep, 0.0, 2.0e6);
+        guard!(cold_fraction, 0.0, 1.0);
         guard!(knock_intensity, 0.0, 50.0);
         guard!(bore, 0.010, 0.500);
         guard!(peak_cylinder_pressure, 0.0, 50.0e6);
@@ -4349,6 +4364,7 @@ mod tests {
             unburnt_fuel_mass: 0.0,
             // Chen-Flynn on the shipped V8 at 3000 rpm under load.
             friction_mep: 1.5e5,
+            cold_fraction: 0.0,
             spark_cut: false,
             knock_intensity: 0.0,
             bore: 0.084,
@@ -5101,6 +5117,7 @@ mod tests {
             turbo_surge: f32::NAN,
             unburnt_fuel_mass: f32::NAN,
             friction_mep: f32::NAN,
+            cold_fraction: f32::NAN,
             spark_cut: true,
             knock_intensity: f32::NAN,
             bore: f32::NAN,
@@ -6677,6 +6694,39 @@ mod tests {
             intake_gain_cut > 0.0,
             "valve seatings must continue on spark cut"
         );
+    }
+
+    #[test]
+    fn cold_fraction_crosses_the_snapshot_boundary() {
+        // The gate for every cold-start behaviour in the synth, and the one
+        // number that says the recorded fingerprints are still being measured
+        // on the engine they were recorded on: a soaked block reads exactly
+        // zero here, so nothing keyed on it can move.
+        use crate::audio::{EngineControls, SnapshotSource};
+        use crate::environment::Environment;
+        use crate::physics::engine_block::EngineBlock;
+
+        let sample = |cold: bool| {
+            let mut block = EngineBlock::cross_plane_v8(Environment::default());
+            if cold {
+                block.cold_start();
+            }
+            let mut source = SnapshotSource::new(&block);
+            block.update(1.0 / 120.0, 800.0);
+            source.sample(&block, 800.0, 1.0 / 120.0, EngineControls::default())
+        };
+
+        assert_eq!(
+            sample(false).cold_fraction,
+            0.0,
+            "a soaked engine is not at zero cold fraction, so every fingerprint moved"
+        );
+        assert!(
+            sample(true).cold_fraction > 0.99,
+            "an engine that stood overnight reported {} cold",
+            sample(true).cold_fraction
+        );
+        assert_eq!(EngineSnapshot::default().cold_fraction, 0.0);
     }
 
     #[test]

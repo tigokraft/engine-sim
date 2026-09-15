@@ -828,6 +828,7 @@ impl SnapshotSource {
             turbo_surge: turbo_surge as f32,
             unburnt_fuel_mass: unburnt_fuel_mass as f32,
             friction_mep: friction_mep as f32,
+            cold_fraction: block.thermal.cold_fraction() as f32,
             spark_cut,
             knock_intensity,
             bore,
