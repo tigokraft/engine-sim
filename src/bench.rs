@@ -2126,6 +2126,58 @@ mod tests {
     }
 
     #[test]
+    fn overlap_raises_reversion_and_reversion_costs_burn_completeness() {
+        // The first two links of the lope loop, measured rather than asserted:
+        // a wider overlap traps more of last cycle's exhaust, and a charge
+        // with more of last cycle's exhaust in it burns less of its fuel.
+        // Same engine, same speed, same throttle — only the cam is re-ground,
+        // and it is re-ground with the vocabulary this stage added.
+        let dt = 1.0 / 480.0;
+        let residual_at = |extra_duration: f64| -> (f64, f64) {
+            let mut preset = EnginePreset::cross_plane_v8();
+            let stock = preset.model.valves;
+            let mut wider = stock;
+            wider.intake.duration += extra_duration;
+            wider.exhaust.duration += extra_duration;
+            // Re-timed onto the stock separation and advance, so the extra
+            // duration lands as overlap and nothing else moves.
+            preset.model.valves = wider.with_cam_timing(stock.lobe_separation(), stock.advance());
+            let mut block = preset.block(Environment::default());
+            // A shut plate: an idle, which is the only place a manifold is far
+            // enough below the exhaust for overlap to push gas the wrong way.
+            block.throttle = 0.0;
+            for _ in 0..(8.0 / dt) as usize {
+                block.update(dt, 900.0);
+            }
+            let residual = block.master.latch.dilution;
+            let wiebe = block
+                .model
+                .combustion
+                .spark()
+                .expect("the cross-plane V8 has spark plugs")
+                .diluted(residual);
+            (residual, 1.0 - (-wiebe.efficiency_parameter).exp())
+        };
+
+        let (stock_residual, stock_completeness) = residual_at(0.0);
+        let (lopey_residual, lopey_completeness) = residual_at(deg(60.0));
+        assert!(
+            lopey_residual > stock_residual * 1.15,
+            "sixty degrees more overlap must trap meaningfully more residual: \
+             {stock_residual:.4} to {lopey_residual:.4}"
+        );
+        assert!(
+            lopey_completeness < stock_completeness,
+            "more residual must cost burn completeness: {stock_completeness:.5} \
+             to {lopey_completeness:.5}"
+        );
+        assert!(
+            stock_residual > 0.0,
+            "a real engine always traps some residual"
+        );
+    }
+
+    #[test]
     fn every_preset_makes_torque_and_stays_finite() {
         for preset in EnginePreset::catalogue() {
             let block = primed(&preset, 4_000.0);
