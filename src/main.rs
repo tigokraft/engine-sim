@@ -609,7 +609,7 @@ fn publish(
     shared.oil_pressure_bar = block.thermal.oil_pressure(driveline.rpm) / 100_000.0;
 
     // --- Calibration & ECU trims -------------------------------------------
-    let load = (block.intake.pressure() / block.environment.pressure).clamp(0.0, 3.0);
+    let load = block.load_fraction();
     shared.spark_advance_deg =
         block
             .ecu
