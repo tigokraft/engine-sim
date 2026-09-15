@@ -4734,9 +4734,26 @@ mod tests {
         let healthy_cycle_energy = magnitude_at(&healthy_buf[frames..], f_cycle, FS);
         let dead_cycle_energy = magnitude_at(&dead_buf[frames..], f_cycle, FS);
 
+        // Over a narrow band rather than at the single bin. Combustion varies
+        // cycle to cycle, so the firing order is not a line: its energy is
+        // smeared across a couple of hertz, and a probe sitting on exactly
+        // 160 Hz samples one point of that and swings by a quarter on burn
+        // changes far too small to hear. The band is +/- one cycle rate,
+        // which is the spacing of the sidebands the variation puts there.
         let f_firing = 8.0 * f_cycle; // 160.0 Hz (order 4.0)
-        let healthy_firing = magnitude_at(&healthy_buf[frames..], f_firing, FS);
-        let dead_firing = magnitude_at(&dead_buf[frames..], f_firing, FS);
+        let firing_band = |buf: &[f32]| -> f32 {
+            let mut total = 0.0;
+            let mut n = 0;
+            let mut offset = -f_cycle;
+            while offset <= f_cycle + 1e-3 {
+                total += magnitude_at(buf, f_firing + offset, FS);
+                n += 1;
+                offset += 0.5 * f_cycle;
+            }
+            total / n as f32
+        };
+        let healthy_firing = firing_band(&healthy_buf[frames..]);
+        let dead_firing = firing_band(&dead_buf[frames..]);
 
         // A single dead cylinder shows as a missing order component and a lope at the cycle rate
         assert!(
