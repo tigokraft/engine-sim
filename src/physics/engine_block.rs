@@ -1651,14 +1651,28 @@ impl EngineBlock {
     }
 
     /// Quasi-steady flow through the throttle into the intake plenum [kg/s].
+    ///
+    /// Gated by `self.throttle`, which is never anything but its `1.0`
+    /// default unless a caller — the vehicle-load driving path in
+    /// [`crate::bench::Driveline::update`] is the only one today — sets it
+    /// from the pedal. At `1.0` the gate is wide open and this is bit-for-bit
+    /// the ungated valve-area restriction every existing preset and recorded
+    /// fingerprint was measured against; below it, the plate itself becomes
+    /// the bottleneck rather than the valves, which is what lets
+    /// [`EngineBlock::load_fraction`] respond to load at all instead of being
+    /// a function of rpm alone.
     fn intake_makeup_flow(&self, dt: f64) -> f64 {
         let deficit = self.environment.pressure - self.intake.pressure();
         if deficit <= 0.0 {
             return 0.0;
         }
         let density = self.environment.air_density();
-        let area =
+        let valve_area =
             PI * self.model.valves.intake.diameter.powi(2) / 4.0 * self.firing.len() as f64 * 0.5;
+        // A shut plate is never quite sealed: idle bypass and plate
+        // clearance leave a small leak, the way a real one does.
+        let throttle_fraction = (0.02 + 0.98 * self.throttle.clamp(0.0, 1.0)).min(1.0);
+        let area = valve_area * throttle_fraction;
         let bernoulli = area * 0.8 * (2.0 * deficit * density).sqrt();
         // Never past ambient: a throttle cannot supercharge the engine.
         bernoulli.min(self.intake.rate_limit(self.environment.pressure, dt))
@@ -2700,5 +2714,50 @@ mod tests {
             block.update(1.0 / 240.0, 3_000.0);
         }
         assert_eq!(block.load_fraction(), block.volumetric_efficiency());
+    }
+
+    #[test]
+    fn wide_open_throttle_leaves_intake_flow_ungated() {
+        let mut block = EngineBlock::cross_plane_v8(Environment::default());
+        block.throttle = 1.0;
+        // A real deficit below ambient for the gate to have something to restrict.
+        block.intake.mass *= 0.9;
+        let dt = 1.0 / 480.0;
+        let gated = block.intake_makeup_flow(dt);
+
+        let valve_area =
+            PI * block.model.valves.intake.diameter.powi(2) / 4.0 * block.firing.len() as f64 * 0.5;
+        let deficit = block.environment.pressure - block.intake.pressure();
+        let density = block.environment.air_density();
+        let expected = (valve_area * 0.8 * (2.0 * deficit * density).sqrt())
+            .min(block.intake.rate_limit(block.environment.pressure, dt));
+
+        assert_eq!(gated, expected, "throttle = 1.0 must not gate flow at all");
+    }
+
+    #[test]
+    fn closing_the_throttle_reduces_trapped_mass_and_load_fraction() {
+        let rpm = 3_000.0;
+        let frame = 1.0 / 240.0;
+        let frames = 600;
+
+        let mut open = EngineBlock::cross_plane_v8(Environment::default());
+        open.throttle = 1.0;
+        for _ in 0..frames {
+            open.update(frame, rpm);
+        }
+
+        let mut closed = EngineBlock::cross_plane_v8(Environment::default());
+        closed.throttle = 0.25;
+        for _ in 0..frames {
+            closed.update(frame, rpm);
+        }
+
+        assert!(
+            closed.load_fraction() < open.load_fraction(),
+            "a more closed throttle must trap less: closed={} open={}",
+            closed.load_fraction(),
+            open.load_fraction()
+        );
     }
 }
