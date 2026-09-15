@@ -1919,9 +1919,13 @@ impl Driveline {
         overall_ratio: f64,
         effective: f64,
     ) {
-        // The pedal now actually restricts what the cylinder can trap, not
-        // just how much of the block's own torque curve gets through — see
-        // `EngineBlock::intake_makeup_flow`. Takes effect on the block's next
+        // The pedal now actually restricts what the cylinder can trap, so the
+        // block's own torque curve already carries the pedal's effect — see
+        // `EngineBlock::intake_makeup_flow`. That replaces the synthetic
+        // `0.05 + 0.95 * effective` scaling neutral driving still needs
+        // (the block there never sees the pedal at all); scaling a torque
+        // that is already throttle-restricted a second time would derate it
+        // twice for one pedal position. Takes effect on the block's next
         // `update`, same one-frame lag as every other quantity read here off
         // last cycle's ring.
         block.throttle = effective;
@@ -1930,7 +1934,7 @@ impl Driveline {
         let drive = if self.is_cutting(block) {
             0.0
         } else {
-            self.torque * (0.05 + 0.95 * effective)
+            self.torque
         };
 
         let (a, b, c) = self.load;
