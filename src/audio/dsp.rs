@@ -2607,7 +2607,70 @@ impl WastegateVoice {
 // Backfire
 // ---------------------------------------------------------------------------
 
-/// Decides when unburnt fuel in a hot runner lights off.
+/// How long an ignition delay has to run before a charge has convected the
+/// length of a typical exhaust [s].
+///
+/// Not measured against any one engine's own geometry — the network already
+/// knows its own lengths, and threading them back into this choice would make
+/// the node picked here and the delay the network actually measures disagree
+/// by construction. This is a coarse convection-time budget: exhaust gas at a
+/// few hundred K moving at tens of metres a second covers a couple of metres
+/// of pipe on this order of time, and it is what maps "how long the charge has
+/// had to travel" onto "how far down the pipe it got".
+const IGNITION_TRAVEL_SECONDS: f32 = 0.04;
+
+/// Picks where an ignition event lights, from the physics that produced it
+/// rather than from a stored kind.
+///
+/// A charge that has just been dumped is large, hot and still concentrated
+/// right behind the valve, and lights almost where it sits. A charge that has
+/// had time to convect down the pipe before finding enough heat and oxygen
+/// lights further along it. `seconds_since_cut` stands in for the second
+/// effect; `fuel_excess` — how far the unburnt charge sits above the ignition
+/// threshold, `0..=1` — pulls the reach back toward the port, because a
+/// bigger, hotter charge does not need the extra distance to find ignition.
+fn choose_injection_node(fuel_excess: f32, seconds_since_cut: f32) -> InjectionNode {
+    let reach = (seconds_since_cut / IGNITION_TRAVEL_SECONDS).min(1.0)
+        * (1.0 - 0.6 * fuel_excess.clamp(0.0, 1.0));
+    match (reach * 4.0) as usize {
+        0 => InjectionNode::Port,
+        1 => InjectionNode::Collector,
+        2 => InjectionNode::PostSilencer,
+        _ => InjectionNode::Tailpipe,
+    }
+}
+
+/// Fixed order the four injection nodes are held in per bank, in
+/// [`EngineSynth::backfire_pulses`] and wherever else the four are indexed
+/// together.
+const BACKFIRE_NODE_ORDER: [InjectionNode; 4] = [
+    InjectionNode::Port,
+    InjectionNode::Collector,
+    InjectionNode::PostSilencer,
+    InjectionNode::Tailpipe,
+];
+
+/// This node's slot in [`BACKFIRE_NODE_ORDER`] and therefore in
+/// [`EngineSynth::backfire_pulses`].
+fn node_index(node: InjectionNode) -> usize {
+    BACKFIRE_NODE_ORDER
+        .iter()
+        .position(|&n| n == node)
+        .unwrap_or(0)
+}
+
+/// One detected ignition, ready to be triggered into the node it lights at.
+#[derive(Debug, Clone, Copy)]
+struct BackfireIgnition {
+    /// Pop amplitude, pre-envelope-normalisation [-].
+    amplitude: f32,
+    /// Envelope decay [s].
+    decay: f32,
+    /// Where in the network this ignition lights.
+    node: InjectionNode,
+}
+
+/// Decides when unburnt fuel in a hot runner lights off, and where.
 ///
 /// The physical story is specific: cut the spark while the throttle is still
 /// open — an upshift cut, launch-control limiter, or a lifted overrun — and the
@@ -2623,6 +2686,11 @@ impl WastegateVoice {
 #[derive(Debug, Clone, Copy)]
 struct BackfireVoice {
     severity: f32,
+    /// How far the unburnt charge sits above the ignition threshold, `0..=1`.
+    fuel_excess: f32,
+    /// How long the current cut has been running [s]. Resets the instant
+    /// `tune` sees the cut end, so it always measures *this* cut.
+    seconds_since_cut: f32,
     cooldown: usize,
     sample_rate: f32,
 }
@@ -2631,6 +2699,8 @@ impl BackfireVoice {
     fn new(sample_rate: f32) -> Self {
         Self {
             severity: 0.0,
+            fuel_excess: 0.0,
+            seconds_since_cut: 0.0,
             cooldown: 0,
             sample_rate,
         }
@@ -2640,6 +2710,8 @@ impl BackfireVoice {
     fn tune(&mut self, config: &SynthConfig, snapshot: &EngineSnapshot) {
         if !snapshot.spark_cut {
             self.severity = 0.0;
+            self.fuel_excess = 0.0;
+            self.seconds_since_cut = 0.0;
             return;
         }
         let fuel = snapshot.unburnt_fuel_mass / config.backfire_fuel_threshold.max(1e-12) as f32;
@@ -2647,17 +2719,22 @@ impl BackfireVoice {
             (snapshot.exhaust_temperature - config.backfire_temperature_threshold as f32) / 250.0;
         if fuel <= 1.0 || heat <= 0.0 {
             self.severity = 0.0;
+            self.fuel_excess = 0.0;
+            self.seconds_since_cut = 0.0;
             return;
         }
         // Saturating at twice the threshold: a genuine ignition cut dumps the
         // whole metered charge, which is well past that, so a real cut sits at
         // full severity rather than at a third of it. The ramp below still
         // separates a cut from a partial misfire.
-        self.severity = (fuel - 1.0).min(1.0) * heat.min(1.0);
+        self.fuel_excess = (fuel - 1.0).min(1.0);
+        self.severity = self.fuel_excess * heat.min(1.0);
+        self.seconds_since_cut += CONTROL_BLOCK as f32 / self.sample_rate;
     }
 
-    /// Polls once per control block; returns a pop's amplitude and decay [s].
-    fn poll(&mut self, noise: &mut Noise, block: usize) -> Option<(f32, f32)> {
+    /// Polls once per control block; returns the next ignition to trigger, if
+    /// one fires this block.
+    fn poll(&mut self, noise: &mut Noise, block: usize) -> Option<BackfireIgnition> {
         self.cooldown = self.cooldown.saturating_sub(block);
         if self.severity <= 0.0 || self.cooldown > 0 {
             return None;
@@ -2671,11 +2748,12 @@ impl BackfireVoice {
         // 12 ms refractory: allows rapid machine-gun stutter while staying discrete.
         self.cooldown = (0.012 * self.sample_rate) as usize;
         let scale = 0.8 + 1.2 * noise.next_unit();
-        Some((
-            self.severity * scale,
+        Some(BackfireIgnition {
+            amplitude: self.severity * scale,
             // Pops in a pipe ring far longer than a blowdown crack does.
-            0.006 + 0.014 * noise.next_unit(),
-        ))
+            decay: 0.006 + 0.014 * noise.next_unit(),
+            node: choose_injection_node(self.fuel_excess, self.seconds_since_cut),
+        })
     }
 }
 
@@ -2849,10 +2927,17 @@ pub struct EngineSynth {
     cycle: CyclePlayer,
     /// Excitation presented to the network this sample, one per cylinder.
     excitations: Vec<f32>,
-    /// One backfire pool per bank. A backfire is unburnt fuel lighting off in
-    /// the pipework, so it is a bank event and fires into the collector rather
-    /// than down any one cylinder's primary.
-    backfire_pulses: Vec<PopPool>,
+    /// One backfire pool per bank per injection node — [`BACKFIRE_NODE_ORDER`]
+    /// gives the order. An ignition can light at any node the physics picks,
+    /// and mixing two different nodes' events through one pool before the pop
+    /// reaches the network would inject whichever fired last at every node it
+    /// touched, so each node gets its own bandlimited pool.
+    backfire_pulses: Vec<[PopPool; 4]>,
+    /// Cylinder each bank's port-node injections are attributed to: the
+    /// bank's first cylinder, a representative primary rather than whichever
+    /// cylinder actually produced the charge. The network has one port
+    /// injection point exposed per bank here, not one per cylinder.
+    bank_first_cylinder: Vec<usize>,
     /// Pressure radiated from each bank's mouth this sample.
     radiated: Vec<f32>,
     /// Broadband pressure each port's jet is launching this sample [Pa].
@@ -3045,6 +3130,19 @@ impl EngineSynth {
             &snapshot,
         );
         let n_cyl = config.cylinders.len();
+        // The first cylinder found on each bank, used to attribute a bank's
+        // port-node backfire injections to one representative primary rather
+        // than needing a per-cylinder pop pool for a node most engines only
+        // ever put one event into at a time.
+        let mut bank_first_cylinder = vec![0usize; config.bank_count.max(1)];
+        let mut bank_seen = vec![false; config.bank_count.max(1)];
+        for (i, tap) in config.cylinders.iter().enumerate() {
+            let b = tap.bank % config.bank_count.max(1);
+            if !bank_seen[b] {
+                bank_first_cylinder[b] = i;
+                bank_seen[b] = true;
+            }
+        }
         let blowdown_pa = (0..config.cylinders.len())
             .map(|_| Smoothed::new(0.0, fs, 0.005))
             .collect();
@@ -3127,7 +3225,8 @@ impl EngineSynth {
             network,
             cycle: CyclePlayer::new(fs),
             excitations: vec![0.0; n_cyl],
-            backfire_pulses: vec![PopPool::default(); config.bank_count],
+            backfire_pulses: vec![[PopPool::default(); 4]; config.bank_count],
+            bank_first_cylinder,
             radiated: vec![0.0; config.bank_count],
             port_jets: vec![0.0; n_cyl],
             port_drive: vec![0.0; n_cyl],
@@ -3299,8 +3398,10 @@ impl EngineSynth {
     pub fn reset(&mut self) {
         self.network.reset();
         self.intake_network.reset();
-        for pool in self.backfire_pulses.iter_mut() {
-            pool.reset();
+        for pools in self.backfire_pulses.iter_mut() {
+            for pool in pools.iter_mut() {
+                pool.reset();
+            }
         }
         self.cycle.reset();
         self.excitations.fill(0.0);
@@ -3471,9 +3572,9 @@ impl EngineSynth {
         }
 
         self.backfire.tune(&self.config, &self.snapshot);
-        if let Some((severity, decay)) = self.backfire.poll(&mut self.noise, CONTROL_BLOCK) {
+        if let Some(ignition) = self.backfire.poll(&mut self.noise, CONTROL_BLOCK) {
             let bank = (self.noise.next_u32() as usize) % self.backfire_pulses.len();
-            let amplitude = severity * self.config.backfire_level as f32 * 2.0;
+            let amplitude = ignition.amplitude * self.config.backfire_level as f32 * 2.0;
             // Backfires combine an explosive positive expansion wave with
             // turbulent flame roar; sharing the runner and muffler gives them
             // the pipe's acoustic colour without reducing to a thin metallic click.
@@ -3482,11 +3583,12 @@ impl EngineSynth {
             // just finished; a fresh draw over that width is that instant's
             // correct distribution, not a quantised guess at the boundary.
             let age_samples = self.noise.next_unit() * CONTROL_BLOCK as f32;
-            self.backfire_pulses[bank].trigger(
+            let node_slot = node_index(ignition.node);
+            self.backfire_pulses[bank][node_slot].trigger(
                 self.config.sample_rate,
                 amplitude,
                 0.00018,
-                decay,
+                ignition.decay,
                 0.80,
                 age_samples,
             );
@@ -3879,10 +3981,16 @@ impl EngineSynth {
 
         let exhaust_level = self.exhaust_level.next_value();
         let launch = self.launch.value();
-        for (bank, pool) in self.backfire_pulses.iter_mut().enumerate() {
-            // Into the same pascals the cylinders' own excitations arrive in.
-            let value = pool.process(&mut self.noise) * launch;
-            self.network.inject(InjectionNode::Collector, bank, value);
+        for (bank, pools) in self.backfire_pulses.iter_mut().enumerate() {
+            for (pool, &node) in pools.iter_mut().zip(BACKFIRE_NODE_ORDER.iter()) {
+                // Into the same pascals the cylinders' own excitations arrive in.
+                let value = pool.process(&mut self.noise) * launch;
+                let index = match node {
+                    InjectionNode::Port => self.bank_first_cylinder[bank],
+                    _ => bank,
+                };
+                self.network.inject(node, index, value);
+            }
         }
         for ((drive, pulse), jet) in self
             .port_drive
@@ -5037,6 +5145,25 @@ mod tests {
                  one sample later ({younger_next}), not a quantised amplitude step"
             );
         }
+    }
+
+    #[test]
+    fn ignition_node_moves_downstream_as_the_cut_ages_and_back_with_charge_size() {
+        // A charge that has just been dumped is large and lights at the port;
+        // the same severity given time to convect lights further down the
+        // pipe. A bigger charge pulls the reach back toward the port at any
+        // given age, because it does not need the extra distance to ignite.
+        assert_eq!(choose_injection_node(1.0, 0.0), InjectionNode::Port);
+        assert_eq!(
+            choose_injection_node(0.0, IGNITION_TRAVEL_SECONDS),
+            InjectionNode::Tailpipe
+        );
+        assert_eq!(
+            choose_injection_node(1.0, IGNITION_TRAVEL_SECONDS),
+            InjectionNode::Collector,
+            "a bigger charge should not have reached as far downstream as a \
+             smaller one at the same age"
+        );
     }
 
     #[test]
