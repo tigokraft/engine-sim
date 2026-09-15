@@ -264,6 +264,59 @@ impl OnePole {
     }
 }
 
+// ---------------------------------------------------------------------------
+// First-order allpass
+// ---------------------------------------------------------------------------
+
+/// First-order allpass, `y[n] = a*x[n] + x[n-1] - a*y[n-1]`.
+///
+/// Unity magnitude at every frequency by construction — only phase moves,
+/// turning over a full cycle around `break_hz`. That makes it the right
+/// primitive for smearing a step-like edge in time without touching level or
+/// spectrum: a lowpass would dull the edge and quiet it, this only changes
+/// *when* each frequency in it arrives. Cascading several stages at
+/// different break frequencies spreads that smear across the band instead of
+/// concentrating it in one narrow region — see
+/// [`crate::audio::waveguide::Turbine`], where a chain of these stands in for
+/// the many differing path lengths through a turbine wheel's blade passages.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Allpass {
+    a: f32,
+    x1: f32,
+    y1: f32,
+}
+
+impl Allpass {
+    /// An allpass whose phase turnover centres on `break_hz` [Hz].
+    pub fn new(sample_rate: f32, break_hz: f32) -> Self {
+        let mut filter = Self::default();
+        filter.set_break_frequency(sample_rate, break_hz);
+        filter
+    }
+
+    /// Retunes the break frequency [Hz], keeping state.
+    pub fn set_break_frequency(&mut self, sample_rate: f32, break_hz: f32) {
+        let f = break_hz.clamp(1.0, 0.45 * sample_rate);
+        let t = (std::f32::consts::PI * f / sample_rate).tan();
+        self.a = (t - 1.0) / (t + 1.0);
+    }
+
+    /// Filters one sample.
+    #[inline(always)]
+    pub fn process(&mut self, x: f32) -> f32 {
+        let y = flush(self.a * x + self.x1 - self.a * self.y1);
+        self.x1 = x;
+        self.y1 = y;
+        y
+    }
+
+    /// Clears state.
+    pub fn reset(&mut self) {
+        self.x1 = 0.0;
+        self.y1 = 0.0;
+    }
+}
+
 /// DC blocker, `y[n] = x[n] - x[n-1] + R * y[n-1]`.
 ///
 /// The blowdown excitation is a one-sided pressure pulse, so its mean is not
@@ -1790,5 +1843,36 @@ mod tests {
             mag_os < 0.1 * mag_no_os,
             "Oversampling must suppress aliasing by at least 20 dB: got {mag_os} vs {mag_no_os}"
         );
+    }
+
+    #[test]
+    fn allpass_preserves_magnitude_at_every_frequency() {
+        // The whole point of reaching for an allpass instead of a lowpass to
+        // disperse an edge: it must not touch the spectrum, only the timing.
+        const FS: f32 = 48_000.0;
+        for break_hz in [100.0f32, 800.0, 4_000.0] {
+            for f in [50.0f32, 300.0, 1_000.0, 5_000.0, 12_000.0] {
+                let mut stage = Allpass::new(FS, break_hz);
+                // An integer number of cycles in the measurement window, so
+                // the correlation does not leak across bins at a low `f`.
+                let period = FS / f;
+                let settle = (period * 20.0).round() as usize;
+                let measure = (period * 40.0).round() as usize;
+                let (mut re, mut im) = (0.0f64, 0.0f64);
+                for i in 0..(settle + measure) {
+                    let phase = TAU * f * i as f32 / FS;
+                    let y = stage.process(phase.sin());
+                    if i >= settle {
+                        re += y as f64 * phase.sin() as f64;
+                        im += y as f64 * phase.cos() as f64;
+                    }
+                }
+                let mag = 2.0 * (re * re + im * im).sqrt() / measure as f64;
+                assert!(
+                    (mag - 1.0).abs() < 0.02,
+                    "allpass at break {break_hz} Hz should pass {f} Hz at unity, measured {mag:.4}"
+                );
+            }
+        }
     }
 }

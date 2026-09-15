@@ -23,7 +23,9 @@
 //! Audio processing runs in `f32` at the stream sample rate without heap allocation
 //! in the audio callback.
 
-use crate::audio::filters::{runner_delay_seconds, speed_of_sound, DelayLine, OnePole, Smoothed};
+use crate::audio::filters::{
+    runner_delay_seconds, speed_of_sound, Allpass, DelayLine, OnePole, Smoothed,
+};
 use crate::audio::radiation::Mouth;
 
 /// Coldest gas temperature used to size delay line buffers [K].
@@ -2198,20 +2200,39 @@ impl SilencerElement {
 pub const TURBINE_WHEEL_ABSORPTION: f64 = 0.4;
 
 /// Nominal axial length of the wheel's flow path [m], for the cavity that
-/// carries dissipation between the two nozzle junctions. Real wheel width
-/// varies with frame size, which a later stage sizes properly; this is
-/// short enough that its own resonance sits well above anything the
-/// pre-turbine manifold or the rest of the chain tunes to.
+/// carries dissipation and dispersion between the two nozzle junctions.
+/// Real wheel width varies with frame size, which a later stage sizes
+/// properly; this is short enough that its own resonance sits well above
+/// anything the pre-turbine manifold or the rest of the chain tunes to.
 const TURBINE_WHEEL_LENGTH: f64 = 0.05;
+
+/// Number of cascaded allpass stages in the wheel's dispersion chain.
+const TURBINE_DISPERSION_STAGES: usize = 4;
+
+/// Break frequencies for the wheel's dispersion chain [Hz].
+///
+/// The wheel's blade passages differ in path length by roughly the throat's
+/// own radius, so that is the length scale the dispersion should spread
+/// across. Four stages a fixed factor apart put a phase transition in each
+/// of low, low-mid, high-mid and high registers rather than piling every
+/// stage's turnover on one narrow band, which would smear one harmonic and
+/// leave the rest of the edge sharp.
+fn turbine_dispersion_breaks_hz(
+    wheel_radius: f32,
+    speed_of_sound: f32,
+) -> [f32; TURBINE_DISPERSION_STAGES] {
+    let base = speed_of_sound / (4.0 * wheel_radius.max(1e-4));
+    [base * 0.5, base, base * 2.0, base * 4.0]
+}
 
 /// Acoustic turbine element: the audible half of a turbocharger.
 ///
 /// A large area contraction into the wheel followed by the expansion back
 /// out of it, built from the same two scattering junctions either side of a
 /// cavity that [`ExpansionChamber`] and [`AbsorptiveSilencer`] use — see
-/// [`ExpansionChamber::step`] for the port convention. Two physical
-/// behaviours live in the cavity between the junctions so far, and neither
-/// is optional:
+/// [`ExpansionChamber::step`] for the port convention. Three physical
+/// behaviours live in the cavity between the junctions, and none of them is
+/// optional:
 ///
 /// - **Reflection**, from the junctions themselves: the nozzle is a large
 ///   contraction, sized off [`crate::physics::plumbing::TurbineGeometry::throat_area_ratio`],
@@ -2223,6 +2244,10 @@ const TURBINE_WHEEL_LENGTH: f64 = 0.05;
 ///   the same way packing does — this is not decoration, an
 ///   `ExpansionChamber` shipped without an equivalent term once and made
 ///   mufflers *louder*.
+/// - **Dispersion**, a cascade of [`Allpass`] stages: unity magnitude at
+///   every frequency, so it changes *when* a sharp edge arrives without
+///   changing *how loud* it is. A lowpass here would dull the edge; this
+///   smears it, which is the difference between "muffled" and "whooshy".
 #[derive(Debug, Clone)]
 pub struct Turbine {
     junction_in: ScatteringJunction,
@@ -2234,6 +2259,8 @@ pub struct Turbine {
     corner_hz: f32,
     shelf_forward: OnePole,
     shelf_backward: OnePole,
+    disperse_forward: [Allpass; TURBINE_DISPERSION_STAGES],
+    disperse_backward: [Allpass; TURBINE_DISPERSION_STAGES],
     /// Nozzle throat area, cached for retuning [m^2].
     throat_area: f64,
     sample_rate: f32,
@@ -2277,6 +2304,14 @@ impl Turbine {
             10f64.powf(-wheel_db_per_m * TURBINE_WHEEL_LENGTH / 20.0) as f32;
         let corner_hz = packing_corner_hz(wheel_radius, c);
 
+        let breaks = turbine_dispersion_breaks_hz(wheel_radius as f32, c);
+        let mut disperse_forward = [Allpass::default(); TURBINE_DISPERSION_STAGES];
+        let mut disperse_backward = [Allpass::default(); TURBINE_DISPERSION_STAGES];
+        for i in 0..TURBINE_DISPERSION_STAGES {
+            disperse_forward[i] = Allpass::new(sample_rate, breaks[i]);
+            disperse_backward[i] = Allpass::new(sample_rate, breaks[i]);
+        }
+
         Self {
             junction_in,
             wheel,
@@ -2285,6 +2320,8 @@ impl Turbine {
             corner_hz,
             shelf_forward: OnePole::new(sample_rate, corner_hz),
             shelf_backward: OnePole::new(sample_rate, corner_hz),
+            disperse_forward,
+            disperse_backward,
             throat_area: a_throat,
             sample_rate,
             scatter_buf_in: [0.0; 2],
@@ -2302,8 +2339,8 @@ impl Turbine {
         self.corner_hz
     }
 
-    /// Retunes propagation delay, admittance and the absorption corner for
-    /// the current gas state.
+    /// Retunes propagation delay, admittance, the absorption corner and the
+    /// dispersion chain for the current gas state.
     pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
         self.wheel.tune(gamma, gas_constant, temperature);
         let wheel_radius = (self.throat_area / std::f64::consts::PI).sqrt();
@@ -2313,6 +2350,13 @@ impl Turbine {
             .set_cutoff(self.sample_rate, self.corner_hz);
         self.shelf_backward
             .set_cutoff(self.sample_rate, self.corner_hz);
+        let breaks = turbine_dispersion_breaks_hz(wheel_radius as f32, c);
+        for (stage, &hz) in self.disperse_forward.iter_mut().zip(breaks.iter()) {
+            stage.set_break_frequency(self.sample_rate, hz);
+        }
+        for (stage, &hz) in self.disperse_backward.iter_mut().zip(breaks.iter()) {
+            stage.set_break_frequency(self.sample_rate, hz);
+        }
     }
 
     /// Applies the wheel's absorption shelf to one direction of travel; see
@@ -2330,6 +2374,14 @@ impl Turbine {
         let (p_wheel_0, p_wheel_1) = self.wheel.read_outputs();
         let p_wheel_0 = Self::absorb(self.dissipation_pass, &mut self.shelf_backward, p_wheel_0);
         let p_wheel_1 = Self::absorb(self.dissipation_pass, &mut self.shelf_forward, p_wheel_1);
+        let p_wheel_0 = self
+            .disperse_backward
+            .iter_mut()
+            .fold(p_wheel_0, |x, stage| stage.process(x));
+        let p_wheel_1 = self
+            .disperse_forward
+            .iter_mut()
+            .fold(p_wheel_1, |x, stage| stage.process(x));
 
         self.junction_in
             .scatter(&[p_in_plus, p_wheel_0], &mut self.scatter_buf_in);
@@ -2351,6 +2403,12 @@ impl Turbine {
         self.wheel.reset();
         self.shelf_forward.reset();
         self.shelf_backward.reset();
+        for stage in self.disperse_forward.iter_mut() {
+            stage.reset();
+        }
+        for stage in self.disperse_backward.iter_mut() {
+            stage.reset();
+        }
         self.scatter_buf_in = [0.0; 2];
         self.scatter_buf_out = [0.0; 2];
     }
