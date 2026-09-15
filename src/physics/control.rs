@@ -22,6 +22,45 @@ use crate::physics::thermodynamics::STOICH_AFR;
 /// Maximum number of cylinders supported by the control unit.
 pub const MAX_CYLINDERS: usize = 16;
 
+/// Starter stall torque per litre of displacement, against the engine's drag [N m / L].
+///
+/// The first half of the sizing rule in [`Starter::for_engine`]: enough motor
+/// to overcome what the whole engine costs to turn at all. Sized so the crank
+/// settles a few hundred rev/min on a cold engine and climbs as the oil thins.
+pub const STARTER_TORQUE_PER_LITRE: f64 = 40.0;
+
+/// Margin a starter is sized over the compression it must cross [-].
+///
+/// The other half of the rule. A motor that can only just hold the engine
+/// against its worst compression never gets past it; fifteen per cent over is
+/// what turns "holds" into "turns".
+pub const STARTER_HUMP_MARGIN: f64 = 1.15;
+
+/// Crank angle a compression stroke is resisted over [rad].
+///
+/// Half a revolution nominally, but the gas only pushes back over the part of
+/// it where the pressure has risen, which is the last quarter — so a quarter
+/// revolution is what the flywheel actually has to bridge, and what the
+/// starter's torque is integrated over in [`Starter::for_engine`].
+pub const COMPRESSION_ANGLE: f64 = std::f64::consts::FRAC_PI_2;
+
+/// Cranking speed a starter is sized to reach [rev/min].
+///
+/// Where the flywheel's stored energy is evaluated when the motor is specified.
+/// Not a speed anything is held at: the crank finds its own, and this only sets
+/// how much help the flywheel is assumed to be when the motor is chosen.
+pub const STARTER_DESIGN_CRANK_RPM: f64 = 250.0;
+
+/// Crank speed a starter runs to with nothing on the pinion [rev/min].
+///
+/// The other end of the machine's speed-torque line, and also the speed its
+/// one-way clutch gives up at: past this the ring gear is driving the pinion
+/// instead of the other way round. See [`Starter::update`].
+pub const STARTER_FREE_SPEED: f64 = 450.0;
+
+/// Ring gear teeth, which is the starter whine's order at the crank [-].
+pub const STARTER_WHINE_ORDER: f64 = 129.0;
+
 /// Limiter cut mechanism.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LimiterCut {
@@ -99,6 +138,120 @@ impl CylinderHealth {
         } else {
             0.0
         }
+    }
+}
+
+/// The starter motor: the only thing that turns an engine which is not running.
+///
+/// A series-wound machine on a one-way clutch, described by the two numbers
+/// that are its own — the torque it makes held still, and the speed it runs to
+/// with nothing on the pinion. Between them the torque falls linearly, which is
+/// close enough to a series motor's curve over the narrow part of it a starter
+/// ever visits, and it is the *slope* that matters here rather than the shape:
+/// a motor that makes more torque the harder it is held is a motor that cannot
+/// be stalled by one compression stroke, only slowed by it.
+///
+/// # Nothing here shapes a cranking sound
+///
+/// There is no envelope in this struct and no chug in it. The chug is what
+/// comes out when this torque meets
+/// [`EngineBlock::instantaneous_indicated_torque`](crate::physics::engine_block::EngineBlock::instantaneous_indicated_torque):
+/// the crank slows going up every compression stroke, the motor's torque rises
+/// as it slows, and it drags the engine over the top and is given most of it
+/// back down the other side. That is one chug per firing interval, at a rate
+/// nobody wrote down, and it speeds up on a warm engine on its own because
+/// thin oil is less friction for the same motor to work against.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Starter {
+    /// Torque at the crankshaft with the pinion held still [N m].
+    pub stall_torque: f64,
+    /// Crankshaft speed the motor runs to with nothing to turn [rev/min].
+    pub free_speed: f64,
+    /// Tooth-mesh order of the pinion against the ring gear [per crank rev].
+    pub whine_order: f64,
+    /// Whether the pinion is meshed with the ring gear.
+    pub engaged: bool,
+}
+
+impl Default for Starter {
+    fn default() -> Self {
+        Self {
+            stall_torque: STARTER_TORQUE_PER_LITRE * 2.0,
+            free_speed: STARTER_FREE_SPEED,
+            whine_order: STARTER_WHINE_ORDER,
+            engaged: false,
+        }
+    }
+}
+
+impl Starter {
+    /// The motor this engine would be fitted with.
+    ///
+    /// Two requirements, and the motor has to meet both. It has to turn the
+    /// engine against its steady drag at all, which scales with `displacement`
+    /// [m^3]; and it has to get the crank over `peak_hump` [N m], the deepest
+    /// the gas torque goes anywhere in a motored cycle. The second is where
+    /// `inertia` [kg m^2] comes in: a flywheel arrives at a compression with
+    /// energy already in it and gives all of that back on the way up, so the
+    /// motor only has to find what is left over. That is why a six-litre V12
+    /// is cranked by a modest motor and a single-cylinder thumper is not — the
+    /// V12's compressions overlap and its flywheel is heavy, and the thumper's
+    /// hump arrives once every two revolutions with nothing behind it.
+    ///
+    /// Both terms, and the larger wins. Sizing on drag alone leaves an engine
+    /// the motor cannot get over TDC; sizing on the hump alone bolts a crane
+    /// motor to a V12 that never needed one.
+    pub fn for_engine(displacement: f64, peak_hump: f64, inertia: f64) -> Self {
+        let drag_sized = STARTER_TORQUE_PER_LITRE * (displacement * 1_000.0).max(0.1);
+        let design_omega = STARTER_DESIGN_CRANK_RPM * std::f64::consts::PI / 30.0;
+        let flywheel = 0.5 * inertia.max(0.0) * design_omega * design_omega / COMPRESSION_ANGLE;
+        let hump_sized = STARTER_HUMP_MARGIN * peak_hump.max(0.0) - flywheel;
+        Self {
+            stall_torque: drag_sized.max(hump_sized),
+            ..Self::default()
+        }
+    }
+
+    /// Torque the motor is putting into the crankshaft at this speed [N m].
+    ///
+    /// Zero when the pinion is out, and zero past [`Self::free_speed`] — a
+    /// motor cannot drive a shaft that is already turning faster than it wants
+    /// to, and the one-way clutch means it cannot be driven by one either.
+    pub fn torque(&self, rpm: f64) -> f64 {
+        if !self.engaged {
+            return 0.0;
+        }
+        (self.stall_torque * (1.0 - rpm.max(0.0) / self.free_speed.max(1.0))).max(0.0)
+    }
+
+    /// Meshes the pinion: the key going to START.
+    pub fn engage(&mut self) {
+        self.engaged = true;
+    }
+
+    /// Throws the pinion out once the engine overruns it.
+    ///
+    /// The release condition is the machine's own, not a state flag set by
+    /// whatever decided the engine had caught: a Bendix lets go when the ring
+    /// gear starts driving the pinion, which is when the engine passes the
+    /// speed the motor was running to anyway. An engine that fires does that
+    /// within a revolution; an engine that does not never does, and the motor
+    /// keeps cranking, which is also what a real one does.
+    pub fn update(&mut self, rpm: f64) {
+        if self.engaged && rpm > self.free_speed {
+            self.engaged = false;
+        }
+    }
+
+    /// Tooth-mesh frequency of the pinion against the ring gear [Hz].
+    ///
+    /// Zero with the pinion out, which is what silences the whine: the starter
+    /// is not faded down on release, it stops being meshed with anything.
+    pub fn whine_hz(&self, rpm: f64) -> f64 {
+        if !self.engaged {
+            return 0.0;
+        }
+        self.whine_order * rpm.max(0.0) / 60.0
     }
 }
 
@@ -192,6 +345,14 @@ pub struct EngineControlUnit {
     // --- Cylinder health ---
     /// Per-cylinder operational health.
     pub cylinder_health: [CylinderHealth; MAX_CYLINDERS],
+
+    // --- Cranking ---
+    /// Whether the engine is being turned by the starter rather than running.
+    ///
+    /// The ECU has no crank signal to fuel against until the engine is turning,
+    /// so while this is set no fuel is metered at all and the cylinders are
+    /// pure gas springs — which is the whole of what a starter works against.
+    pub cranking: bool,
 }
 
 impl Default for EngineControlUnit {
@@ -259,6 +420,7 @@ impl EngineControlUnit {
             active_cut: LimiterCut::None,
 
             cylinder_health: [CylinderHealth::healthy(); MAX_CYLINDERS],
+            cranking: false,
         }
     }
 

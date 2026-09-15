@@ -240,10 +240,13 @@ impl Rig {
         let preset = catalogue[index].clone();
 
         // The dashboard is somebody starting an engine, not a dyno reading a
-        // steady state: it begins stone cold and warms up while they drive it.
+        // steady state: it begins stone cold, on the starter, and warms up while
+        // they drive it. Nothing about the first few seconds is scripted — the
+        // motor turns the engine over against its own compression and lets go
+        // when the engine outruns it.
         let mut block = preset.block(environment);
         block.cold_start();
-        let driveline = Driveline::new(&preset);
+        let driveline = Driveline::cranking(&preset, &mut block);
         // Both halves of the induction come from the preset, so a turbo that
         // spins is a turbo that is heard and an atmospheric engine has neither.
         let source = preset.snapshot_source(&block);

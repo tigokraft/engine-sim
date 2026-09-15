@@ -31,7 +31,7 @@ use std::f64::consts::PI;
 
 use crate::environment::Environment;
 use crate::physics::control::{CylinderHealth, EngineControlUnit, LimiterCut};
-use crate::physics::cylinder::{wrap_cycle, CylinderGeometry, GasProperties, CYCLE_ANGLE};
+use crate::physics::cylinder::{deg, wrap_cycle, CylinderGeometry, GasProperties, CYCLE_ANGLE};
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
 use crate::physics::thermal::{EngineThermal, OilViscosity};
 use crate::physics::thermodynamics::{
@@ -1461,7 +1461,7 @@ impl EngineBlock {
         self.model.gas = GasProperties::for_afr(afr);
         let limiter = self.ecu.evaluate_limiter(rpm);
         let dfco = self.ecu.update_dfco(self.throttle, rpm);
-        self.model.fuel_cut = dfco || limiter == LimiterCut::Fuel;
+        self.model.fuel_cut = dfco || limiter == LimiterCut::Fuel || self.ecu.cranking;
         // Spark timing is the ECU's on an engine that has a coil. A diesel has
         // none: its heat release starts where the Arrhenius integral says, and
         // the latch solves that per cycle. See [`HeatRelease`].
@@ -1592,6 +1592,40 @@ impl EngineBlock {
         self.thermal.set_block_mass(self.block_mass);
     }
 
+    /// Fills the phase ring by motoring the engine through two cycles.
+    ///
+    /// An unwritten ring cell is not an engine with no pressure in it, it is an
+    /// engine nothing has solved yet, and
+    /// [`Self::instantaneous_indicated_torque`] reports nothing at all until
+    /// every cell holds a real sample. That is the right answer to give and the
+    /// wrong state to start a crank in: a shaft at rest cannot turn far enough
+    /// to fill the ring before a starter has already dragged it up to speed
+    /// against no compression whatsoever, which is a silent start. So the cycle
+    /// is solved here, once, before the key is turned.
+    ///
+    /// Motored, whatever the ECU would otherwise have metered, because the
+    /// charge this seeds is exactly the one a starter has to work against. Two
+    /// cycles rather than one: the first fills the ring from a chamber that
+    /// began at rest, the second replaces it with one whose trapped mass came
+    /// out of a cycle that had actually happened.
+    ///
+    /// Seeding is bookkeeping, not time passing, so the thermal state is put
+    /// back exactly as it was found: an engine that stood overnight has stood
+    /// overnight whether or not anybody worked out what was in its cylinders.
+    pub fn prime_ring(&mut self, rpm: f64) {
+        let rpm = rpm.max(1.0);
+        let was_cranking = self.ecu.cranking;
+        let thermal = self.thermal.clone();
+        self.ecu.cranking = true;
+        let dt = 1.0 / 480.0;
+        let frames = (2.0 * 120.0 / rpm / dt).ceil() as usize;
+        for _ in 0..frames {
+            self.update(dt, rpm);
+        }
+        self.ecu.cranking = was_cranking;
+        self.thermal = thermal;
+    }
+
     /// Puts every thermal mass back to ambient: an engine that stood overnight.
     pub fn cold_start(&mut self) {
         self.thermal =
@@ -1688,7 +1722,7 @@ impl EngineBlock {
         for i in 0..n {
             let sample = self.sample_of(i);
             let factor = self.ecu.cylinder_combustion_factor(i) as f64;
-            let torque = sample.indicated_torque(self.crankcase_pressure) * factor;
+            let torque = self.cylinder_indicated_torque(i);
             indicated_torque += torque;
             cylinder_pressures
                 .push(sample.pressure * factor + self.environment.pressure * (1.0 - factor));
@@ -1735,6 +1769,71 @@ impl EngineBlock {
             tuning_ratios: self.exhaust_banks.iter().map(|b| b.tuning_ratio).collect(),
             step,
         }
+    }
+
+    /// Indicated torque one cylinder is making at the crank's current angle [N m].
+    pub fn cylinder_indicated_torque(&self, cylinder: usize) -> f64 {
+        let factor = self.ecu.cylinder_combustion_factor(cylinder) as f64;
+        self.sample_of(cylinder)
+            .indicated_torque(self.crankcase_pressure)
+            * factor
+    }
+
+    /// Indicated torque summed over the cylinders at the crank's current angle [N m].
+    ///
+    /// Not the cycle mean that [`Self::mean_brake_torque`] reports, and the
+    /// difference between the two is the whole of why a cranking engine chugs.
+    /// A piston on its way up a closed bore is a gas spring being wound: tens
+    /// of newton metres against the direction of rotation, most of which comes
+    /// back over the top. Averaged over a cycle all of that cancels into the
+    /// pumping loss and says nothing about what the crank is doing; sampled at
+    /// the angle the crank has actually reached, it *is* the compression stroke
+    /// a starter has to drag the engine over, and a starter of finite torque
+    /// dragged over it slows down and speeds up on its own.
+    ///
+    /// Zero until the ring holds a whole cycle. An unwritten cell is not a
+    /// measurement of zero pressure, it is no measurement at all, and billing
+    /// it as a torque would put a full atmosphere of crankcase pressure under a
+    /// piston nothing has solved yet.
+    pub fn instantaneous_indicated_torque(&self) -> f64 {
+        self.indicated_torque_at(self.master.cylinder.theta)
+    }
+
+    /// Indicated torque the cylinders would sum to with the crank at `theta` [N m].
+    ///
+    /// The same quantity [`Self::instantaneous_indicated_torque`] reports, asked
+    /// about an angle the crank is not at — which is what lets the whole cycle
+    /// be scanned for its worst moment without turning the engine to find it.
+    pub fn indicated_torque_at(&self, theta: f64) -> f64 {
+        if !self.ring.is_primed() {
+            return 0.0;
+        }
+        self.firing
+            .cylinders
+            .iter()
+            .enumerate()
+            .map(|(i, cyl)| {
+                self.ring
+                    .sample(theta - cyl.firing_offset)
+                    .indicated_torque(self.crankcase_pressure)
+                    * self.ecu.cylinder_combustion_factor(i) as f64
+            })
+            .sum()
+    }
+
+    /// The compression hump a starter has to drag this engine over [N m].
+    ///
+    /// The deepest the summed gas torque goes anywhere in the logged cycle,
+    /// reported positive. On a multi-cylinder engine the compressions overlap
+    /// with somebody else's expansion and partly fill each other in, so this is
+    /// a long way below the sum of the individual peaks; on a single it is one
+    /// cylinder's whole compression with nothing on the other side of it, which
+    /// is why a single is the hard engine to crank and why real ones are fitted
+    /// with a decompressor.
+    pub fn peak_motored_resistance(&self) -> f64 {
+        (0..PHASE_CELLS)
+            .map(|cell| -self.indicated_torque_at(deg(cell as f64 + 0.5)))
+            .fold(0.0, f64::max)
     }
 
     /// Mean brake torque over the logged cycle [N m].

@@ -30,7 +30,7 @@ use crate::audio::{
     SnapshotSource, SynthConfig, WastegateVoicing,
 };
 use crate::environment::Environment;
-use crate::physics::control::{LimiterCut, LimiterMode};
+use crate::physics::control::{LimiterCut, LimiterMode, Starter};
 use crate::physics::cylinder::{default_float_rpm, deg, CylinderGeometry};
 use crate::physics::engine_block::{EngineBlock, FiringOrder};
 use crate::physics::plumbing::{
@@ -1615,6 +1615,13 @@ pub struct Driveline {
     pub exhaust_cutout: bool,
     /// Whether anti-lag is enabled on lift.
     pub anti_lag: bool,
+    /// The starter motor, and whether it is currently meshed.
+    ///
+    /// Out, and never sized, on a driveline built by [`Driveline::new`] — that
+    /// is an engine already running, and a motor nothing ever asks for torque
+    /// from does not need specifying. [`Driveline::cranking`] is where one is
+    /// chosen for the engine it has to turn.
+    pub starter: Starter,
     /// Active dyno loading mode.
     pub dyno_mode: DynoMode,
     /// Opposing torque applied by the dyno absorber [N m].
@@ -1653,6 +1660,7 @@ impl Driveline {
             // has one.
             exhaust_cutout: false,
             anti_lag: preset.anti_lag,
+            starter: Starter::default(),
             dyno_mode: DynoMode::FreeRev,
             dyno_absorber_torque: 0.0,
             dyno_hold_integral: 0.0,
@@ -1660,6 +1668,38 @@ impl Driveline {
             last_pull: None,
         }
     }
+
+    /// A stopped engine with the key at START.
+    ///
+    /// The only entry point that begins below [`STALL_RPM`], because it is the
+    /// only one where being below it is not a stall: an engine at rest with the
+    /// starter meshed is on its way up, not on its way out. Everything from
+    /// there is the starter against the engine's own compression — see
+    /// [`Driveline::crank`].
+    pub fn cranking(preset: &EnginePreset, block: &mut EngineBlock) -> Self {
+        // A crank has to have something to crank against, and the phase ring is
+        // where that lives. Seeded here rather than left to the caller because
+        // forgetting it is silent: the starter spins the engine up against no
+        // compression at all and the whole sequence is over before the first
+        // cell is written.
+        block.prime_ring(Self::SEED_RPM);
+        let mut driveline = Self::new(preset);
+        driveline.rpm = 0.0;
+        driveline.starter = Starter::for_engine(
+            block.total_displacement(),
+            block.peak_motored_resistance(),
+            preset.inertia,
+        );
+        driveline.starter.engage();
+        driveline
+    }
+
+    /// Speed the seed cycle in [`EngineBlock::prime_ring`] is solved at [rev/min].
+    ///
+    /// Roughly where a starter settles, so the charge the ring is seeded with
+    /// is the one the first compression stroke is about to meet rather than a
+    /// cycle from some speed the engine is not at.
+    pub const SEED_RPM: f64 = 200.0;
 
     /// Speed the governor is holding for a given engine [rev/min].
     ///
@@ -1738,6 +1778,15 @@ impl Driveline {
 
     /// Advances the flywheel one frame from the block's solved torque.
     pub fn update(&mut self, block: &mut EngineBlock, dt: f64) {
+        // A meshed starter overrides every loading mode: there is no dyno
+        // absorber, no gear and no governor on an engine that is not running
+        // yet, and the pedal does nothing a driver can hear.
+        if self.starter.engaged {
+            block.ecu.cranking = true;
+            self.crank(block, dt);
+            return;
+        }
+        block.ecu.cranking = false;
         match self.dyno_mode {
             DynoMode::FreeRev => {
                 self.dyno_absorber_torque = 0.0;
@@ -1908,6 +1957,39 @@ impl Driveline {
                 self.dyno_absorber_torque = -motoring_tau;
             }
         }
+    }
+
+    /// Advances the crank one frame under the starter.
+    ///
+    /// Four torques and nothing else: the motor, the engine's own gas torque at
+    /// the angle the crank has actually reached, the friction the cold oil is
+    /// charging for, and the accessories. No governor, because a starter motor
+    /// is not a speed controller; no [`STALL_RPM`] floor, because an engine
+    /// being cranked is below it by definition and clamping there would erase
+    /// the whole of the compression stroke.
+    ///
+    /// Everything audible about cranking falls out of the second term. It
+    /// swings tens of newton metres either side of zero every compression
+    /// stroke, the motor's own curve gives back more torque the more it is
+    /// slowed, and the crank therefore lurches over each compression at a rate
+    /// set by the firing interval. Nothing in here knows that is a sound.
+    fn crank(&mut self, block: &mut EngineBlock, dt: f64) {
+        let omega = self.rpm * PI / 30.0;
+        let gas = block.instantaneous_indicated_torque();
+        let friction = block.friction.torque(
+            block.ring.peak_pressure(),
+            block.geometry().mean_piston_speed(self.rpm),
+            block.total_displacement(),
+            block.thermal.oil_temperature(),
+        );
+        let (a, b, c) = self.load;
+        let accessories = a + b * omega + c * omega * omega;
+
+        let net = self.starter.torque(self.rpm) + gas - friction - accessories;
+        let omega = (omega + net / self.inertia.max(1e-3) * dt).max(0.0);
+        self.rpm = omega * 30.0 / PI;
+        self.torque = gas;
+        self.starter.update(self.rpm);
     }
 
     /// Advances engine and driven-side speed one frame with a gear engaged.
@@ -2315,6 +2397,48 @@ mod tests {
         assert_eq!(
             EnginePreset::find_by_name("INLINE-4").map(|p| p.name),
             Some("Inline-4")
+        );
+    }
+
+    #[test]
+    fn a_starter_makes_less_torque_the_faster_it_is_turning() {
+        // The one property the chug depends on: a motor that gives back more
+        // torque the more it is slowed cannot be stopped by a compression
+        // stroke, only delayed by one.
+        let mut starter = Starter::for_engine(2.0e-3, 150.0, 0.22);
+        starter.engage();
+        assert!(starter.torque(0.0) > starter.torque(200.0));
+        assert!(starter.torque(200.0) > starter.torque(400.0));
+        assert_eq!(starter.torque(starter.free_speed), 0.0);
+        assert_eq!(starter.torque(starter.free_speed * 2.0), 0.0);
+
+        starter.engaged = false;
+        assert_eq!(starter.torque(0.0), 0.0, "a pinion that is out made torque");
+    }
+
+    #[test]
+    fn a_starter_is_sized_against_the_compression_it_has_to_cross() {
+        // Both halves of the rule, each shown binding on its own. A big flywheel
+        // swallows the hump and leaves the drag term in charge; a light one
+        // leaves the motor to find the whole of it.
+        use crate::physics::control::STARTER_TORQUE_PER_LITRE;
+
+        let heavy = Starter::for_engine(2.0e-3, 150.0, 2.0);
+        assert_eq!(
+            heavy.stall_torque,
+            STARTER_TORQUE_PER_LITRE * 2.0,
+            "a flywheel that swallows the hump should leave the drag term in charge"
+        );
+
+        let light = Starter::for_engine(0.7e-3, 400.0, 0.02);
+        assert!(
+            light.stall_torque > STARTER_TORQUE_PER_LITRE * 0.7,
+            "a big single on a light flywheel was sized on drag alone"
+        );
+        assert!(
+            light.stall_torque > 400.0,
+            "sized at {:.0} N m against a 400 N m compression it has to cross",
+            light.stall_torque
         );
     }
 
