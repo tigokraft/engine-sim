@@ -832,6 +832,7 @@ mod tests {
             st.cylinder.temperature = 330.0;
             st.latch = CycleLatch {
                 fuel_mass: model.trapped_fuel_mass(st.cylinder.mass, 0.0),
+                dilution: 0.0,
                 pressure: st.cylinder.pressure(&model.geometry, &model.gas),
                 temperature: st.cylinder.temperature,
                 volume: model.geometry.max_volume(),

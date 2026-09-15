@@ -56,6 +56,25 @@ const MASS_FLOOR: f64 = 1e-9;
 // Combustion: Wiebe heat release
 // ---------------------------------------------------------------------------
 
+/// Residual mass fraction at which a spark flame will not propagate [-].
+///
+/// Trapped exhaust gas dilutes the fresh charge without contributing to the
+/// burn, and a homogeneous-charge spark flame gives up somewhere around a
+/// third of the trapped mass being inert. Production engines schedule external
+/// EGR to stay under roughly 0.25 for exactly this reason; a big-overlap cam
+/// at idle, with no plenum pressure to stop the exhaust coming back through
+/// the overlap, walks straight up to it. See [`WiebeProfile::diluted`].
+pub const DILUTION_LIMIT: f64 = 0.35;
+
+/// Normalised flame speed floor at and past [`DILUTION_LIMIT`] [-].
+///
+/// A flame speed of exactly zero is a burn of infinite duration and zero
+/// completeness, which is a divide by zero rather than a misfire. This is what
+/// a misfire is instead: a burn twenty times too slow that consumes five per
+/// cent of the charge, which leaves the cycle with no useful work and a
+/// cylinder full of fuel — the correct outcome, and a finite one.
+pub const MISFIRE_FLAME_SPEED: f64 = 0.05;
+
 /// Single-zone Wiebe burn profile.
 ///
 /// ```text
@@ -136,6 +155,50 @@ impl WiebeProfile {
         }
         let tau = phase / self.duration;
         1.0 - (-self.efficiency_parameter * tau.powf(self.form_factor + 1.0)).exp()
+    }
+
+    /// The profile a charge diluted by `residual_fraction` of burned gas
+    /// actually burns to.
+    ///
+    /// Residual exhaust gas trapped with the fresh charge is inert: it absorbs
+    /// heat without releasing any, so it drops the flame temperature and with
+    /// it the laminar flame speed. Taking that fall as linear in residual
+    /// fraction, towards zero at [`DILUTION_LIMIT`], gives a single normalised
+    /// flame speed `f` that both of the Wiebe's shape parameters hang off:
+    ///
+    /// ```text
+    /// f          = 1 - x_res / DILUTION_LIMIT
+    /// dtheta_eff = dtheta / sqrt(f)     a slower flame takes longer
+    /// a_eff      = a * f                and quenches before it finishes
+    /// ```
+    ///
+    /// The two exponents are different because the two effects are. What sets
+    /// the *duration* is the turbulent burning velocity, and Damkoehler's
+    /// scaling makes that go as `sqrt(S_L u')` — the turbulence the piston
+    /// stirred up does not care what is in the charge, so halving the laminar
+    /// flame speed lengthens the burn by only the square root of two. What
+    /// sets the *completeness* is the laminar flame alone, in the crevices and
+    /// the cold boundary layer where turbulence has died away and only `S_L`
+    /// decides whether the flame gets there before it is quenched.
+    ///
+    /// The second line is the one this stage exists for. `a` is by definition
+    /// how much of the charge is consumed by the end of the burn — `x_b(1) =
+    /// 1 - exp(-a)` — so lowering it is *partial burn*, not merely slow burn:
+    /// the cycle ends with `exp(-a_eff)` of its fuel never lit, and that fuel
+    /// leaves through the exhaust valve. It is the same quantity the backfire
+    /// voice keys off, which is why an engine lopey enough to partial-burn
+    /// crackles at idle without anything being told to make it crackle.
+    ///
+    /// Exactly the identity at zero residual, so a cylinder that scavenged
+    /// cleanly burns precisely as it did before this existed.
+    pub fn diluted(&self, residual_fraction: f64) -> Self {
+        let saturation = (residual_fraction.max(0.0) / DILUTION_LIMIT).min(1.0);
+        let flame_speed = (1.0 - saturation * saturation).clamp(MISFIRE_FLAME_SPEED, 1.0);
+        Self {
+            duration: (self.duration / flame_speed.sqrt()).min(CYCLE_ANGLE),
+            efficiency_parameter: self.efficiency_parameter * flame_speed,
+            ..*self
+        }
     }
 
     /// Burn rate with respect to crank angle [1/rad].
@@ -553,7 +616,12 @@ impl HeatRelease {
     /// a fallback.
     pub fn dburned_dtheta(&self, theta: f64, latch: &CycleLatch) -> f64 {
         match self {
-            Self::Spark(wiebe) => wiebe.dburned_dtheta(theta),
+            // A spark flame has to cross a chamber, so what is in the way of
+            // it matters; a diesel's heat release is rate-limited by
+            // injection and mixing instead, and it is unthrottled, so it
+            // never sees the residual fraction a throttled idle does. Only
+            // the spark engine is diluted here, and that is why.
+            Self::Spark(wiebe) => wiebe.diluted(latch.dilution).dburned_dtheta(theta),
             Self::Compression(diesel) => match &latch.autoignition {
                 Some(ignition) => diesel.dburned_dtheta(theta, ignition),
                 None => 0.0,
@@ -564,7 +632,7 @@ impl HeatRelease {
     /// True while heat release is actively happening.
     pub fn is_burning(&self, theta: f64, latch: &CycleLatch) -> bool {
         match self {
-            Self::Spark(wiebe) => wiebe.is_burning(theta),
+            Self::Spark(wiebe) => wiebe.diluted(latch.dilution).is_burning(theta),
             Self::Compression(diesel) => match &latch.autoignition {
                 Some(ignition) => diesel.is_burning(theta, ignition),
                 None => false,
@@ -1066,6 +1134,15 @@ fn port_flux(effective_area: f64, port: &PortState, cylinder: &CylinderGas) -> P
 pub struct CycleLatch {
     /// Trapped fuel mass for this cycle [kg].
     pub fuel_mass: f64,
+    /// Residual mass fraction of the trapped charge [-].
+    ///
+    /// What fraction of what the cylinder sealed at IVC is burned gas rather
+    /// than fresh mixture — the exhaust it failed to scavenge, plus whatever
+    /// came back up the port during overlap. Latched with the rest of the
+    /// cycle references because it is a property of the trapped charge and
+    /// must not move between RK4 stages, and read by
+    /// [`WiebeProfile::diluted`], which is where it costs the burn.
+    pub dilution: f64,
     /// Cylinder pressure at IVC [Pa].
     pub pressure: f64,
     /// Cylinder temperature at IVC [K].
@@ -1087,6 +1164,7 @@ impl CycleLatch {
     pub fn ambient(geometry: &CylinderGeometry, gas: &GasProperties, env: &Environment) -> Self {
         Self {
             fuel_mass: 0.0,
+            dilution: 0.0,
             pressure: env.pressure,
             temperature: env.temperature,
             volume: geometry.max_volume(),
@@ -1422,6 +1500,7 @@ impl CylinderModel {
     pub fn latch(&self, cylinder: &CylinderState, omega: f64) -> CycleLatch {
         let mut latch = CycleLatch {
             fuel_mass: self.trapped_fuel_mass(cylinder.mass, cylinder.burned_fraction),
+            dilution: cylinder.burned_fraction.clamp(0.0, 1.0),
             pressure: cylinder.pressure(&self.geometry, &self.gas),
             temperature: cylinder.temperature,
             volume: self.geometry.safe_volume(cylinder.theta),
@@ -1885,6 +1964,71 @@ mod tests {
     }
 
     #[test]
+    fn an_undiluted_charge_burns_exactly_as_it_did_before_dilution_existed() {
+        // The neutrality half of the dilution model. A cylinder that scavenged
+        // perfectly has nothing inert in it, so nothing about its burn may
+        // move — not by a tolerance, exactly.
+        let wiebe = WiebeProfile::default();
+        assert_eq!(wiebe.diluted(0.0), wiebe);
+        assert_eq!(
+            wiebe.diluted(-1.0),
+            wiebe,
+            "a negative residual is no residual"
+        );
+    }
+
+    #[test]
+    fn a_diluted_charge_burns_slower_and_less_completely() {
+        // Both halves of the claim, against the analytic Wiebe rather than
+        // against a rendered anything. `x_b` at the end of the nominal burn is
+        // `1 - exp(-a)` by construction, so the completeness is readable
+        // straight off the efficiency parameter.
+        let wiebe = WiebeProfile::default();
+        let clean = 1.0 - (-wiebe.efficiency_parameter).exp();
+
+        let mut previous_completeness = clean;
+        let mut previous_duration = wiebe.duration;
+        for residual in [0.05, 0.10, 0.20, 0.30] {
+            let diluted = wiebe.diluted(residual);
+            let completeness = 1.0 - (-diluted.efficiency_parameter).exp();
+            assert!(
+                completeness < previous_completeness,
+                "burn completeness must fall with residual: {completeness:.4} at \
+                 {residual} is not under {previous_completeness:.4}"
+            );
+            assert!(
+                diluted.duration > previous_duration,
+                "burn duration must rise with residual: {:.1} deg at {residual} is \
+                 not over {:.1} deg",
+                diluted.duration.to_degrees(),
+                previous_duration.to_degrees()
+            );
+            previous_completeness = completeness;
+            previous_duration = diluted.duration;
+        }
+
+        // At the dilution limit the flame is a misfire rather than a divide by
+        // zero: a finite, very long burn that consumes almost nothing.
+        let dead = wiebe.diluted(DILUTION_LIMIT);
+        assert!(dead.duration.is_finite() && dead.duration > 4.0 * wiebe.duration);
+        let dead_completeness = 1.0 - (-dead.efficiency_parameter).exp();
+        assert!(
+            dead_completeness < 0.3,
+            "a charge past the dilution limit must barely light: {dead_completeness:.3}"
+        );
+
+        // And the fuel that does not burn is what leaves through the port.
+        // A tenth residual is a percent or two of the charge's fuel going out
+        // unburnt, which is the quantity the backfire voice reads.
+        let lopey = wiebe.diluted(0.10);
+        let unburnt = (-lopey.efficiency_parameter).exp();
+        assert!(
+            (0.005..0.10).contains(&unburnt),
+            "a tenth residual should leave a few per cent of the fuel unburnt, got {unburnt:.4}"
+        );
+    }
+
+    #[test]
     fn flow_function_chokes_at_the_critical_pressure_ratio() {
         let g = 1.4;
         let critical = (2.0f64 / (g + 1.0)).powf(g / (g - 1.0));
@@ -2001,6 +2145,7 @@ mod tests {
             env.pressure * model.geometry.max_volume() / (model.gas.r_unburned * env.temperature);
         st.latch = CycleLatch {
             fuel_mass: model.trapped_fuel_mass(st.cylinder.mass, 0.0),
+            dilution: 0.0,
             pressure: env.pressure,
             temperature: env.temperature,
             volume: model.geometry.max_volume(),
@@ -2172,6 +2317,7 @@ mod tests {
     fn trapped(geometry: &CylinderGeometry, pressure: f64, temperature: f64) -> CycleLatch {
         CycleLatch {
             fuel_mass: 1.0e-5,
+            dilution: 0.0,
             pressure,
             temperature,
             volume: geometry.max_volume(),
@@ -2357,6 +2503,7 @@ mod tests {
             st.cylinder.temperature = 380.0;
             st.latch = CycleLatch {
                 fuel_mass: model.trapped_fuel_mass(st.cylinder.mass, 0.0),
+                dilution: 0.0,
                 pressure: st.cylinder.pressure(&model.geometry, &model.gas),
                 temperature: st.cylinder.temperature,
                 volume: model.geometry.max_volume(),
@@ -2510,6 +2657,7 @@ mod tests {
                 st.latch = CycleLatch {
                     fuel_mass: model
                         .trapped_fuel_mass(st.cylinder.mass, st.cylinder.burned_fraction),
+                    dilution: st.cylinder.burned_fraction,
                     pressure: st.cylinder.pressure(&model.geometry, &model.gas),
                     temperature: st.cylinder.temperature,
                     volume: model.geometry.safe_volume(st.cylinder.theta),
