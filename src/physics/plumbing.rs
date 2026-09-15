@@ -201,6 +201,42 @@ pub enum Silencer {
     },
 }
 
+/// Geometric description of an exhaust turbine housing [SI].
+///
+/// A turbine is not one of the [`Silencer`] fitments a preset picks freely —
+/// it is a fixed hardware restriction that sits between the collector and the
+/// downstream silencer chain whenever the engine is turbocharged, with its
+/// own reflection, dissipation and dispersion. See
+/// [`crate::audio::waveguide::Turbine`] for the acoustic element this
+/// geometry builds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TurbineGeometry {
+    /// Housing area/radius ratio, in the units turbo catalogues quote it in
+    /// [in^2/in]. Smaller is a tighter nozzle: more reflection, more back
+    /// pressure, faster spool once a shaft exists to spool for (see
+    /// `docs/TURBO_PLAN.md`'s TB2). Typical automotive single-turbo housings
+    /// run roughly 0.4 to 1.5.
+    pub housing_ar: f64,
+    /// Wheel blade count, for the blade-pass acoustic content [-].
+    pub blade_count: u32,
+}
+
+impl TurbineGeometry {
+    /// Effective nozzle throat area as a fraction of the upstream pipe area [-].
+    ///
+    /// A/R is the element's one tuning number, but there is no universal
+    /// formula relating it to a throat-to-pipe area ratio — that depends on
+    /// the specific wheel and scroll, which nothing here models yet. This
+    /// uses a documented, monotonic mapping centred on a mid-size
+    /// single-turbo housing (0.7 in^2/in) reaching about half the pipe area,
+    /// tightening or opening from there, which is enough to give A/R the
+    /// right *direction* of effect on reflection and back pressure until a
+    /// real map replaces it.
+    pub fn throat_area_ratio(&self) -> f64 {
+        (0.5 * self.housing_ar.max(0.05) / 0.7).clamp(0.15, 0.95)
+    }
+}
+
 /// Complete geometric description of an engine's exhaust system [SI].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExhaustSystem {
@@ -228,6 +264,12 @@ pub struct ExhaustSystem {
     /// merely has the valve fitted sounds identical to one that does not until
     /// something actually opens it.
     pub cutout_fitted: bool,
+    /// Turbine housing, if the engine is turbocharged.
+    ///
+    /// Unlike a cutout this is not live state: a turbine is a fixed
+    /// restriction that is always in the exhaust path once fitted, cutout
+    /// state notwithstanding.
+    pub turbine: Option<TurbineGeometry>,
 }
 
 /// Layout and sizing of the engine throttle mechanism.
@@ -279,6 +321,7 @@ impl ExhaustSystem {
             tailpipe: PipeSection::from_diameter(0.06, outlet_d, 800.0),
             tailpipe_flanged: false,
             cutout_fitted: true,
+            turbine: None,
         }
     }
 
@@ -604,6 +647,7 @@ impl ExhaustSystem {
             tailpipe: PipeSection::from_diameter(1.2, collector_outlet_d, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         }
     }
 }
@@ -625,6 +669,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.0, 0.054, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         };
 
         let a1 = primary.area;
@@ -648,6 +693,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.0, 0.065, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         };
 
         let c = 550.0; // speed of sound on hot exhaust gas
@@ -668,6 +714,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         };
 
         let c = 580.0;
@@ -692,6 +739,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         };
         assert!(!muffled.is_open_headers());
 
@@ -721,6 +769,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         };
         let straight = muffled.into_straight_pipe();
         assert!(straight.is_straight_pipe());
@@ -732,4 +781,5 @@ mod tests {
         // from a preset whose cutout was open from the start.
         assert!(!straight.cutout_fitted);
     }
+
 }

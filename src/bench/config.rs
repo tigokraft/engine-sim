@@ -24,7 +24,7 @@ use crate::physics::cylinder::{
 use crate::physics::engine_block::{CylinderIndex, FiringOrder};
 use crate::physics::plumbing::{
     Collector, Crossover, ExhaustSystem, IntakeSystem, MufflerGeometry, PipeSection, Silencer,
-    ThrottleLayout,
+    ThrottleLayout, TurbineGeometry,
 };
 use crate::physics::thermodynamics::{
     CylinderModel, DieselCombustion, HeatRelease, ValveEvent, ValveTrain, WiebeProfile, DIESEL_LHV,
@@ -250,6 +250,16 @@ pub struct ExhaustConfig {
     /// Optional mode override: `"muffled"`, `"straight_pipe"`, or `"open_headers"`.
     #[serde(default)]
     pub mode: Option<String>,
+    /// Turbine housing, absent on every naturally aspirated engine and on
+    /// every turbo preset until it is given one.
+    #[serde(default)]
+    pub turbine: Option<TurbineConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurbineConfig {
+    pub housing_ar: f64,
+    pub blade_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -546,6 +556,11 @@ impl EngineConfig {
             None
         };
 
+        let turbine = preset.exhaust.turbine.map(|t| TurbineConfig {
+            housing_ar: t.housing_ar,
+            blade_count: t.blade_count,
+        });
+
         let exhaust = ExhaustConfig {
             primaries,
             collector,
@@ -555,6 +570,7 @@ impl EngineConfig {
             tailpipe_flanged: preset.exhaust.tailpipe_flanged,
             cutout_fitted: preset.exhaust.cutout_fitted,
             mode,
+            turbine,
         };
 
         let runners = preset
@@ -878,6 +894,11 @@ impl EngineConfig {
             self.exhaust.tailpipe.temperature,
         );
 
+        let turbine = self.exhaust.turbine.as_ref().map(|t| TurbineGeometry {
+            housing_ar: t.housing_ar,
+            blade_count: t.blade_count,
+        });
+
         let mut exhaust = ExhaustSystem {
             primaries,
             collector,
@@ -887,6 +908,7 @@ impl EngineConfig {
             tailpipe,
             tailpipe_flanged: self.exhaust.tailpipe_flanged,
             cutout_fitted: self.exhaust.cutout_fitted,
+            turbine,
         };
 
         if let Some(mode) = &self.exhaust.mode {

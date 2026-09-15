@@ -130,6 +130,10 @@ length = 1.4
 diameter = 0.065
 temperature = 600.0
 
+[exhaust.turbine]
+housing_ar = 0.62
+blade_count = 9
+
 [intake]
 plenum_volume = 0.0045
 trumpet_flanged = true

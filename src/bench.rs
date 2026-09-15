@@ -35,6 +35,7 @@ use crate::physics::cylinder::{default_float_rpm, deg, CylinderGeometry};
 use crate::physics::engine_block::{EngineBlock, FiringOrder};
 use crate::physics::plumbing::{
     Collector, Crossover, ExhaustSystem, IntakeSystem, PipeSection, Silencer, ThrottleLayout,
+    TurbineGeometry,
 };
 use crate::physics::thermodynamics::{
     CylinderModel, DieselCombustion, HeatRelease, ValveEvent, ValveTrain, WiebeProfile, DIESEL_LHV,
@@ -285,6 +286,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.2, 0.054, 600.0),
                 tailpipe_flanged: false,
                 cutout_fitted: false,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.28, 0.042, 310.0); 4],
@@ -346,6 +348,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
                 tailpipe_flanged: false,
                 cutout_fitted: true,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.38, 0.044, 310.0); 8],
@@ -412,6 +415,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(0.9, 0.065, 650.0),
                 tailpipe_flanged: false,
                 cutout_fitted: false,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.18, 0.048, 310.0); 8],
@@ -483,6 +487,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.1, 0.062, 650.0),
                 tailpipe_flanged: false,
                 cutout_fitted: false,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.22, 0.046, 310.0); 10],
@@ -546,6 +551,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.0, 0.055, 650.0),
                 tailpipe_flanged: false,
                 cutout_fitted: false,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.14, 0.042, 310.0); 12],
@@ -630,6 +636,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.0, 0.060, 700.0),
                 tailpipe_flanged: false,
                 cutout_fitted: false,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.20, 0.052, 320.0); 2],
@@ -686,6 +693,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.2, 0.060, 600.0),
                 tailpipe_flanged: false,
                 cutout_fitted: false,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.24, 0.042, 310.0); 4],
@@ -757,6 +765,10 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.4, 0.065, 600.0),
                 tailpipe_flanged: false,
                 cutout_fitted: true,
+                turbine: Some(TurbineGeometry {
+                    housing_ar: 0.62,
+                    blade_count: 9,
+                }),
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.26, 0.044, 310.0); 8],
@@ -838,6 +850,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(0.35, 0.048, 620.0),
                 tailpipe_flanged: false,
                 cutout_fitted: false,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.18, 0.048, 310.0)],
@@ -962,6 +975,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.3, 0.055, 450.0),
                 tailpipe_flanged: false,
                 cutout_fitted: false,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.22, 0.040, 320.0); 4],
@@ -1025,6 +1039,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.6, 0.070, 600.0),
                 tailpipe_flanged: false,
                 cutout_fitted: false,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.30, 0.044, 310.0); 6],
@@ -1096,6 +1111,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(0.75, 0.062, 680.0),
                 tailpipe_flanged: true,
                 cutout_fitted: true,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.16, 0.048, 310.0); 6],
@@ -1161,6 +1177,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(0.80, 0.055, 660.0),
                 tailpipe_flanged: true,
                 cutout_fitted: true,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.18, 0.046, 310.0); 6],
@@ -1225,6 +1242,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(0.60, 0.066, 720.0),
                 tailpipe_flanged: false,
                 cutout_fitted: true,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.24, 0.048, 310.0); 8],
@@ -1293,6 +1311,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(0.70, 0.068, 700.0),
                 tailpipe_flanged: true,
                 cutout_fitted: true,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.15, 0.048, 310.0); 8],
@@ -1357,6 +1376,7 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(0.80, 0.062, 700.0),
                 tailpipe_flanged: true,
                 cutout_fitted: true,
+                turbine: None,
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.18, 0.046, 310.0); 10],

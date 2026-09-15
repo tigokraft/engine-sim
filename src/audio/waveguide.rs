@@ -2183,6 +2183,167 @@ impl SilencerElement {
 }
 
 // ---------------------------------------------------------------------------
+// Composed elements: Turbine
+// ---------------------------------------------------------------------------
+
+/// Fraction of energy absorbed per pass through the wheel's own passages,
+/// above [`Turbine`]'s absorption corner, on the same
+/// [`sabine_attenuation_db_per_m`] scale [`ExpansionChamber`] uses for its
+/// shell — but far higher, because a turbine wheel is not a bare pipe wall.
+/// The gas crosses dozens of short, narrow, curved blade passages and gives
+/// up a large share of its acoustic energy to turbulence and windage doing
+/// it. This is the real dissipative term Stage TB0 exists not to skip —
+/// see [`CHAMBER_WALL_ABSORPTION`]'s doc for what shipping without one did
+/// to a muffler.
+pub const TURBINE_WHEEL_ABSORPTION: f64 = 0.4;
+
+/// Nominal axial length of the wheel's flow path [m], for the cavity that
+/// carries dissipation between the two nozzle junctions. Real wheel width
+/// varies with frame size, which a later stage sizes properly; this is
+/// short enough that its own resonance sits well above anything the
+/// pre-turbine manifold or the rest of the chain tunes to.
+const TURBINE_WHEEL_LENGTH: f64 = 0.05;
+
+/// Acoustic turbine element: the audible half of a turbocharger.
+///
+/// A large area contraction into the wheel followed by the expansion back
+/// out of it, built from the same two scattering junctions either side of a
+/// cavity that [`ExpansionChamber`] and [`AbsorptiveSilencer`] use — see
+/// [`ExpansionChamber::step`] for the port convention. Two physical
+/// behaviours live in the cavity between the junctions so far, and neither
+/// is optional:
+///
+/// - **Reflection**, from the junctions themselves: the nozzle is a large
+///   contraction, sized off [`crate::physics::plumbing::TurbineGeometry::throat_area_ratio`],
+///   so a substantial fraction of the incident wave reflects before it ever
+///   reaches the wheel.
+/// - **Dissipation**, an absorption shelf exactly like
+///   [`AbsorptiveSilencer`]'s packing shelf: unity at DC, a real loss above
+///   [`Self::corner_hz`]. The wheel's many narrow passages work on the gas
+///   the same way packing does — this is not decoration, an
+///   `ExpansionChamber` shipped without an equivalent term once and made
+///   mufflers *louder*.
+#[derive(Debug, Clone)]
+pub struct Turbine {
+    junction_in: ScatteringJunction,
+    wheel: WaveguidePipe,
+    junction_out: ScatteringJunction,
+    /// Amplitude surviving one pass through the wheel, above its corner [-].
+    dissipation_pass: f32,
+    /// Corner above which the wheel's passages are fully absorbing [Hz].
+    corner_hz: f32,
+    shelf_forward: OnePole,
+    shelf_backward: OnePole,
+    /// Nozzle throat area, cached for retuning [m^2].
+    throat_area: f64,
+    sample_rate: f32,
+    scatter_buf_in: [f32; 2],
+    scatter_buf_out: [f32; 2],
+}
+
+impl Turbine {
+    /// Constructs a turbine from housing geometry:
+    /// - `geometry`: A/R and blade count.
+    /// - `pipe_area`: cross-sectional area of the duct either side [m^2].
+    pub fn new(
+        geometry: &crate::physics::plumbing::TurbineGeometry,
+        pipe_area: f64,
+        sample_rate: f32,
+        gamma: f32,
+        gas_constant: f32,
+        temperature: f32,
+    ) -> Self {
+        let a1 = pipe_area.max(1e-7);
+        let throat_ratio = geometry.throat_area_ratio();
+        let a_throat = (a1 * throat_ratio).max(1e-7);
+
+        let junction_in = ScatteringJunction::from_areas(&[a1, a_throat]);
+        let wheel = WaveguidePipe::new(
+            TURBINE_WHEEL_LENGTH,
+            a_throat,
+            sample_rate,
+            gamma,
+            gas_constant,
+            temperature,
+        );
+        let junction_out = ScatteringJunction::from_areas(&[a_throat, a1]);
+
+        let wheel_radius = (a_throat / std::f64::consts::PI).sqrt();
+        let c = speed_of_sound(gamma, gas_constant, temperature);
+
+        let wheel_db_per_m =
+            sabine_attenuation_db_per_m(wheel_radius, TURBINE_WHEEL_ABSORPTION);
+        let dissipation_pass =
+            10f64.powf(-wheel_db_per_m * TURBINE_WHEEL_LENGTH / 20.0) as f32;
+        let corner_hz = packing_corner_hz(wheel_radius, c);
+
+        Self {
+            junction_in,
+            wheel,
+            junction_out,
+            dissipation_pass,
+            corner_hz,
+            shelf_forward: OnePole::new(sample_rate, corner_hz),
+            shelf_backward: OnePole::new(sample_rate, corner_hz),
+            throat_area: a_throat,
+            sample_rate,
+            scatter_buf_in: [0.0; 2],
+            scatter_buf_out: [0.0; 2],
+        }
+    }
+
+    /// Amplitude surviving one pass through the wheel, above its corner [-].
+    pub fn dissipation_pass(&self) -> f32 {
+        self.dissipation_pass
+    }
+
+    /// Frequency above which the wheel's passages are fully absorbing [Hz].
+    pub fn corner_hz(&self) -> f32 {
+        self.corner_hz
+    }
+
+    /// Applies the wheel's absorption shelf to one direction of travel; see
+    /// [`AbsorptiveSilencer::absorb`] for the identical shelf on a muffler's
+    /// packing.
+    #[inline(always)]
+    fn absorb(pass: f32, shelf: &mut OnePole, x: f32) -> f32 {
+        pass * x + (1.0 - pass) * shelf.process(x)
+    }
+
+    /// Steps the turbine by one sample; see [`ExpansionChamber::step`] for
+    /// the port convention.
+    #[inline(always)]
+    pub fn step(&mut self, p_in_plus: f32, p_out_minus: f32) -> (f32, f32) {
+        let (p_wheel_0, p_wheel_1) = self.wheel.read_outputs();
+        let p_wheel_0 = Self::absorb(self.dissipation_pass, &mut self.shelf_backward, p_wheel_0);
+        let p_wheel_1 = Self::absorb(self.dissipation_pass, &mut self.shelf_forward, p_wheel_1);
+
+        self.junction_in
+            .scatter(&[p_in_plus, p_wheel_0], &mut self.scatter_buf_in);
+        let p_in_minus = self.scatter_buf_in[0];
+        let p_into_wheel_0 = self.scatter_buf_in[1];
+
+        self.junction_out
+            .scatter(&[p_wheel_1, p_out_minus], &mut self.scatter_buf_out);
+        let p_into_wheel_1 = self.scatter_buf_out[0];
+        let p_out_plus = self.scatter_buf_out[1];
+
+        self.wheel.push_inputs(p_into_wheel_0, p_into_wheel_1);
+
+        (p_in_minus, p_out_plus)
+    }
+
+    /// Clears internal state.
+    pub fn reset(&mut self) {
+        self.wheel.reset();
+        self.shelf_forward.reset();
+        self.shelf_backward.reset();
+        self.scatter_buf_in = [0.0; 2];
+        self.scatter_buf_out = [0.0; 2];
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Composed elements: Bank crossover
 // ---------------------------------------------------------------------------
 
@@ -2432,6 +2593,12 @@ pub struct ExhaustNetwork {
     collectors: Vec<TaperedCollector>,
     crossover: BankCrossover,
     pre_cross_pipes: Vec<WaveguidePipe>,
+    /// Turbine fitted between the collector/crossover and the silencer
+    /// chain, one per bank; `None` where the engine is not turbocharged.
+    /// Unlike the silencer chain this is not user-picked per element — it is
+    /// the same fixed [`crate::physics::plumbing::TurbineGeometry`] on every
+    /// bank that has one.
+    turbines: Vec<Option<Turbine>>,
     silencers: Vec<Vec<SilencerElement>>,
     tailpipes: Vec<WaveguidePipe>,
     mouths: Vec<Mouth>,
@@ -2465,6 +2632,11 @@ pub struct ExhaustNetwork {
     /// about 7 mm of pipe, an order below the shortest length any geometry here
     /// describes.
     chain_returns: Vec<Vec<f32>>,
+    /// Backward wave handed up to the collector/crossover from whatever sits
+    /// immediately downstream of it — the fitted turbine's own reflection
+    /// when there is one, or a transparent passthrough of the chain's own
+    /// first interface when there is not. See step 5 of [`Self::step`].
+    turbine_returns: Vec<f32>,
     /// Whether the exhaust cutout / bypass junction is open right now.
     ///
     /// Live state, always constructed closed regardless of whether the
@@ -2592,6 +2764,25 @@ impl ExhaustNetwork {
             }
         }
 
+        // 3.5. Turbine per bank, between the collector/crossover and the
+        //      silencer chain -- the manifold upstream of it becomes its own
+        //      domain. Sized off the collector outlet, since that is the area
+        //      of the duct that actually runs into it.
+        let turbines: Vec<Option<Turbine>> = (0..n_banks)
+            .map(|_| {
+                exhaust.turbine.as_ref().map(|geometry| {
+                    Turbine::new(
+                        geometry,
+                        exhaust.collector.outlet_area,
+                        sample_rate,
+                        gamma,
+                        r,
+                        temp,
+                    )
+                })
+            })
+            .collect();
+
         // 4. Silencer chain per bank: interpolate temperatures down the gradient
         let mut silencers = vec![Vec::new(); n_banks];
         for chain in &mut silencers {
@@ -2670,6 +2861,7 @@ impl ExhaustNetwork {
             collectors,
             crossover,
             pre_cross_pipes,
+            turbines,
             silencers,
             tailpipes,
             mouths,
@@ -2685,6 +2877,7 @@ impl ExhaustNetwork {
             pre_cross_down: vec![0.0; n_banks],
             collector_returns: vec![0.0; n_banks],
             chain_returns,
+            turbine_returns: vec![0.0; n_banks],
             // Closed regardless of fitment: a cutout being fitted at all is
             // geometry, not a standing decision to run with it open. The live
             // state arrives per frame through `set_cutout`, driven from the
@@ -2926,7 +3119,10 @@ impl ExhaustNetwork {
         // 4. Crossover. It links the first two banks; anything beyond them — the
         //    outer banks of a W engine — has no partner to cross with and runs
         //    straight through. Either way the wave arrives through the
-        //    pre-crossover pipe when the geometry described one.
+        //    pre-crossover pipe when the geometry described one. What it hands
+        //    upstream is the fitted turbine's own reflection (or a transparent
+        //    passthrough of the chain's first interface where none is fitted),
+        //    not the chain's directly — see step 5.
         let linked = if self.bank_count > 1 { 2 } else { 0 };
         if linked == 2 {
             let (in0, in1) = if crossed {
@@ -2934,9 +3130,12 @@ impl ExhaustNetwork {
             } else {
                 (self.bank_trans[0], self.bank_trans[1])
             };
-            let (b0_up, b1_up, b0_down, b1_down) =
-                self.crossover
-                    .step(in0, in1, self.chain_returns[0][0], self.chain_returns[1][0]);
+            let (b0_up, b1_up, b0_down, b1_down) = self.crossover.step(
+                in0,
+                in1,
+                self.turbine_returns[0],
+                self.turbine_returns[1],
+            );
             self.bank_down[0] = b0_down;
             self.bank_down[1] = b1_down;
             self.push_upstream(0, b0_up, crossed);
@@ -2948,25 +3147,43 @@ impl ExhaustNetwork {
             } else {
                 self.bank_trans[b]
             };
-            let upstream = self.chain_returns[b][0];
+            let upstream = self.turbine_returns[b];
             self.push_upstream(b, upstream, crossed);
         }
 
-        // 5. Silencer chain, tailpipe and mouth. Each element hands its upstream
-        //    reflection to the interface above it, so what a silencer or the open
-        //    mouth sends back reaches the collector and the primaries beyond it.
-        //    When the cutout is open, pulses bypass the silencer chain via the
-        //    bypass junction straight into the tailpipe.
+        // 5. Turbine, silencer chain, tailpipe and mouth. The turbine sits
+        //    between the collector and the chain regardless of the cutout: it
+        //    is a fixed hardware restriction, not a bypassable muffler stage,
+        //    so the manifold upstream of it is always its own domain. Each
+        //    element downstream of the collector hands its upstream reflection
+        //    to the interface above it, so what a turbine, a silencer or the
+        //    open mouth sends back reaches the collector and the primaries
+        //    beyond it. When the cutout is open, pulses bypass the silencer
+        //    chain via the bypass junction straight into the tailpipe, but
+        //    still pass through the turbine first.
         for b in 0..self.bank_count {
             let (p_tail_up, p_tail_exit) = self.tailpipes[b].read_outputs();
             let (p_mouth_refl, p_mouth_rad) = self.mouths[b].step(p_tail_exit);
 
             if self.cutout_open {
-                let sig = self.bank_down[b];
+                let (turbine_up, sig) = match &mut self.turbines[b] {
+                    Some(turbine) => turbine.step(self.bank_down[b], p_tail_up),
+                    None => (p_tail_up, self.bank_down[b]),
+                };
                 self.tailpipes[b].push_inputs(sig, p_mouth_refl);
+                self.turbine_returns[b] = turbine_up;
                 self.chain_returns[b][0] = p_tail_up;
             } else {
+                let downstream0 = self.chain_returns[b][0];
+                let has_turbine = self.turbines[b].is_some();
                 let mut sig = self.bank_down[b];
+                let mut turbine_up = 0.0;
+                if let Some(turbine) = &mut self.turbines[b] {
+                    let (up, trans) = turbine.step(self.bank_down[b], downstream0);
+                    turbine_up = up;
+                    sig = trans;
+                }
+
                 let n_sil = self.silencers[b].len();
                 for k in 0..n_sil {
                     let downstream = self.chain_returns[b][k + 1];
@@ -2976,6 +3193,18 @@ impl ExhaustNetwork {
                 }
                 self.tailpipes[b].push_inputs(sig, p_mouth_refl);
                 self.chain_returns[b][n_sil] = p_tail_up;
+
+                // With no turbine fitted this must be a transparent
+                // passthrough: the collector is directly downstream of the
+                // chain's own first interface, so it reads that interface's
+                // fresh value from this frame -- not the stale pre-loop copy
+                // -- to keep the same single frame of feedback delay the
+                // chain always had.
+                self.turbine_returns[b] = if has_turbine {
+                    turbine_up
+                } else {
+                    self.chain_returns[b][0]
+                };
             }
 
             if let Some(slot) = radiated.get_mut(b) {
@@ -2998,6 +3227,9 @@ impl ExhaustNetwork {
         self.crossover.reset();
         for p in &mut self.pre_cross_pipes {
             p.reset();
+        }
+        for turbine in self.turbines.iter_mut().flatten() {
+            turbine.reset();
         }
         for chain in &mut self.silencers {
             for element in chain {
@@ -3578,6 +3810,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         };
 
         let cylinders: Vec<crate::audio::dsp::CylinderTap> = (0..4)
@@ -3754,6 +3987,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         };
 
         // A cross-plane V8's banks: cylinders 0, 2, 3, 7 on one, the rest on the other.
@@ -4162,6 +4396,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         };
 
         // 1. Back pressure must be strictly lower with cutout open than closed
@@ -4244,6 +4479,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
             cutout_fitted,
+            turbine: None,
         };
 
         let cylinders: Vec<crate::audio::dsp::CylinderTap> = (0..4)
@@ -4345,6 +4581,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(tailpipe, diameter, 300.0),
             tailpipe_flanged: flanged,
             cutout_fitted: false,
+            turbine: None,
         }
     }
 
@@ -4538,6 +4775,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         };
 
         let cylinders: Vec<crate::audio::dsp::CylinderTap> = (0..4)
@@ -4587,4 +4825,5 @@ mod tests {
              open-headers ({open:.1} dB)"
         );
     }
+
 }
