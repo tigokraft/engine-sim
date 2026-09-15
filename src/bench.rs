@@ -1670,6 +1670,15 @@ impl Driveline {
         self.idle * (1.0 + self.cold_idle_rise * block.thermal.cold_fraction())
     }
 
+    /// Road speed implied by the driven side, or `0` in neutral, where
+    /// nothing couples the crank to a road at all [m/s].
+    pub fn vehicle_speed_mps(&self) -> f64 {
+        match self.gearbox.overall_ratio() {
+            Some(ratio) => self.road_load.road_speed(self.vehicle_omega, ratio),
+            None => 0.0,
+        }
+    }
+
     /// Whether the limiter is cutting, as distinct from the driver.
     pub fn on_the_limiter(&self) -> bool {
         self.rpm >= self.redline

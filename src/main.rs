@@ -597,9 +597,15 @@ fn publish(
     shared.dyno_absorber_torque = driveline.dyno_absorber_torque;
     shared.last_pull = driveline.last_pull.clone();
 
+    // --- Driveline -----------------------------------------------------------
+    shared.gear = driveline.gearbox.gear;
+    shared.vehicle_speed_mps = driveline.vehicle_speed_mps();
+    shared.clutch_state = driveline.clutch_state;
+
     // --- Combustion diagnostics & efficiency ------------------------------
     shared.lpp_deg_atdc = block.lpp_deg_atdc();
     shared.volumetric_efficiency = block.volumetric_efficiency();
+    shared.load_fraction = block.load_fraction();
     shared.bsfc_g_kwh = block.bsfc_g_kwh(driveline.rpm, driveline.torque);
 
     // --- Thermal & fluid circuits ------------------------------------------
