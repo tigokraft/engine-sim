@@ -666,6 +666,7 @@ impl ExhaustSystem {
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,6 +812,81 @@ mod tests {
             "a smaller A/R should give a smaller throat: tight={:.3}, open={:.3}",
             tight.throat_area_ratio(),
             open.throat_area_ratio()
+        );
+    }
+
+    fn exhaust_with_turbine(turbine: Option<TurbineGeometry>) -> ExhaustSystem {
+        let primary = PipeSection::from_diameter(0.45, 0.044, 900.0);
+        ExhaustSystem {
+            primaries: vec![primary; 4],
+            collector: Collector::from_diameter(4, 0.060, 0.15),
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![Silencer::Straight],
+            tailpipe: PipeSection::from_diameter(1.2, 0.060, 600.0),
+            tailpipe_flanged: false,
+            cutout_fitted: false,
+            turbine,
+        }
+    }
+
+    #[test]
+    fn back_pressure_rises_with_a_turbine_fitted() {
+        let mass_flow = 0.08;
+        let bare = exhaust_with_turbine(None).back_pressure(mass_flow, false);
+        let fitted = exhaust_with_turbine(Some(TurbineGeometry {
+            housing_ar: 0.7,
+            blade_count: 9,
+        }))
+        .back_pressure(mass_flow, false);
+        assert!(
+            fitted > bare,
+            "fitting a turbine should raise back pressure: bare={bare:.1}, fitted={fitted:.1}"
+        );
+    }
+
+    #[test]
+    fn back_pressure_falls_with_a_larger_housing() {
+        let mass_flow = 0.08;
+        let tight = exhaust_with_turbine(Some(TurbineGeometry {
+            housing_ar: 0.4,
+            blade_count: 9,
+        }))
+        .back_pressure(mass_flow, false);
+        let open = exhaust_with_turbine(Some(TurbineGeometry {
+            housing_ar: 1.2,
+            blade_count: 9,
+        }))
+        .back_pressure(mass_flow, false);
+        assert!(
+            open < tight,
+            "a larger A/R should lower back pressure: tight={tight:.1}, open={open:.1}"
+        );
+    }
+
+    #[test]
+    fn turbine_back_pressure_ignores_the_cutout() {
+        // The cutout bypasses the muffler chain, not a fixed hardware
+        // restriction: an engine pays for its turbine whether or not the
+        // tailpipe silencer is skipped.
+        let mass_flow = 0.08;
+        let turbine = Some(TurbineGeometry {
+            housing_ar: 0.7,
+            blade_count: 9,
+        });
+        let with_turbine_closed = exhaust_with_turbine(turbine).back_pressure(mass_flow, false);
+        let with_turbine_open = exhaust_with_turbine(turbine).back_pressure(mass_flow, true);
+        assert!(
+            (with_turbine_closed - with_turbine_open).abs() < 1e-9,
+            "the turbine's own term must not move with the cutout: \
+             closed={with_turbine_closed:.3}, open={with_turbine_open:.3}"
+        );
+
+        let no_turbine_open_cutout = exhaust_with_turbine(None).back_pressure(mass_flow, true);
+        assert!(
+            with_turbine_open > no_turbine_open_cutout,
+            "the turbine's own term should still raise back pressure with the \
+             cutout open: with={with_turbine_open:.1}, without={no_turbine_open_cutout:.1}"
         );
     }
 }

@@ -5130,4 +5130,170 @@ mod tests {
         );
     }
 
+    #[test]
+    fn manifold_upstream_of_the_turbine_gets_its_own_resonance() {
+        // Before a turbine is fitted the primary/collector run continues into
+        // whatever is downstream with no boundary of its own there; the
+        // plan's claim is that fitting a turbine gives that run a boundary it
+        // did not have, turning it into its own quarter-wave resonator at a
+        // frequency the system had no reason to ring at before. Driven
+        // continuously at that candidate frequency, a real boundary builds a
+        // standing wave at the closed end that a matched, boundary-free run
+        // never does — the same steady-state methodology
+        // `chamber_transmission_loss_matches_theory` uses, rather than an
+        // impulse ring-down, because the turbine's reflection here is only
+        // partial and the ring dies out too fast for a long Goertzel window
+        // to see it.
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.35;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 900.0;
+        let c = speed_of_sound(GAMMA, R, TEMPERATURE);
+
+        let manifold_length = 0.55f64;
+        let pipe_area = std::f64::consts::PI * 0.022 * 0.022;
+        let geometry = turbo_test_geometry();
+        let expected = c / (4.0 * manifold_length as f32);
+
+        let standing_wave_at = |fitted: bool, f: f32| -> f32 {
+            let mut manifold =
+                WaveguidePipe::new(manifold_length, pipe_area, FS, GAMMA, R, TEMPERATURE);
+            manifold.tune(GAMMA, R, TEMPERATURE);
+            manifold.snap_delays();
+            let mut turbine = Turbine::new(&geometry, pipe_area, FS, GAMMA, R, TEMPERATURE);
+
+            let settle = 24_000;
+            let measure = 24_000;
+            let mut closed_end = vec![0.0f32; measure];
+            for i in 0..(settle + measure) {
+                let (p_closed, p_open) = manifold.read_outputs();
+                let excitation = std::f32::consts::TAU * f * i as f32 / FS;
+                let excitation = excitation.sin();
+
+                let p_reflected = if fitted {
+                    turbine.step(p_open, 0.0).0
+                } else {
+                    // No boundary at all here: the run continues, matched to
+                    // the manifold's own impedance, so nothing comes back.
+                    0.0
+                };
+                manifold.push_inputs(excitation + p_closed, p_reflected);
+                if i >= settle {
+                    closed_end[i - settle] = p_closed;
+                }
+            }
+            magnitude_at(&closed_end, f, FS)
+        };
+
+        let fitted_peak = standing_wave_at(true, expected);
+        let unfitted_peak = standing_wave_at(false, expected);
+
+        assert!(
+            fitted_peak > 3.0 * unfitted_peak.max(1e-6),
+            "fitting a turbine should give the manifold its own resonance near \
+             {expected:.0} Hz -- present with the turbine fitted, absent without it: \
+             fitted peak {fitted_peak:.4}, unfitted {unfitted_peak:.4}"
+        );
+    }
+
+    #[test]
+    fn a_step_edge_disperses_rather_than_only_quietening() {
+        // Isolates dispersion from the wheel's dissipation and the nozzle's
+        // reflection: the same allpass cascade `Turbine` runs internally,
+        // driven directly by a step edge.
+        const FS: f32 = 48_000.0;
+        let wheel_radius = 0.014f32;
+        let c = 580.0f32;
+        let breaks = turbine_dispersion_breaks_hz(wheel_radius, c);
+        let mut stages: Vec<Allpass> = breaks.iter().map(|&hz| Allpass::new(FS, hz)).collect();
+
+        let n = 4_800;
+        let edge = n / 2;
+        let mut input = vec![0.0f32; n];
+        let mut output = vec![0.0f32; n];
+        for i in 0..n {
+            let x = if i >= edge { 1.0 } else { 0.0 };
+            input[i] = x;
+            output[i] = stages.iter_mut().fold(x, |acc, s| s.process(acc));
+        }
+
+        // Last sample from the edge onward that is still more than 10 % away
+        // from the final value: how long the edge takes to settle and stay
+        // settled, robust to an overshoot flipping sign on the way there.
+        let settle_time = |signal: &[f32]| -> usize {
+            let mut last_unsettled = edge;
+            for (i, &y) in signal.iter().enumerate().skip(edge) {
+                if (y - 1.0).abs() > 0.1 {
+                    last_unsettled = i;
+                }
+            }
+            last_unsettled - edge
+        };
+
+        let input_settle = settle_time(&input);
+        let output_settle = settle_time(&output);
+        assert!(
+            output_settle > input_settle,
+            "dispersion should lengthen the edge's settling time: input {input_settle} \
+             samples, output {output_settle} samples"
+        );
+
+        let energy = |signal: &[f32]| -> f64 { signal.iter().map(|&x| (x as f64).powi(2)).sum() };
+        let input_energy = energy(&input);
+        let output_energy = energy(&output);
+        assert!(
+            (output_energy - input_energy).abs() / input_energy < 0.02,
+            "dispersion must preserve total energy: input {input_energy:.3}, \
+             output {output_energy:.3}"
+        );
+    }
+
+    #[test]
+    fn blade_pass_content_tracks_shaft_speed() {
+        const FS: f32 = 48_000.0;
+        const GAMMA: f32 = 1.35;
+        const R: f32 = 287.0;
+        const TEMPERATURE: f32 = 900.0;
+        let pipe_area = std::f64::consts::PI * 0.022 * 0.022;
+        let geometry = turbo_test_geometry();
+
+        let probe = |rpm: f32| -> f32 {
+            let mut turbine = Turbine::new(&geometry, pipe_area, FS, GAMMA, R, TEMPERATURE);
+            turbine.set_flow(0.15);
+            turbine.set_shaft_rpm(rpm);
+            let n = 48_000;
+            let mut transmitted = vec![0.0f32; n];
+            for slot in transmitted.iter_mut() {
+                *slot = turbine.step(0.0, 0.0).1;
+            }
+            let expected_hz = geometry.blade_count as f32 * rpm / 60.0;
+            magnitude_at(&transmitted, expected_hz, FS)
+        };
+
+        let low = probe(60_000.0);
+        let high = probe(120_000.0);
+        assert!(
+            low > 1e-4,
+            "blade pass should be audible at 60,000 rpm, got {low:.6}"
+        );
+        assert!(
+            high > 1e-4,
+            "blade pass should be audible at 120,000 rpm, got {high:.6}"
+        );
+
+        // Silent with no flow, the same way a compressor moving no air is.
+        let mut silent_turbine = Turbine::new(&geometry, pipe_area, FS, GAMMA, R, TEMPERATURE);
+        silent_turbine.set_shaft_rpm(90_000.0);
+        let hz = geometry.blade_count as f32 * 90_000.0 / 60.0;
+        let n = 4_800;
+        let mut silent = vec![0.0f32; n];
+        for slot in silent.iter_mut() {
+            *slot = silent_turbine.step(0.0, 0.0).1;
+        }
+        let mag = magnitude_at(&silent, hz, FS);
+        assert!(
+            mag < 1e-6,
+            "blade pass with no flow should be silent, got {mag:.8}"
+        );
+    }
 }
