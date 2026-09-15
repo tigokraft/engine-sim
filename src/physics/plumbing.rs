@@ -552,6 +552,21 @@ impl ExhaustSystem {
             }
         }
 
+        // A turbine is a fixed hardware restriction, not a bypassable
+        // muffler stage, so it pays regardless of the cutout: engine breathes
+        // through the wheel whether or not the tailpipe silencer is skipped.
+        if let Some(turbine) = &self.turbine {
+            let throat_ratio = turbine.throat_area_ratio().max(0.05);
+            let a_throat = (a_coll * throat_ratio).max(1e-6);
+            // Contraction into the nozzle plus real dissipation in the wheel:
+            // unlike the venturi algebra above for a silencer's reversible
+            // area steps, energy lost to the wheel does not recover on the
+            // far side, so this is a plain orifice coefficient referred to
+            // the throat area a tighter housing shrinks.
+            let k_turbine = 1.5;
+            k_total += k_turbine / (a_throat * a_throat);
+        }
+
         0.5 * (mass_flow * mass_flow / rho) * k_total
     }
 }
@@ -651,7 +666,6 @@ impl ExhaustSystem {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
