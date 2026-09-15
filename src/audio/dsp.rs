@@ -2666,8 +2666,49 @@ struct BackfireIgnition {
     amplitude: f32,
     /// Envelope decay [s].
     decay: f32,
+    /// Envelope attack [s].
+    attack: f32,
     /// Where in the network this ignition lights.
     node: InjectionNode,
+}
+
+/// Attack of a backfire pulse before the T6 bandlimit filter, at the port and
+/// at zero unburnt mass [s].
+///
+/// The unfiltered rise time the physical event would have on its own — the
+/// same 0.00018 s every pop used before this stage told them apart.
+const BACKFIRE_BASE_ATTACK_SECONDS: f32 = 0.00018;
+
+/// How much bigger a node's own trapped volume makes the attack, relative to
+/// the port [-].
+///
+/// A deflagration in a bigger volume of trapped gas takes longer to develop
+/// into a shock front simply because there is more gas between the ignition
+/// point and a wall to reflect off. This is a coarse per-node stand-in for
+/// that, not a combustion-chemistry model: the collector and tailpipe are
+/// plain pipe and get a small allowance for the extra gas ahead of the
+/// wavefront, while a fitted silencer's expansion chamber is the one place in
+/// the system with real trapped volume, so post-silencer gets the most.
+fn node_volume_scale(node: InjectionNode) -> f32 {
+    match node {
+        InjectionNode::Port => 1.0,
+        InjectionNode::Collector => 1.3,
+        InjectionNode::PostSilencer => 2.2,
+        InjectionNode::Tailpipe => 1.15,
+    }
+}
+
+/// Attack time of a backfire igniting at `node` with unburnt charge
+/// `fuel_excess` above threshold, `0..=1` [s].
+///
+/// Two independent effects, stacked multiplicatively: a bigger charge takes
+/// longer to burn through regardless of where it lights, and a bigger volume
+/// takes longer regardless of charge size. A pop that is merely quieter is
+/// the same shock made smaller; a pop that is genuinely slower is a different
+/// event, and this is what tells the two apart.
+fn backfire_attack_seconds(fuel_excess: f32, node: InjectionNode) -> f32 {
+    let mass_scale = 1.0 + 1.5 * fuel_excess.clamp(0.0, 1.0);
+    BACKFIRE_BASE_ATTACK_SECONDS * mass_scale * node_volume_scale(node)
 }
 
 /// Decides when unburnt fuel in a hot runner lights off, and where.
@@ -2748,11 +2789,13 @@ impl BackfireVoice {
         // 12 ms refractory: allows rapid machine-gun stutter while staying discrete.
         self.cooldown = (0.012 * self.sample_rate) as usize;
         let scale = 0.8 + 1.2 * noise.next_unit();
+        let node = choose_injection_node(self.fuel_excess, self.seconds_since_cut);
         Some(BackfireIgnition {
             amplitude: self.severity * scale,
             // Pops in a pipe ring far longer than a blowdown crack does.
             decay: 0.006 + 0.014 * noise.next_unit(),
-            node: choose_injection_node(self.fuel_excess, self.seconds_since_cut),
+            attack: backfire_attack_seconds(self.fuel_excess, node),
+            node,
         })
     }
 }
@@ -3587,7 +3630,7 @@ impl EngineSynth {
             self.backfire_pulses[bank][node_slot].trigger(
                 self.config.sample_rate,
                 amplitude,
-                0.00018,
+                ignition.attack,
                 ignition.decay,
                 0.80,
                 age_samples,
@@ -5164,6 +5207,37 @@ mod tests {
             "a bigger charge should not have reached as far downstream as a \
              smaller one at the same age"
         );
+    }
+
+    #[test]
+    fn larger_unburnt_mass_produces_a_slower_backfire_attack() {
+        // A bigger charge takes longer to burn through regardless of where it
+        // lights: this must be a genuinely different, slower shock, not the
+        // same shock made quieter or louder.
+        let quiet = backfire_attack_seconds(0.0, InjectionNode::Port);
+        let loud = backfire_attack_seconds(1.0, InjectionNode::Port);
+        assert!(
+            loud > quiet,
+            "a bigger unburnt charge should slow the attack: {quiet} -> {loud}"
+        );
+        assert!(
+            loud / quiet > 1.5,
+            "attack should meaningfully lengthen with charge size, not barely \
+             move: {quiet} -> {loud}"
+        );
+
+        // Holds at every node, not just the port.
+        for node in [
+            InjectionNode::Port,
+            InjectionNode::Collector,
+            InjectionNode::PostSilencer,
+            InjectionNode::Tailpipe,
+        ] {
+            assert!(
+                backfire_attack_seconds(1.0, node) > backfire_attack_seconds(0.0, node),
+                "attack should grow with charge size at {node:?}"
+            );
+        }
     }
 
     #[test]
