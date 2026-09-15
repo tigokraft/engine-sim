@@ -1760,6 +1760,32 @@ const FLOAT_GAIN_PER_RPM: f32 = 0.005;
 /// clatter.
 const FLOAT_FREQ_PER_RPM: f32 = 0.0006;
 
+/// Extra piston slap on a stone-cold engine, as a fraction of the warm level [-].
+///
+/// A piston is aluminium in an iron bore and expands at twice the rate, so the
+/// clearance it runs in is at its widest when the engine is coldest. The skirt
+/// has further to travel before the side thrust at TDC lands it on the wall,
+/// so it arrives faster and hits harder — and doubling the impulse is what a
+/// cold engine's slap actually does. It goes away as the piston grows into the
+/// bore, not as a timer runs out, which is why it is keyed on
+/// [`EngineSnapshot::cold_fraction`].
+const COLD_PISTON_SLAP_RISE: f32 = 1.00;
+
+/// Extra valve seating impact on a stone-cold engine [-].
+///
+/// The same mechanism one deck up: valve lash is set for a hot head, so a cold
+/// one runs loose, and a hydraulic lifter that has bled down overnight runs
+/// looser still. Smaller than the slap because the clearance change is a
+/// fraction of a millimetre against the skirt's several hundredths.
+const COLD_TAPPET_RISE: f32 = 0.45;
+
+/// Extra injector tick on a stone-cold engine [-].
+///
+/// Least of the three, and for a different reason: the needle's clearances
+/// barely move, but the cold-start pulse is longer and the fuel behind it
+/// denser, so the needle lands on its stop harder at both ends of the event.
+const COLD_INJECTOR_RISE: f32 = 0.25;
+
 // ---------------------------------------------------------------------------
 // Impulsive mechanical source primitive
 // ---------------------------------------------------------------------------
@@ -1822,6 +1848,13 @@ pub struct ImpulsiveSource {
     pub base_q: f32,
     pub current_frequency: f32,
     pub float_rpm: Option<f32>,
+    /// Extra level at [`EngineSnapshot::cold_fraction`] of 1, as a fraction [-].
+    ///
+    /// Zero on every source whose loudness has nothing to do with running
+    /// clearances, and therefore zero for the whole rig on a warm engine —
+    /// the multiplier is `1 + cold_rise * cold_fraction`, which is exactly one
+    /// when either term is zero, so nothing that was measured warm moves.
+    pub cold_rise: f32,
     pub gain: Smoothed,
     pub event_hz: Smoothed,
     sample_rate: f32,
@@ -1850,6 +1883,7 @@ impl ImpulsiveSource {
             base_q: 0.0,
             current_frequency: 0.0,
             float_rpm: None,
+            cold_rise: 0.0,
             gain: Smoothed::new(0.0, sample_rate, 0.040),
             event_hz: Smoothed::new(0.0, sample_rate, 0.030),
             sample_rate,
@@ -1879,7 +1913,11 @@ impl ImpulsiveSource {
         let hz = self.effective_hz(cycle_hz, cylinders);
         self.event_hz.set_target(hz);
 
-        let law_gain = self.level_law.compute(snapshot, cycle_hz);
+        // Clearances close as the block grows into itself, so this is a scaling
+        // on the impulse the source delivers, not on the body it rings. Exactly
+        // one on a warm engine, by construction: see [`Self::cold_rise`].
+        let law_gain = self.level_law.compute(snapshot, cycle_hz)
+            * (1.0 + self.cold_rise * snapshot.cold_fraction);
 
         let overspeed = match self.float_rpm {
             Some(threshold) if snapshot.rpm > threshold => snapshot.rpm - threshold,
@@ -2000,6 +2038,7 @@ impl MechanicalVoice {
                 LevelLaw::CamLash { base_ratio: 0.45 },
                 s.level,
             );
+            src.cold_rise = COLD_TAPPET_RISE;
             src.phase = 0.0;
             src.base_frequency = 3_800.0;
             src.base_q = 1.4;
@@ -2018,6 +2057,7 @@ impl MechanicalVoice {
                 LevelLaw::CamLash { base_ratio: 0.45 },
                 s.level,
             );
+            src.cold_rise = COLD_TAPPET_RISE;
             src.phase = 0.5;
             src.base_frequency = 2_600.0;
             src.base_q = 1.1;
@@ -2038,6 +2078,7 @@ impl MechanicalVoice {
                 },
                 s.level,
             );
+            src.cold_rise = COLD_PISTON_SLAP_RISE;
             src.phase = 0.25;
             src
         });
@@ -2052,6 +2093,7 @@ impl MechanicalVoice {
                 LevelLaw::Constant,
                 s.level,
             );
+            src.cold_rise = COLD_INJECTOR_RISE;
             src.phase = 0.15;
             src
         });
@@ -6694,6 +6736,86 @@ mod tests {
             intake_gain_cut > 0.0,
             "valve seatings must continue on spark cut"
         );
+    }
+
+    #[test]
+    fn a_warm_engine_is_bit_for_bit_what_it_was_before_the_cold_path() {
+        // The contract the whole stage rests on. Every recorded fingerprint was
+        // measured on a soaked engine, so if the cold multiplier is anything but
+        // exactly one at `cold_fraction == 0` the catalogue has silently moved.
+        // Asserted on the float itself, not within a tolerance: `1.0 + r * 0.0`
+        // is exactly one and `x * 1.0` is exactly `x`, and anything that stops
+        // being true of should fail here rather than in a re-record.
+        let mut warm = loaded_snapshot();
+        warm.cold_fraction = 0.0;
+        let cycle_hz = warm.rpm / 120.0;
+
+        let mut rig = MechanicalVoice::from_spec(&MechanicalSpec::default(), FS);
+        rig.tune(&warm, cycle_hz, 8);
+
+        let sources: [(&str, &Option<ImpulsiveSource>); 7] = [
+            ("intake_valve", &rig.intake_valve),
+            ("exhaust_valve", &rig.exhaust_valve),
+            ("piston_slap", &rig.piston_slap),
+            ("injector", &rig.injector),
+            ("timing_chain", &rig.timing_chain),
+            ("gear_whine", &rig.gear_whine),
+            ("accessory", &rig.accessory),
+        ];
+        for (name, source) in sources {
+            let source = source.as_ref().unwrap_or_else(|| panic!("{name} missing"));
+            let without_cold = source.base_level * source.level_law.compute(&warm, cycle_hz);
+            assert_eq!(
+                source.gain.target(),
+                without_cold,
+                "{name} is not exactly where it was warm"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cold_engine_hits_its_own_clearances_harder() {
+        // The other end of the same multiplier, at the stated factors. Slap
+        // doubles, the valve gear goes up by 45 %, the injector by 25 %, and
+        // nothing whose loudness is not a clearance moves at all.
+        let base = loaded_snapshot();
+        let cycle_hz = base.rpm / 120.0;
+
+        let targets = |cold: f32| {
+            let mut snapshot = base;
+            snapshot.cold_fraction = cold;
+            let mut rig = MechanicalVoice::from_spec(&MechanicalSpec::default(), FS);
+            rig.tune(&snapshot, cycle_hz, 8);
+            [
+                rig.intake_valve.as_ref().unwrap().gain.target(),
+                rig.exhaust_valve.as_ref().unwrap().gain.target(),
+                rig.piston_slap.as_ref().unwrap().gain.target(),
+                rig.injector.as_ref().unwrap().gain.target(),
+                rig.timing_chain.as_ref().unwrap().gain.target(),
+                rig.gear_whine.as_ref().unwrap().gain.target(),
+                rig.accessory.as_ref().unwrap().gain.target(),
+            ]
+        };
+        let warm = targets(0.0);
+        let cold = targets(1.0);
+
+        let expected = [
+            ("intake_valve", 1.0 + COLD_TAPPET_RISE),
+            ("exhaust_valve", 1.0 + COLD_TAPPET_RISE),
+            ("piston_slap", 1.0 + COLD_PISTON_SLAP_RISE),
+            ("injector", 1.0 + COLD_INJECTOR_RISE),
+            ("timing_chain", 1.0),
+            ("gear_whine", 1.0),
+            ("accessory", 1.0),
+        ];
+        for (i, (name, factor)) in expected.into_iter().enumerate() {
+            assert!(warm[i] > 0.0, "{name} was silent warm, so nothing is proved");
+            let ratio = cold[i] / warm[i];
+            assert!(
+                (ratio - factor).abs() < 1e-5,
+                "{name} rose by {ratio:.3} cold, not {factor:.3}"
+            );
+        }
     }
 
     #[test]
