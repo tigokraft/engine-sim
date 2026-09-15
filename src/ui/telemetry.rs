@@ -22,6 +22,7 @@ use crate::audio::{AudioScope, StreamInfo};
 use crate::bench::{DynoMode, DynoRun};
 use crate::physics::control::{CylinderHealth, LimiterCut, LimiterMode};
 use crate::physics::engine_block::ManifoldMode;
+use crate::physics::vehicle::{ClutchState, Gear};
 
 /// Shared handle to the published telemetry.
 pub type SharedTelemetry = Arc<Mutex<Telemetry>>;
@@ -350,11 +351,24 @@ pub struct Telemetry {
     /// Completed dyno sweep pull run, if any.
     pub last_pull: Option<DynoRun>,
 
+    // --- Driveline ----------------------------------------------------------
+    /// Selected gear; `Neutral` is today's free-revving special case.
+    pub gear: Gear,
+    /// Driven-side road speed implied by the current gear [m/s]; meaningless
+    /// in neutral, where nothing couples the crank to the road.
+    pub vehicle_speed_mps: f64,
+    /// What the clutch did last frame.
+    pub clutch_state: ClutchState,
+
     // --- Combustion diagnostics & efficiency ------------------------------
     /// Location of peak cylinder pressure [deg ATDC].
     pub lpp_deg_atdc: f64,
     /// Volumetric efficiency of cylinder charging [-].
     pub volumetric_efficiency: f64,
+    /// Load fraction: normalised trapped mass against the atmospheric
+    /// reference at this speed — what the spark and AFR schedules actually
+    /// see. See [`crate::physics::engine_block::EngineBlock::load_fraction`].
+    pub load_fraction: f64,
     /// Brake specific fuel consumption [g / (kW h)].
     pub bsfc_g_kwh: f64,
 
@@ -432,8 +446,12 @@ impl Default for Telemetry {
             dyno_mode: DynoMode::FreeRev,
             dyno_absorber_torque: 0.0,
             last_pull: None,
+            gear: Gear::Neutral,
+            vehicle_speed_mps: 0.0,
+            clutch_state: ClutchState::Open,
             lpp_deg_atdc: 0.0,
             volumetric_efficiency: 0.0,
+            load_fraction: 0.0,
             bsfc_g_kwh: 0.0,
             coolant_k: 293.15,
             oil_k: 293.15,

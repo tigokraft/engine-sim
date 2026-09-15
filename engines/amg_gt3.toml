@@ -244,3 +244,26 @@ block = [
     0.7,
     0.45,
 ]
+
+[driveline.gearbox]
+ratios = [
+    3.36,
+    2.09,
+    1.47,
+    1.14,
+    1.0,
+    0.85,
+]
+final_drive = 3.9
+gear = "Neutral"
+
+[driveline.road_load]
+vehicle_mass = 1500.0
+rolling_resistance = 0.012
+drag_area = 0.66
+wheel_radius = 0.32
+grade = 0.0
+
+[driveline.clutch]
+torque_capacity = 450.0
+engagement = 1.0

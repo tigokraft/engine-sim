@@ -201,6 +201,42 @@ pub enum Silencer {
     },
 }
 
+/// Geometric description of an exhaust turbine housing [SI].
+///
+/// A turbine is not one of the [`Silencer`] fitments a preset picks freely —
+/// it is a fixed hardware restriction that sits between the collector and the
+/// downstream silencer chain whenever the engine is turbocharged, with its
+/// own reflection, dissipation and dispersion. See
+/// [`crate::audio::waveguide::Turbine`] for the acoustic element this
+/// geometry builds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TurbineGeometry {
+    /// Housing area/radius ratio, in the units turbo catalogues quote it in
+    /// [in^2/in]. Smaller is a tighter nozzle: more reflection, more back
+    /// pressure, faster spool once a shaft exists to spool for (see
+    /// `docs/TURBO_PLAN.md`'s TB2). Typical automotive single-turbo housings
+    /// run roughly 0.4 to 1.5.
+    pub housing_ar: f64,
+    /// Wheel blade count, for the blade-pass acoustic content [-].
+    pub blade_count: u32,
+}
+
+impl TurbineGeometry {
+    /// Effective nozzle throat area as a fraction of the upstream pipe area [-].
+    ///
+    /// A/R is the element's one tuning number, but there is no universal
+    /// formula relating it to a throat-to-pipe area ratio — that depends on
+    /// the specific wheel and scroll, which nothing here models yet. This
+    /// uses a documented, monotonic mapping centred on a mid-size
+    /// single-turbo housing (0.7 in^2/in) reaching about half the pipe area,
+    /// tightening or opening from there, which is enough to give A/R the
+    /// right *direction* of effect on reflection and back pressure until a
+    /// real map replaces it.
+    pub fn throat_area_ratio(&self) -> f64 {
+        (0.5 * self.housing_ar.max(0.05) / 0.7).clamp(0.15, 0.95)
+    }
+}
+
 /// Complete geometric description of an engine's exhaust system [SI].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExhaustSystem {
@@ -228,6 +264,12 @@ pub struct ExhaustSystem {
     /// merely has the valve fitted sounds identical to one that does not until
     /// something actually opens it.
     pub cutout_fitted: bool,
+    /// Turbine housing, if the engine is turbocharged.
+    ///
+    /// Unlike a cutout this is not live state: a turbine is a fixed
+    /// restriction that is always in the exhaust path once fitted, cutout
+    /// state notwithstanding.
+    pub turbine: Option<TurbineGeometry>,
 }
 
 /// Layout and sizing of the engine throttle mechanism.
@@ -279,6 +321,7 @@ impl ExhaustSystem {
             tailpipe: PipeSection::from_diameter(0.06, outlet_d, 800.0),
             tailpipe_flanged: false,
             cutout_fitted: true,
+            turbine: None,
         }
     }
 
@@ -509,6 +552,21 @@ impl ExhaustSystem {
             }
         }
 
+        // A turbine is a fixed hardware restriction, not a bypassable
+        // muffler stage, so it pays regardless of the cutout: engine breathes
+        // through the wheel whether or not the tailpipe silencer is skipped.
+        if let Some(turbine) = &self.turbine {
+            let throat_ratio = turbine.throat_area_ratio().max(0.05);
+            let a_throat = (a_coll * throat_ratio).max(1e-6);
+            // Contraction into the nozzle plus real dissipation in the wheel:
+            // unlike the venturi algebra above for a silencer's reversible
+            // area steps, energy lost to the wheel does not recover on the
+            // far side, so this is a plain orifice coefficient referred to
+            // the throat area a tighter housing shrinks.
+            let k_turbine = 1.5;
+            k_total += k_turbine / (a_throat * a_throat);
+        }
+
         0.5 * (mass_flow * mass_flow / rho) * k_total
     }
 }
@@ -604,6 +662,7 @@ impl ExhaustSystem {
             tailpipe: PipeSection::from_diameter(1.2, collector_outlet_d, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         }
     }
 }
@@ -625,6 +684,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.0, 0.054, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         };
 
         let a1 = primary.area;
@@ -648,6 +708,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.0, 0.065, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         };
 
         let c = 550.0; // speed of sound on hot exhaust gas
@@ -668,6 +729,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.0, 0.060, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         };
 
         let c = 580.0;
@@ -692,6 +754,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         };
         assert!(!muffled.is_open_headers());
 
@@ -721,6 +784,7 @@ mod tests {
             tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
             tailpipe_flanged: false,
             cutout_fitted: false,
+            turbine: None,
         };
         let straight = muffled.into_straight_pipe();
         assert!(straight.is_straight_pipe());
@@ -731,5 +795,98 @@ mod tests {
         // pipe, and setting it here too would make this mode indistinguishable
         // from a preset whose cutout was open from the start.
         assert!(!straight.cutout_fitted);
+    }
+
+    #[test]
+    fn a_tighter_housing_gives_a_smaller_throat() {
+        let tight = TurbineGeometry {
+            housing_ar: 0.35,
+            blade_count: 9,
+        };
+        let open = TurbineGeometry {
+            housing_ar: 1.4,
+            blade_count: 9,
+        };
+        assert!(
+            tight.throat_area_ratio() < open.throat_area_ratio(),
+            "a smaller A/R should give a smaller throat: tight={:.3}, open={:.3}",
+            tight.throat_area_ratio(),
+            open.throat_area_ratio()
+        );
+    }
+
+    fn exhaust_with_turbine(turbine: Option<TurbineGeometry>) -> ExhaustSystem {
+        let primary = PipeSection::from_diameter(0.45, 0.044, 900.0);
+        ExhaustSystem {
+            primaries: vec![primary; 4],
+            collector: Collector::from_diameter(4, 0.060, 0.15),
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![Silencer::Straight],
+            tailpipe: PipeSection::from_diameter(1.2, 0.060, 600.0),
+            tailpipe_flanged: false,
+            cutout_fitted: false,
+            turbine,
+        }
+    }
+
+    #[test]
+    fn back_pressure_rises_with_a_turbine_fitted() {
+        let mass_flow = 0.08;
+        let bare = exhaust_with_turbine(None).back_pressure(mass_flow, false);
+        let fitted = exhaust_with_turbine(Some(TurbineGeometry {
+            housing_ar: 0.7,
+            blade_count: 9,
+        }))
+        .back_pressure(mass_flow, false);
+        assert!(
+            fitted > bare,
+            "fitting a turbine should raise back pressure: bare={bare:.1}, fitted={fitted:.1}"
+        );
+    }
+
+    #[test]
+    fn back_pressure_falls_with_a_larger_housing() {
+        let mass_flow = 0.08;
+        let tight = exhaust_with_turbine(Some(TurbineGeometry {
+            housing_ar: 0.4,
+            blade_count: 9,
+        }))
+        .back_pressure(mass_flow, false);
+        let open = exhaust_with_turbine(Some(TurbineGeometry {
+            housing_ar: 1.2,
+            blade_count: 9,
+        }))
+        .back_pressure(mass_flow, false);
+        assert!(
+            open < tight,
+            "a larger A/R should lower back pressure: tight={tight:.1}, open={open:.1}"
+        );
+    }
+
+    #[test]
+    fn turbine_back_pressure_ignores_the_cutout() {
+        // The cutout bypasses the muffler chain, not a fixed hardware
+        // restriction: an engine pays for its turbine whether or not the
+        // tailpipe silencer is skipped.
+        let mass_flow = 0.08;
+        let turbine = Some(TurbineGeometry {
+            housing_ar: 0.7,
+            blade_count: 9,
+        });
+        let with_turbine_closed = exhaust_with_turbine(turbine).back_pressure(mass_flow, false);
+        let with_turbine_open = exhaust_with_turbine(turbine).back_pressure(mass_flow, true);
+        assert!(
+            (with_turbine_closed - with_turbine_open).abs() < 1e-9,
+            "the turbine's own term must not move with the cutout: \
+             closed={with_turbine_closed:.3}, open={with_turbine_open:.3}"
+        );
+
+        let no_turbine_open_cutout = exhaust_with_turbine(None).back_pressure(mass_flow, true);
+        assert!(
+            with_turbine_open > no_turbine_open_cutout,
+            "the turbine's own term should still raise back pressure with the \
+             cutout open: with={with_turbine_open:.1}, without={no_turbine_open_cutout:.1}"
+        );
     }
 }

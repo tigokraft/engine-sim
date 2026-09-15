@@ -382,7 +382,7 @@ fn simulation_thread(
             measured_hz += (1.0 / elapsed - measured_hz) * 0.02;
         }
 
-        rig.driveline.update(&rig.block, dt);
+        rig.driveline.update(&mut rig.block, dt);
         let output = rig.block.update(dt, rig.driveline.rpm);
         frames += 1;
 
@@ -597,9 +597,15 @@ fn publish(
     shared.dyno_absorber_torque = driveline.dyno_absorber_torque;
     shared.last_pull = driveline.last_pull.clone();
 
+    // --- Driveline -----------------------------------------------------------
+    shared.gear = driveline.gearbox.gear;
+    shared.vehicle_speed_mps = driveline.vehicle_speed_mps();
+    shared.clutch_state = driveline.clutch_state;
+
     // --- Combustion diagnostics & efficiency ------------------------------
     shared.lpp_deg_atdc = block.lpp_deg_atdc();
     shared.volumetric_efficiency = block.volumetric_efficiency();
+    shared.load_fraction = block.load_fraction();
     shared.bsfc_g_kwh = block.bsfc_g_kwh(driveline.rpm, driveline.torque);
 
     // --- Thermal & fluid circuits ------------------------------------------
@@ -609,7 +615,7 @@ fn publish(
     shared.oil_pressure_bar = block.thermal.oil_pressure(driveline.rpm) / 100_000.0;
 
     // --- Calibration & ECU trims -------------------------------------------
-    let load = (block.intake.pressure() / block.environment.pressure).clamp(0.0, 3.0);
+    let load = block.load_fraction();
     shared.spark_advance_deg =
         block
             .ecu

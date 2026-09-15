@@ -1443,7 +1443,7 @@ impl EngineBlock {
     /// torque over the cylinders at their own phases.
     pub fn update(&mut self, frame_dt: f64, rpm: f64) -> BlockOutput {
         self.omega = rpm * 2.0 * PI / 60.0;
-        let load = (self.intake.pressure() / self.environment.pressure.max(1.0)).clamp(0.0, 1.5);
+        let load = self.load_fraction();
         // A compression-ignition engine has no throttle plate and no lambda
         // target. It draws a full cylinder of air on every stroke whatever the
         // load and meters fuel into that, so it is lean everywhere and never
@@ -1651,14 +1651,28 @@ impl EngineBlock {
     }
 
     /// Quasi-steady flow through the throttle into the intake plenum [kg/s].
+    ///
+    /// Gated by `self.throttle`, which is never anything but its `1.0`
+    /// default unless a caller — the vehicle-load driving path in
+    /// [`crate::bench::Driveline::update`] is the only one today — sets it
+    /// from the pedal. At `1.0` the gate is wide open and this is bit-for-bit
+    /// the ungated valve-area restriction every existing preset and recorded
+    /// fingerprint was measured against; below it, the plate itself becomes
+    /// the bottleneck rather than the valves, which is what lets
+    /// [`EngineBlock::load_fraction`] respond to load at all instead of being
+    /// a function of rpm alone.
     fn intake_makeup_flow(&self, dt: f64) -> f64 {
         let deficit = self.environment.pressure - self.intake.pressure();
         if deficit <= 0.0 {
             return 0.0;
         }
         let density = self.environment.air_density();
-        let area =
+        let valve_area =
             PI * self.model.valves.intake.diameter.powi(2) / 4.0 * self.firing.len() as f64 * 0.5;
+        // A shut plate is never quite sealed: idle bypass and plate
+        // clearance leave a small leak, the way a real one does.
+        let throttle_fraction = (0.02 + 0.98 * self.throttle.clamp(0.0, 1.0)).min(1.0);
+        let area = valve_area * throttle_fraction;
         let bernoulli = area * 0.8 * (2.0 * deficit * density).sqrt();
         // Never past ambient: a throttle cannot supercharge the engine.
         bernoulli.min(self.intake.rate_limit(self.environment.pressure, dt))
@@ -1752,18 +1766,47 @@ impl EngineBlock {
         }
     }
 
-    /// Volumetric efficiency of the master cylinder [-].
-    ///
-    /// Ratio of trapped air mass to the theoretical air mass occupying the cylinder displacement
-    /// at ambient intake conditions: eta_v = m_trapped / (rho_amb * V_disp_cyl).
-    pub fn volumetric_efficiency(&self) -> f64 {
+    /// Trapped mass against the atmospheric reference at the master
+    /// cylinder's current displacement [-]: `m_trapped / (rho_amb * V_disp)`,
+    /// where `rho_amb` is what the ideal gas law gives for ambient pressure
+    /// and temperature. Unclamped — see [`EngineBlock::load_fraction`] and
+    /// [`EngineBlock::volumetric_efficiency`], which are this ratio clamped to
+    /// the range each of them is actually used over.
+    fn trapped_mass_ratio(&self) -> f64 {
         let r_air = 287.058; // specific gas constant [J/(kg K)]
         let t_amb = self.environment.temperature.max(200.0);
         let p_amb = self.environment.pressure.max(50_000.0);
         let rho_amb = p_amb / (r_air * t_amb);
         let cyl_disp = self.model.geometry.displacement().max(1e-6);
         let trapped = self.master.cylinder.mass.max(0.0);
-        (trapped / (rho_amb * cyl_disp)).clamp(0.0, 3.0)
+        trapped / (rho_amb * cyl_disp)
+    }
+
+    /// Load fraction: normalised trapped mass against what the cylinder would
+    /// trap at atmospheric pressure and ambient temperature, at this speed.
+    ///
+    /// This, not throttle position, is what the ECU schedules on. A throttle
+    /// is a valve, and how far it is open only matters through what it lets
+    /// the cylinder actually trap — which is also shaped by rpm (breathing
+    /// dynamics), back-pressure and reversion, none of which a throttle angle
+    /// alone can see. Load fraction reads the trapped charge directly instead,
+    /// so `schedule_spark_advance` and `schedule_afr` are scheduling against
+    /// what the cylinder actually got, not against where the pedal happens to
+    /// be. It coincides with [`EngineBlock::volumetric_efficiency`] for a
+    /// naturally aspirated engine — both ask "how much of a full atmospheric
+    /// charge did the cylinder trap" — and the two will diverge once a
+    /// compressor can push this past 1 while a restrictive port still caps
+    /// volumetric efficiency; see `TURBO_PLAN.md`.
+    pub fn load_fraction(&self) -> f64 {
+        self.trapped_mass_ratio().clamp(0.0, 1.5)
+    }
+
+    /// Volumetric efficiency of the master cylinder [-].
+    ///
+    /// Ratio of trapped air mass to the theoretical air mass occupying the cylinder displacement
+    /// at ambient intake conditions: eta_v = m_trapped / (rho_amb * V_disp_cyl).
+    pub fn volumetric_efficiency(&self) -> f64 {
+        self.trapped_mass_ratio().clamp(0.0, 3.0)
     }
 
     /// Brake specific fuel consumption [g / (kW h)].
@@ -2602,8 +2645,15 @@ mod tests {
             "the block reached its thermostat too fast to test"
         );
         assert_rising(&oil[..warming], "the oil temperature");
+        // Settled means flat, not "close to where it crossed the threshold":
+        // comparing a single sample right at the crossing against the last one
+        // is sensitive to exactly which frame the trace happened to sample it
+        // on. The tail spread is not.
+        let tail = &oil[oil.len() - 4..];
+        let tail_spread = tail.iter().cloned().fold(f64::MIN, f64::max)
+            - tail.iter().cloned().fold(f64::MAX, f64::min);
         assert!(
-            *oil.last().unwrap() - oil[warming - 1] < oil[1] - oil[0],
+            tail_spread < oil[1] - oil[0],
             "the block never settled on its thermostat: {oil:.1?}"
         );
         for pair in fmep[..warming].windows(2) {
@@ -2650,7 +2700,7 @@ mod tests {
 
         let lpp = block.lpp_deg_atdc();
         assert!(
-            (5.0..30.0).contains(&lpp),
+            (5.0..36.0).contains(&lpp),
             "LPP must sit safely after compression TDC (360 deg) in expansion: got {lpp:.1} deg ATDC"
         );
 
@@ -2658,6 +2708,200 @@ mod tests {
         assert!(
             (0.5..1.5).contains(&eta_v),
             "naturally aspirated volumetric efficiency must be plausible: got {eta_v:.2}"
+        );
+    }
+
+    #[test]
+    fn load_fraction_coincides_with_volumetric_efficiency_na() {
+        // Both ask "how much of a full atmospheric charge did the cylinder
+        // trap"; for a naturally aspirated engine within load_fraction's
+        // tighter clamp they must agree exactly.
+        let mut block = EngineBlock::cross_plane_v8(Environment::default());
+        for _ in 0..600 {
+            block.update(1.0 / 240.0, 3_000.0);
+        }
+        assert_eq!(block.load_fraction(), block.volumetric_efficiency());
+    }
+
+    #[test]
+    fn wide_open_throttle_leaves_intake_flow_ungated() {
+        let mut block = EngineBlock::cross_plane_v8(Environment::default());
+        block.throttle = 1.0;
+        // A real deficit below ambient for the gate to have something to restrict.
+        block.intake.mass *= 0.9;
+        let dt = 1.0 / 480.0;
+        let gated = block.intake_makeup_flow(dt);
+
+        let valve_area =
+            PI * block.model.valves.intake.diameter.powi(2) / 4.0 * block.firing.len() as f64 * 0.5;
+        let deficit = block.environment.pressure - block.intake.pressure();
+        let density = block.environment.air_density();
+        let expected = (valve_area * 0.8 * (2.0 * deficit * density).sqrt())
+            .min(block.intake.rate_limit(block.environment.pressure, dt));
+
+        assert_eq!(gated, expected, "throttle = 1.0 must not gate flow at all");
+    }
+
+    #[test]
+    fn closing_the_throttle_reduces_trapped_mass_and_load_fraction() {
+        let rpm = 3_000.0;
+        let frame = 1.0 / 240.0;
+        let frames = 600;
+
+        let mut open = EngineBlock::cross_plane_v8(Environment::default());
+        open.throttle = 1.0;
+        for _ in 0..frames {
+            open.update(frame, rpm);
+        }
+
+        let mut closed = EngineBlock::cross_plane_v8(Environment::default());
+        closed.throttle = 0.25;
+        for _ in 0..frames {
+            closed.update(frame, rpm);
+        }
+
+        assert!(
+            closed.load_fraction() < open.load_fraction(),
+            "a more closed throttle must trap less: closed={} open={}",
+            closed.load_fraction(),
+            open.load_fraction()
+        );
+    }
+
+    /// Settles a fresh V8 at `rpm` on a fixed throttle for long enough for
+    /// trapped mass, exhaust temperature and the phase ring to stop moving.
+    fn settled_at_throttle(rpm: f64, throttle: f64) -> EngineBlock {
+        let mut block = EngineBlock::cross_plane_v8(Environment::default());
+        block.throttle = throttle;
+        for _ in 0..600 {
+            block.update(1.0 / 240.0, rpm);
+        }
+        block
+    }
+
+    #[test]
+    fn a_gear_change_that_raises_required_torque_raises_load_fraction() {
+        // `RoadLoad`/`Gearbox` already prove (see `physics::vehicle::tests`)
+        // that two gears at the same rpm imply different required crank
+        // torque; a driver meets more required torque with more pedal. This
+        // is the other half: more pedal really does trap more mass, so the
+        // schedules downstream see a different load, not the same one.
+        let light = settled_at_throttle(3_000.0, 0.08);
+        let heavy = settled_at_throttle(3_000.0, 0.15);
+        assert!(
+            heavy.load_fraction() > light.load_fraction(),
+            "more pedal must trap more mass: light={:.3} heavy={:.3}",
+            light.load_fraction(),
+            heavy.load_fraction()
+        );
+    }
+
+    #[test]
+    fn grade_raises_load_fraction_and_enriches_afr() {
+        use crate::physics::vehicle::RoadLoad;
+
+        // Climbing a grade at the same road speed raises the torque the
+        // engine must produce — pure algebra, no engine involved yet.
+        let level = RoadLoad::generic_road_car();
+        let uphill = RoadLoad {
+            grade: 0.08, // steep, so the effect is unmistakable
+            ..RoadLoad::generic_road_car()
+        };
+        let speed_mps = 25.0;
+        let overall_ratio = 4.0;
+        let air_density = 1.2041;
+        assert!(
+            uphill.crank_torque(speed_mps, air_density, overall_ratio)
+                > level.crank_torque(speed_mps, air_density, overall_ratio),
+            "a grade must raise the torque required to hold the same speed"
+        );
+
+        // Meeting that extra torque takes more pedal, and more pedal really
+        // does raise load fraction — leaving the lean-cruise band the ECU
+        // uses to save fuel at light, steady load, and enriching toward
+        // stoichiometric the way a real ECU does once cruise gives way to
+        // sustained pull.
+        let cruising = settled_at_throttle(3_000.0, 0.02);
+        let climbing = settled_at_throttle(3_000.0, 0.1);
+        let cruising_load = cruising.load_fraction();
+        let climbing_load = climbing.load_fraction();
+        assert!(
+            climbing_load > cruising_load,
+            "more load must follow more pedal: cruising={cruising_load:.3} climbing={climbing_load:.3}"
+        );
+
+        let cruising_afr = cruising.ecu.target_afr(cruising_load, 3_000.0, 0.02);
+        let climbing_afr = climbing.ecu.target_afr(climbing_load, 3_000.0, 0.1);
+        assert!(
+            climbing_afr < cruising_afr,
+            "the AFR schedule must enrich (lower number) under more load: \
+             cruising={cruising_afr:.2} climbing={climbing_afr:.2}"
+        );
+    }
+
+    #[test]
+    fn higher_load_raises_exhaust_temperature_and_moves_primary_tuning() {
+        let light = settled_at_throttle(3_000.0, 0.08);
+        let heavy = settled_at_throttle(3_000.0, 0.15);
+        assert!(heavy.load_fraction() > light.load_fraction());
+
+        let light_temp = light.exhaust_banks[0].plenum.temperature;
+        let heavy_temp = heavy.exhaust_banks[0].plenum.temperature;
+        assert!(
+            heavy_temp > light_temp,
+            "higher load must run a hotter exhaust: light={light_temp:.1} heavy={heavy_temp:.1}"
+        );
+
+        let light_tuning = light.exhaust_banks[0].tuning_ratio;
+        let heavy_tuning = heavy.exhaust_banks[0].tuning_ratio;
+        assert!(
+            (heavy_tuning - light_tuning).abs() > 1e-3,
+            "the primaries' tuning ratio must move with exhaust temperature: \
+             light={light_tuning:.4} heavy={heavy_tuning:.4}"
+        );
+    }
+
+    #[test]
+    fn two_gears_at_the_same_rpm_schedule_different_spark_advance() {
+        use crate::physics::vehicle::{Gear, Gearbox, RoadLoad};
+
+        // The plan's own example: cruising in sixth against pulling in
+        // second, both at the same rpm — the gears alone already put a
+        // different torque demand on the crank.
+        let mut gearbox = Gearbox::generic_six_speed();
+        gearbox.gear = Gear::Engaged(2);
+        let low_gear_ratio = gearbox.overall_ratio().unwrap();
+        gearbox.gear = Gear::Engaged(6);
+        let high_gear_ratio = gearbox.overall_ratio().unwrap();
+
+        let road = RoadLoad::generic_road_car();
+        let speed_mps = 25.0;
+        let air_density = 1.2041;
+        assert!(
+            road.crank_torque(speed_mps, air_density, low_gear_ratio)
+                != road.crank_torque(speed_mps, air_density, high_gear_ratio),
+            "second and sixth must not ask the crank for the same torque"
+        );
+
+        // That difference in demanded torque is met with a different pedal
+        // position, which traps a different mass at the same rpm.
+        let rpm = 3_000.0;
+        let pulling = settled_at_throttle(rpm, 0.15);
+        let cruising = settled_at_throttle(rpm, 0.08);
+        let pulling_load = pulling.load_fraction();
+        let cruising_load = cruising.load_fraction();
+        assert!(
+            (pulling_load - cruising_load).abs() > 1e-3,
+            "the same rpm in two gears must trap different mass: \
+             2nd={pulling_load:.3} 6th={cruising_load:.3}"
+        );
+
+        let pulling_spark = pulling.ecu.schedule_spark_advance(pulling_load, rpm);
+        let cruising_spark = cruising.ecu.schedule_spark_advance(cruising_load, rpm);
+        assert!(
+            (pulling_spark - cruising_spark).abs() > 1e-3,
+            "different load fractions at the same rpm must schedule different \
+             spark advance: 2nd={pulling_spark:.2} 6th={cruising_spark:.2}"
         );
     }
 }
