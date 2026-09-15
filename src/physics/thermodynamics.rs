@@ -822,6 +822,88 @@ impl ValveTrain {
     pub fn in_gas_exchange(&self, theta: f64) -> bool {
         self.intake.is_open(theta) || self.exhaust.is_open(theta)
     }
+
+    /// Intake lobe centreline, as crank angle after gas-exchange TDC [rad].
+    ///
+    /// Half a duration past the opening point, which is where a cam card
+    /// measures it from: the lobe is symmetric about its own peak, so the
+    /// centreline is the one timing figure that does not move when the
+    /// duration is re-specified at a different checking height.
+    pub fn intake_centreline(&self) -> f64 {
+        wrap_cycle(self.intake.open_angle + self.intake.duration / 2.0)
+    }
+
+    /// Exhaust lobe centreline, as crank angle *before* gas-exchange TDC [rad].
+    ///
+    /// Measured backwards for the same reason a cam card does: the exhaust
+    /// lobe sits before TDC and the intake lobe after it, so quoting both as
+    /// distances from TDC makes them two positive numbers that straddle it.
+    pub fn exhaust_centreline(&self) -> f64 {
+        wrap_cycle(-(self.exhaust.open_angle + self.exhaust.duration / 2.0))
+    }
+
+    /// Lobe separation angle: the mean of the two centrelines [rad].
+    ///
+    /// ```text
+    /// LSA = (ICL + ECL) / 2
+    /// ```
+    ///
+    /// This is how a camshaft is actually specified, and it is a property of
+    /// the billet: the angle between the two lobes is ground in and cannot be
+    /// changed by turning the cam in its drive. It is quoted in camshaft
+    /// degrees, which is why it comes out as the *mean* of two crank angles
+    /// rather than their sum — the cam turns at half crank speed. A tight
+    /// separation puts the two lobes close together and is what buys overlap;
+    /// see [`ValveTrain::overlap`].
+    pub fn lobe_separation(&self) -> f64 {
+        (self.intake_centreline() + self.exhaust_centreline()) / 2.0
+    }
+
+    /// Cam advance: half the difference of the two centrelines [rad, crank].
+    ///
+    /// ```text
+    /// advance = (ECL - ICL) / 2
+    /// ```
+    ///
+    /// The one timing figure that *is* adjustable after the cam is ground —
+    /// turning the whole cam ahead of the crank moves both lobes earlier by
+    /// the same crank angle, which raises `ECL` and lowers `ICL` without
+    /// touching their mean. Positive is advanced: cylinder pressure peaks
+    /// earlier, low-speed torque rises and the top end gives up.
+    pub fn advance(&self) -> f64 {
+        (self.exhaust_centreline() - self.intake_centreline()) / 2.0
+    }
+
+    /// Crank angle with both valves off their seats [rad].
+    ///
+    /// ```text
+    /// overlap = (duration_i + duration_e) / 2 - 2 * LSA
+    /// ```
+    ///
+    /// Never specified directly on a cam card, because it is not a free
+    /// parameter: it falls out of the two durations and the separation. That
+    /// is the whole reason this stage re-specified the cam — overlap is the
+    /// term the reversion, the residual and therefore the idle all key off,
+    /// and it was previously only reachable by moving two absolute angles in
+    /// opposite directions and hoping.
+    pub fn overlap(&self) -> f64 {
+        (self.intake.duration + self.exhaust.duration) / 2.0 - 2.0 * self.lobe_separation()
+    }
+
+    /// Re-times both lobes onto a lobe separation and an advance [rad].
+    ///
+    /// The inverse of [`ValveTrain::lobe_separation`] and
+    /// [`ValveTrain::advance`]: durations, lifts, diameters and discharge
+    /// coefficients are the lobe's own and are carried through untouched, and
+    /// only the two opening angles move. Handing it a train's own separation
+    /// and advance therefore returns that train.
+    pub fn with_cam_timing(mut self, lobe_separation: f64, advance: f64) -> Self {
+        let intake_centreline = lobe_separation - advance;
+        let exhaust_centreline = lobe_separation + advance;
+        self.intake.open_angle = wrap_cycle(intake_centreline - self.intake.duration / 2.0);
+        self.exhaust.open_angle = wrap_cycle(-exhaust_centreline - self.exhaust.duration / 2.0);
+        self
+    }
 }
 
 /// Subsonic/choked isentropic orifice flow function.

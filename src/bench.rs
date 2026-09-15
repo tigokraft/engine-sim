@@ -2054,6 +2054,78 @@ mod tests {
     }
 
     #[test]
+    fn every_preset_derives_its_valve_angles_from_lobe_separation_and_advance() {
+        // The cam respecification has to be exactly neutral on the catalogue,
+        // and this is the proof. For every preset, read the lobe separation
+        // and the advance back off the absolute angles it ships, then rebuild
+        // the absolute angles from those two figures alone: the train that
+        // comes back must be the train that went in. Anything else means a
+        // preset moved when the vocabulary changed, which is a silent retune
+        // of an engine nobody asked to retune.
+        //
+        // The tolerance is the round trip through a mean and a half-difference
+        // in binary floating point, not a modelling slop: a nanodegree.
+        const TOLERANCE_DEG: f64 = 1e-9;
+        for preset in EnginePreset::catalogue() {
+            let original = preset.model.valves;
+            let rebuilt = original.with_cam_timing(original.lobe_separation(), original.advance());
+            for (name, before, after) in [
+                ("intake", original.intake, rebuilt.intake),
+                ("exhaust", original.exhaust, rebuilt.exhaust),
+            ] {
+                let moved = (after.open_angle - before.open_angle).to_degrees().abs();
+                assert!(
+                    moved < TOLERANCE_DEG,
+                    "{}: {name} valve opening moved {moved:.3e} deg rebuilding it from \
+                     LSA {:.4} deg and advance {:.4} deg",
+                    preset.name,
+                    original.lobe_separation().to_degrees(),
+                    original.advance().to_degrees(),
+                );
+                assert_eq!(
+                    before.duration, after.duration,
+                    "{}: {name} duration is the lobe's own and must not move",
+                    preset.name
+                );
+                assert_eq!(
+                    before.max_lift, after.max_lift,
+                    "{}: {name} lift is the lobe's own and must not move",
+                    preset.name
+                );
+            }
+
+            // And the separation itself has to be a cam a grinder would cut.
+            let lsa = original.lobe_separation().to_degrees();
+            assert!(
+                (95.0..=120.0).contains(&lsa),
+                "{}: lobe separation {lsa:.1} deg is not a production cam",
+                preset.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_tighter_lobe_separation_buys_overlap() {
+        // The reason the vocabulary is worth having: overlap is not a free
+        // parameter, it is what is left over when the two lobes are ground
+        // closer together. Closing the separation by a camshaft degree opens
+        // two crank degrees of overlap and nothing else changes.
+        let train = crate::physics::thermodynamics::ValveTrain::default();
+        let before = train.overlap().to_degrees();
+        let tighter = train.with_cam_timing(train.lobe_separation() - deg(4.0), train.advance());
+        let after = tighter.overlap().to_degrees();
+        assert!(
+            (after - before - 8.0).abs() < 1e-6,
+            "four camshaft degrees tighter must buy eight crank degrees of \
+             overlap: {before:.3} deg to {after:.3} deg"
+        );
+        assert_eq!(
+            tighter.intake.duration, train.intake.duration,
+            "re-timing a cam must not re-grind it"
+        );
+    }
+
+    #[test]
     fn every_preset_makes_torque_and_stays_finite() {
         for preset in EnginePreset::catalogue() {
             let block = primed(&preset, 4_000.0);
