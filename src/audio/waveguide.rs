@@ -2209,6 +2209,11 @@ const TURBINE_WHEEL_LENGTH: f64 = 0.05;
 /// Number of cascaded allpass stages in the wheel's dispersion chain.
 const TURBINE_DISPERSION_STAGES: usize = 4;
 
+/// Modulation depth of the blade-pass source, as a fraction of the flow
+/// driving it [-]. Small: this is a texture on top of the blowdown pulses,
+/// not a second voice competing with them.
+const TURBINE_BLADE_PASS_DEPTH: f32 = 0.02;
+
 /// Break frequencies for the wheel's dispersion chain [Hz].
 ///
 /// The wheel's blade passages differ in path length by roughly the throat's
@@ -2241,13 +2246,19 @@ fn turbine_dispersion_breaks_hz(
 /// - **Dissipation**, an absorption shelf exactly like
 ///   [`AbsorptiveSilencer`]'s packing shelf: unity at DC, a real loss above
 ///   [`Self::corner_hz`]. The wheel's many narrow passages work on the gas
-///   the same way packing does — this is not decoration, an
+///   the same way packing does, which is also why a turbine takes the high
+///   orders harder than the low ones — this is not decoration, an
 ///   `ExpansionChamber` shipped without an equivalent term once and made
 ///   mufflers *louder*.
 /// - **Dispersion**, a cascade of [`Allpass`] stages: unity magnitude at
 ///   every frequency, so it changes *when* a sharp edge arrives without
 ///   changing *how loud* it is. A lowpass here would dull the edge; this
 ///   smears it, which is the difference between "muffled" and "whooshy".
+///
+/// On top of the passive two-port sits the wheel's blade-pass content: a
+/// small modulation at blade count times shaft speed, scaled by the flow
+/// actually driving the wheel so it is silent exactly when a compressor
+/// moving no air would be.
 #[derive(Debug, Clone)]
 pub struct Turbine {
     junction_in: ScatteringJunction,
@@ -2261,8 +2272,16 @@ pub struct Turbine {
     shelf_backward: OnePole,
     disperse_forward: [Allpass; TURBINE_DISPERSION_STAGES],
     disperse_backward: [Allpass; TURBINE_DISPERSION_STAGES],
-    /// Nozzle throat area, cached for retuning [m^2].
+    /// Nozzle throat area, cached for retuning and flow scaling [m^2].
     throat_area: f64,
+    /// Wheel blade count, for the blade-pass acoustic source [-].
+    blade_count: u32,
+    /// Current shaft speed driving the blade-pass oscillator [Hz].
+    shaft_hz: f32,
+    /// Blade-pass oscillator phase [rad].
+    blade_phase: f32,
+    /// Magnitude of the mean flow through the wheel, roughly `0..=1` [-].
+    flow_mach: f32,
     sample_rate: f32,
     scatter_buf_in: [f32; 2],
     scatter_buf_out: [f32; 2],
@@ -2323,10 +2342,24 @@ impl Turbine {
             disperse_forward,
             disperse_backward,
             throat_area: a_throat,
+            blade_count: geometry.blade_count,
+            shaft_hz: 0.0,
+            blade_phase: 0.0,
+            flow_mach: 0.0,
             sample_rate,
             scatter_buf_in: [0.0; 2],
             scatter_buf_out: [0.0; 2],
         }
+    }
+
+    /// Nozzle throat area [m^2].
+    pub fn throat_area(&self) -> f64 {
+        self.throat_area
+    }
+
+    /// Gas temperature currently tuned into the wheel cavity [K].
+    pub fn wheel_temperature(&self) -> f32 {
+        self.wheel.temperature
     }
 
     /// Amplitude surviving one pass through the wheel, above its corner [-].
@@ -2359,12 +2392,43 @@ impl Turbine {
         }
     }
 
+    /// Sets the magnitude of the mean flow driving the wheel, `0..=1`-ish [-].
+    ///
+    /// The blade-pass source is scaled by this: a wheel spinning against no
+    /// flow is silent, the same way a compressor moving no air is.
+    pub fn set_flow(&mut self, mach: f32) {
+        self.flow_mach = mach.abs();
+    }
+
+    /// Sets the shaft speed driving the blade-pass oscillator [rev/min].
+    ///
+    /// Taken from the existing [`crate::audio::TurboModel`] for now; a later
+    /// stage rewires this to the solved shaft once one exists.
+    pub fn set_shaft_rpm(&mut self, rpm: f32) {
+        self.shaft_hz = rpm.max(0.0) / 60.0;
+    }
+
     /// Applies the wheel's absorption shelf to one direction of travel; see
     /// [`AbsorptiveSilencer::absorb`] for the identical shelf on a muffler's
     /// packing.
     #[inline(always)]
     fn absorb(pass: f32, shelf: &mut OnePole, x: f32) -> f32 {
         pass * x + (1.0 - pass) * shelf.process(x)
+    }
+
+    /// Blade-pass content: a real acoustic source at blade count times shaft
+    /// speed, distinct from the compressor whistle on the intake side.
+    #[inline(always)]
+    fn blade_pass_sample(&mut self) -> f32 {
+        if self.blade_count == 0 || self.shaft_hz <= 0.0 || self.flow_mach <= 1e-4 {
+            return 0.0;
+        }
+        let freq = self.blade_count as f32 * self.shaft_hz;
+        self.blade_phase += std::f32::consts::TAU * freq / self.sample_rate;
+        if self.blade_phase > std::f32::consts::TAU {
+            self.blade_phase -= std::f32::consts::TAU;
+        }
+        TURBINE_BLADE_PASS_DEPTH * self.flow_mach.min(1.0) * self.blade_phase.sin()
     }
 
     /// Steps the turbine by one sample; see [`ExpansionChamber::step`] for
@@ -2395,7 +2459,7 @@ impl Turbine {
 
         self.wheel.push_inputs(p_into_wheel_0, p_into_wheel_1);
 
-        (p_in_minus, p_out_plus)
+        (p_in_minus, p_out_plus + self.blade_pass_sample())
     }
 
     /// Clears internal state.
@@ -2409,6 +2473,7 @@ impl Turbine {
         for stage in self.disperse_backward.iter_mut() {
             stage.reset();
         }
+        self.blade_phase = 0.0;
         self.scatter_buf_in = [0.0; 2];
         self.scatter_buf_out = [0.0; 2];
     }
@@ -3011,6 +3076,16 @@ impl ExhaustNetwork {
             p.set_mach(mach);
         }
         let bank_flow = mass_flow.max(0.0) / self.bank_count.max(1) as f32;
+        for turbine in self.turbines.iter_mut().flatten() {
+            let mach = mean_flow_mach(
+                bank_flow,
+                turbine.throat_area() as f32,
+                gamma,
+                gas_constant,
+                turbine.wheel_temperature(),
+            );
+            turbine.set_flow(mach);
+        }
         for (tp, mouth) in self.tailpipes.iter_mut().zip(self.mouths.iter_mut()) {
             let mach = mean_flow_mach(bank_flow, tp.area(), gamma, gas_constant, tp.temperature);
             tp.set_mach(mach);
@@ -3020,6 +3095,17 @@ impl ExhaustNetwork {
             // Without this the network is very nearly lossless below the
             // radiation corner and a single blowdown rings for seconds.
             mouth.set_mach(mach * tp.area() / mouth.area());
+        }
+    }
+
+    /// Sets the shaft speed driving each fitted turbine's blade-pass content
+    /// [rev/min].
+    ///
+    /// Taken from the existing [`crate::audio::TurboModel`] for now; a later
+    /// stage rewires this to the solved shaft once one exists.
+    pub fn set_turbine_shaft_rpm(&mut self, rpm: f32) {
+        for turbine in self.turbines.iter_mut().flatten() {
+            turbine.set_shaft_rpm(rpm);
         }
     }
 

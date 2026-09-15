@@ -3421,6 +3421,7 @@ impl EngineSynth {
         self.network.tune(gamma, gas_constant, &self.stations);
         self.network
             .set_mean_flow(self.snapshot.intake_mass_flow, gamma, gas_constant);
+        self.network.set_turbine_shaft_rpm(self.snapshot.turbo_rpm);
         self.variation_depth = self.variation_depth_at(rpm);
         self.mechanical
             .tune(&self.snapshot, cycle_hz, self.config.cylinders.len());
