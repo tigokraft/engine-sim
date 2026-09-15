@@ -2767,4 +2767,141 @@ mod tests {
             open.load_fraction()
         );
     }
+
+    /// Settles a fresh V8 at `rpm` on a fixed throttle for long enough for
+    /// trapped mass, exhaust temperature and the phase ring to stop moving.
+    fn settled_at_throttle(rpm: f64, throttle: f64) -> EngineBlock {
+        let mut block = EngineBlock::cross_plane_v8(Environment::default());
+        block.throttle = throttle;
+        for _ in 0..600 {
+            block.update(1.0 / 240.0, rpm);
+        }
+        block
+    }
+
+    #[test]
+    fn a_gear_change_that_raises_required_torque_raises_load_fraction() {
+        // `RoadLoad`/`Gearbox` already prove (see `physics::vehicle::tests`)
+        // that two gears at the same rpm imply different required crank
+        // torque; a driver meets more required torque with more pedal. This
+        // is the other half: more pedal really does trap more mass, so the
+        // schedules downstream see a different load, not the same one.
+        let light = settled_at_throttle(3_000.0, 0.08);
+        let heavy = settled_at_throttle(3_000.0, 0.15);
+        assert!(
+            heavy.load_fraction() > light.load_fraction(),
+            "more pedal must trap more mass: light={:.3} heavy={:.3}",
+            light.load_fraction(),
+            heavy.load_fraction()
+        );
+    }
+
+    #[test]
+    fn grade_raises_load_fraction_and_enriches_afr() {
+        use crate::physics::vehicle::RoadLoad;
+
+        // Climbing a grade at the same road speed raises the torque the
+        // engine must produce — pure algebra, no engine involved yet.
+        let level = RoadLoad::generic_road_car();
+        let uphill = RoadLoad {
+            grade: 0.08, // steep, so the effect is unmistakable
+            ..RoadLoad::generic_road_car()
+        };
+        let speed_mps = 25.0;
+        let overall_ratio = 4.0;
+        let air_density = 1.2041;
+        assert!(
+            uphill.crank_torque(speed_mps, air_density, overall_ratio)
+                > level.crank_torque(speed_mps, air_density, overall_ratio),
+            "a grade must raise the torque required to hold the same speed"
+        );
+
+        // Meeting that extra torque takes more pedal, and more pedal really
+        // does raise load fraction — leaving the lean-cruise band the ECU
+        // uses to save fuel at light, steady load, and enriching toward
+        // stoichiometric the way a real ECU does once cruise gives way to
+        // sustained pull.
+        let cruising = settled_at_throttle(3_000.0, 0.02);
+        let climbing = settled_at_throttle(3_000.0, 0.1);
+        let cruising_load = cruising.load_fraction();
+        let climbing_load = climbing.load_fraction();
+        assert!(
+            climbing_load > cruising_load,
+            "more load must follow more pedal: cruising={cruising_load:.3} climbing={climbing_load:.3}"
+        );
+
+        let cruising_afr = cruising.ecu.target_afr(cruising_load, 3_000.0, 0.02);
+        let climbing_afr = climbing.ecu.target_afr(climbing_load, 3_000.0, 0.1);
+        assert!(
+            climbing_afr < cruising_afr,
+            "the AFR schedule must enrich (lower number) under more load: \
+             cruising={cruising_afr:.2} climbing={climbing_afr:.2}"
+        );
+    }
+
+    #[test]
+    fn higher_load_raises_exhaust_temperature_and_moves_primary_tuning() {
+        let light = settled_at_throttle(3_000.0, 0.08);
+        let heavy = settled_at_throttle(3_000.0, 0.15);
+        assert!(heavy.load_fraction() > light.load_fraction());
+
+        let light_temp = light.exhaust_banks[0].plenum.temperature;
+        let heavy_temp = heavy.exhaust_banks[0].plenum.temperature;
+        assert!(
+            heavy_temp > light_temp,
+            "higher load must run a hotter exhaust: light={light_temp:.1} heavy={heavy_temp:.1}"
+        );
+
+        let light_tuning = light.exhaust_banks[0].tuning_ratio;
+        let heavy_tuning = heavy.exhaust_banks[0].tuning_ratio;
+        assert!(
+            (heavy_tuning - light_tuning).abs() > 1e-3,
+            "the primaries' tuning ratio must move with exhaust temperature: \
+             light={light_tuning:.4} heavy={heavy_tuning:.4}"
+        );
+    }
+
+    #[test]
+    fn two_gears_at_the_same_rpm_schedule_different_spark_advance() {
+        use crate::physics::vehicle::{Gear, Gearbox, RoadLoad};
+
+        // The plan's own example: cruising in sixth against pulling in
+        // second, both at the same rpm — the gears alone already put a
+        // different torque demand on the crank.
+        let mut gearbox = Gearbox::generic_six_speed();
+        gearbox.gear = Gear::Engaged(2);
+        let low_gear_ratio = gearbox.overall_ratio().unwrap();
+        gearbox.gear = Gear::Engaged(6);
+        let high_gear_ratio = gearbox.overall_ratio().unwrap();
+
+        let road = RoadLoad::generic_road_car();
+        let speed_mps = 25.0;
+        let air_density = 1.2041;
+        assert!(
+            road.crank_torque(speed_mps, air_density, low_gear_ratio)
+                != road.crank_torque(speed_mps, air_density, high_gear_ratio),
+            "second and sixth must not ask the crank for the same torque"
+        );
+
+        // That difference in demanded torque is met with a different pedal
+        // position, which traps a different mass at the same rpm.
+        let rpm = 3_000.0;
+        let pulling = settled_at_throttle(rpm, 0.15);
+        let cruising = settled_at_throttle(rpm, 0.08);
+        let pulling_load = pulling.load_fraction();
+        let cruising_load = cruising.load_fraction();
+        assert!(
+            (pulling_load - cruising_load).abs() > 1e-3,
+            "the same rpm in two gears must trap different mass: \
+             2nd={pulling_load:.3} 6th={cruising_load:.3}"
+        );
+
+        let pulling_spark = pulling.ecu.schedule_spark_advance(pulling_load, rpm);
+        let cruising_spark = cruising.ecu.schedule_spark_advance(cruising_load, rpm);
+        assert!(
+            (pulling_spark - cruising_spark).abs() > 1e-3,
+            "different load fractions at the same rpm must schedule different \
+             spark advance: 2nd={pulling_spark:.2} 6th={cruising_spark:.2}"
+        );
+    }
 }
