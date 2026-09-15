@@ -3037,6 +3037,11 @@ pub struct EngineSynth {
     /// reaches the network would inject whichever fired last at every node it
     /// touched, so each node gets its own bandlimited pool.
     backfire_pulses: Vec<[PopPool; 4]>,
+    /// Anti-lag's own periodic port train, one pool per bank. Kept apart from
+    /// `backfire_pulses`' port pool because it is driven by firing events
+    /// rather than the Poisson cut process, and the two must not steal each
+    /// other's pop slots.
+    antilag_pulses: Vec<PopPool>,
     /// Cylinder each bank's port-node injections are attributed to: the
     /// bank's first cylinder, a representative primary rather than whichever
     /// cylinder actually produced the charge. The network has one port
@@ -3330,6 +3335,7 @@ impl EngineSynth {
             cycle: CyclePlayer::new(fs),
             excitations: vec![0.0; n_cyl],
             backfire_pulses: vec![[PopPool::default(); 4]; config.bank_count],
+            antilag_pulses: vec![PopPool::default(); config.bank_count],
             bank_first_cylinder,
             radiated: vec![0.0; config.bank_count],
             port_jets: vec![0.0; n_cyl],
@@ -3506,6 +3512,9 @@ impl EngineSynth {
             for pool in pools.iter_mut() {
                 pool.reset();
             }
+        }
+        for pool in self.antilag_pulses.iter_mut() {
+            pool.reset();
         }
         self.cycle.reset();
         self.excitations.fill(0.0);
@@ -3797,6 +3806,24 @@ impl EngineSynth {
             let ahead = (tap.evo_phase - previous).rem_euclid(1.0);
             if ahead < increment && alive {
                 self.knock.trigger();
+                if self.snapshot.anti_lag {
+                    // Anti-lag pops are periodic and locked to firing rather
+                    // than the Poisson cut process `BackfireVoice` runs, and
+                    // they light at the port: the charge anti-lag dumps is
+                    // fresh and still right behind the valve on every cycle,
+                    // the same reasoning that pulls a fresh cut's charge
+                    // toward the port in `choose_injection_node`.
+                    let bank = tap.bank % self.antilag_pulses.len().max(1);
+                    let amplitude = self.config.backfire_level as f32 * 0.6;
+                    self.antilag_pulses[bank].trigger(
+                        self.config.sample_rate,
+                        amplitude,
+                        backfire_attack_seconds(0.0, InjectionNode::Port),
+                        0.010,
+                        0.80,
+                        0.0,
+                    );
+                }
             }
             // The next cycle's draw is taken half a cycle *away* from the event
             // it governs, where the curve is flat. Drawing it at the event
@@ -4095,6 +4122,9 @@ impl EngineSynth {
                 };
                 self.network.inject(node, index, value);
             }
+            let antilag = self.antilag_pulses[bank].process(&mut self.noise) * launch;
+            self.network
+                .inject(InjectionNode::Port, self.bank_first_cylinder[bank], antilag);
         }
         for ((drive, pulse), jet) in self
             .port_drive
@@ -5343,6 +5373,82 @@ mod tests {
             gaps.iter().any(|&g| g < refractory_samples),
             "expected at least one companion inside the primary's refractory \
              window ({refractory_samples} samples): {gaps:?}"
+        );
+    }
+
+    #[test]
+    fn anti_lag_produces_a_periodic_port_train_a_limiter_cut_does_not() {
+        // Anti-lag routes to the port and is locked to firing, not to the
+        // Poisson process `BackfireVoice` runs during a cut. Counted through
+        // `PopPool::next`, which advances by exactly one on every `trigger`
+        // call regardless of how the envelopes it started overlap.
+        let trigger_samples = |anti_lag: bool, spark_cut: bool| -> Vec<usize> {
+            let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
+            let mut snapshot = loaded_snapshot();
+            snapshot.anti_lag = anti_lag;
+            snapshot.spark_cut = spark_cut;
+            // Removes crank-speed ripple, so the firing instants this test
+            // checks for even spacing land on an exact period.
+            snapshot.indicated_torque = 0.0;
+            if spark_cut {
+                snapshot.unburnt_fuel_mass = 30.0e-6;
+                snapshot.exhaust_temperature = 1_150.0;
+            }
+            synth.set_snapshot(&snapshot);
+
+            let mut buffer = [0.0f32; 2];
+            // Let `cycle_hz` glide onto the snapshot's rpm before measuring.
+            for _ in 0..(FS * 0.3) as usize {
+                synth.render(&mut buffer, 2);
+            }
+
+            let mut samples = Vec::new();
+            let mut last_next = synth.antilag_pulses[0].next;
+            for i in 0..FS as usize {
+                synth.render(&mut buffer, 2);
+                let now_next = synth.antilag_pulses[0].next;
+                if now_next != last_next {
+                    samples.push(i);
+                    last_next = now_next;
+                }
+            }
+            samples
+        };
+
+        let firing = trigger_samples(true, false);
+        assert!(
+            firing.len() > 10,
+            "anti-lag should fire a steady train of port events over 1 s: {}",
+            firing.len()
+        );
+        // Locked to firing, not evenly spaced: the cross-plane V8's bank
+        // fires its four cylinders at uneven intervals within a cycle (that
+        // unevenness is what "cross-plane" means), so the proof of lock is
+        // that the same four-gap pattern repeats exactly every cycle, not
+        // that the gaps are equal.
+        let gaps: Vec<i64> = firing.windows(2).map(|w| w[1] as i64 - w[0] as i64).collect();
+        let cylinders_per_bank = 4;
+        assert!(
+            gaps.len() > cylinders_per_bank * 3,
+            "need several cycles' worth of gaps to check repetition: {gaps:?}"
+        );
+        for i in 0..(gaps.len() - cylinders_per_bank) {
+            let this_cycle = gaps[i];
+            let next_cycle = gaps[i + cylinders_per_bank];
+            assert!(
+                (this_cycle - next_cycle).abs() <= 2,
+                "anti-lag's port train should repeat the same firing pattern \
+                 every cycle: gap {i} was {this_cycle} samples, {next_cycle} \
+                 one cycle later: {gaps:?}"
+            );
+        }
+
+        let cutting = trigger_samples(false, true);
+        assert!(
+            cutting.is_empty(),
+            "a limiter cut without anti-lag should not produce any port-node \
+             train: {} events",
+            cutting.len()
         );
     }
 
