@@ -1989,7 +1989,7 @@ impl Driveline {
         let omega = (omega + net / self.inertia.max(1e-3) * dt).max(0.0);
         self.rpm = omega * 30.0 / PI;
         self.torque = gas;
-        self.starter.update(self.rpm);
+        self.starter.update(self.rpm, dt);
     }
 
     /// Advances engine and driven-side speed one frame with a gear engaged.
@@ -2398,6 +2398,88 @@ mod tests {
             EnginePreset::find_by_name("INLINE-4").map(|p| p.name),
             Some("Inline-4")
         );
+    }
+
+    #[test]
+    fn the_starter_releases_after_the_engine_catches_and_its_whine_stops() {
+        // Catch first, release second, and in that order for every engine in
+        // the catalogue. The engine is not started by the starter letting go —
+        // it fires under the motor, outruns it, and the motor notices.
+        for preset in EnginePreset::catalogue() {
+            let mut block = preset.block(Environment::default());
+            block.cold_start();
+            let mut driveline = Driveline::cranking(&preset, &mut block);
+            let dt = 1.0 / 480.0;
+
+            assert!(
+                driveline.starter.whine_hz(driveline.rpm.max(200.0)) > 0.0,
+                "{} was not whining with the pinion in",
+                preset.name
+            );
+
+            let mut released_at = None;
+            for frame in 0..(480 * 8) {
+                let meshed = driveline.starter.engaged;
+                driveline.update(&mut block, dt);
+                block.update(dt, driveline.rpm);
+                if meshed && !driveline.starter.engaged {
+                    released_at = Some((frame as f64 * dt, driveline.rpm));
+                }
+            }
+
+            let (released, release_rpm) = released_at
+                .unwrap_or_else(|| panic!("{} never caught: {:.0} rpm", preset.name, driveline.rpm));
+            assert!(
+                released > 0.0 && released < 5.0,
+                "{} took {released:.1} s to catch",
+                preset.name
+            );
+            assert!(
+                release_rpm > driveline.starter.free_speed,
+                "{} let go at {release_rpm:.0} rpm without outrunning the pinion",
+                preset.name
+            );
+            assert!(
+                driveline.rpm > preset.idle * 0.9,
+                "{} caught and then died back to {:.0} rpm",
+                preset.name,
+                driveline.rpm
+            );
+
+            // And the whine is gone, at any speed, because the pinion is out of
+            // mesh rather than faded down.
+            assert_eq!(
+                driveline.starter.whine_hz(driveline.rpm),
+                0.0,
+                "{} is still whining after the pinion came out",
+                preset.name
+            );
+            assert_eq!(driveline.starter.torque(driveline.rpm), 0.0);
+        }
+    }
+
+    #[test]
+    fn a_momentary_overrun_does_not_throw_the_pinion_out() {
+        // What the release hold is for. A single-cylinder engine spends two
+        // revolutions accelerating into nothing between compressions and passes
+        // the motor's free speed doing it, having fired nothing at all.
+        let mut starter = Starter::for_engine(0.7e-3, 200.0, 0.10);
+        starter.engage();
+        let dt = 1.0 / 480.0;
+
+        // A tenth of a second over the top, then back under it.
+        for _ in 0..48 {
+            starter.update(starter.free_speed + 50.0, dt);
+        }
+        assert!(starter.engaged, "let go of a coast between compressions");
+        starter.update(starter.free_speed - 50.0, dt);
+        assert_eq!(starter.overrun_time, 0.0, "the hold did not reset");
+
+        // Sustained, which is an engine that is running.
+        for _ in 0..480 {
+            starter.update(starter.free_speed + 50.0, dt);
+        }
+        assert!(!starter.engaged, "held on to an engine that was running");
     }
 
     #[test]

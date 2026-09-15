@@ -1461,7 +1461,13 @@ impl EngineBlock {
         self.model.gas = GasProperties::for_afr(afr);
         let limiter = self.ecu.evaluate_limiter(rpm);
         let dfco = self.ecu.update_dfco(self.throttle, rpm);
-        self.model.fuel_cut = dfco || limiter == LimiterCut::Fuel || self.ecu.cranking;
+        // A cranking engine is fuelled as soon as the ECU has a crank signal to
+        // fuel against, and not before: below that the cylinders are gas springs
+        // and there is nothing in them to light. It is not the starter letting
+        // go that starts the engine — the engine catches under the starter and
+        // the starter notices afterwards.
+        let no_sync = self.ecu.cranking && rpm.abs() < crate::physics::control::CRANK_SYNC_RPM;
+        self.model.fuel_cut = dfco || limiter == LimiterCut::Fuel || no_sync;
         // Spark timing is the ECU's on an engine that has a coil. A diesel has
         // none: its heat release starts where the Arrhenius integral says, and
         // the latch solves that per cycle. See [`HeatRelease`].

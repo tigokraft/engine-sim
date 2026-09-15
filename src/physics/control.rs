@@ -61,6 +61,26 @@ pub const STARTER_FREE_SPEED: f64 = 450.0;
 /// Ring gear teeth, which is the starter whine's order at the crank [-].
 pub const STARTER_WHINE_ORDER: f64 = 129.0;
 
+/// How long the engine must outrun the pinion before it is withdrawn [s].
+///
+/// Not a debounce. A one-way clutch freewheels the instant the ring gear gets
+/// ahead of the pinion, and an engine that has not fired at all does that
+/// between compression strokes — a single-cylinder engine spends two whole
+/// revolutions accelerating into nothing before its next compression, and
+/// passes the motor's own free speed doing it. What actually pulls the pinion
+/// out is the solenoid dropping, and what drops the solenoid is somebody
+/// deciding the engine is running. A quarter of a second of continuous
+/// overrun is that decision, and it is the same one a driver makes by ear.
+pub const STARTER_RELEASE_HOLD: f64 = 0.25;
+
+/// Crank speed below which the ECU has no signal to meter fuel against [rev/min].
+///
+/// An engine that is barely moving has no usable crank signal, so nothing is
+/// injected and the cylinders are pure gas springs. Past it the ECU has sync,
+/// fuel is metered on every cycle, and the first charge to find a spark at a
+/// fireable condition is the one that catches.
+pub const CRANK_SYNC_RPM: f64 = 80.0;
+
 /// Limiter cut mechanism.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LimiterCut {
@@ -171,6 +191,8 @@ pub struct Starter {
     pub whine_order: f64,
     /// Whether the pinion is meshed with the ring gear.
     pub engaged: bool,
+    /// How long the engine has been continuously outrunning the pinion [s].
+    pub overrun_time: f64,
 }
 
 impl Default for Starter {
@@ -180,6 +202,7 @@ impl Default for Starter {
             free_speed: STARTER_FREE_SPEED,
             whine_order: STARTER_WHINE_ORDER,
             engaged: false,
+            overrun_time: 0.0,
         }
     }
 }
@@ -227,19 +250,29 @@ impl Starter {
     /// Meshes the pinion: the key going to START.
     pub fn engage(&mut self) {
         self.engaged = true;
+        self.overrun_time = 0.0;
     }
 
-    /// Throws the pinion out once the engine overruns it.
+    /// Throws the pinion out once the engine is plainly running on its own.
     ///
-    /// The release condition is the machine's own, not a state flag set by
-    /// whatever decided the engine had caught: a Bendix lets go when the ring
-    /// gear starts driving the pinion, which is when the engine passes the
-    /// speed the motor was running to anyway. An engine that fires does that
-    /// within a revolution; an engine that does not never does, and the motor
-    /// keeps cranking, which is also what a real one does.
-    pub fn update(&mut self, rpm: f64) {
-        if self.engaged && rpm > self.free_speed {
-            self.engaged = false;
+    /// The condition is the machine's own, not a flag set by whatever decided
+    /// the engine had caught: the engine has to be outrunning the motor, and it
+    /// has to keep doing it for [`STARTER_RELEASE_HOLD`]. An engine that has
+    /// fired holds that for as long as anyone cares to watch, because it is
+    /// accelerating away; an engine merely coasting between compression strokes
+    /// gives it back on the next one and the motor stays in, which is what a
+    /// real one does to an engine that will not start.
+    pub fn update(&mut self, rpm: f64, dt: f64) {
+        if !self.engaged {
+            return;
+        }
+        if rpm > self.free_speed {
+            self.overrun_time += dt;
+            if self.overrun_time >= STARTER_RELEASE_HOLD {
+                self.engaged = false;
+            }
+        } else {
+            self.overrun_time = 0.0;
         }
     }
 
