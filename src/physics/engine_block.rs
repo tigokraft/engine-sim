@@ -1752,18 +1752,47 @@ impl EngineBlock {
         }
     }
 
-    /// Volumetric efficiency of the master cylinder [-].
-    ///
-    /// Ratio of trapped air mass to the theoretical air mass occupying the cylinder displacement
-    /// at ambient intake conditions: eta_v = m_trapped / (rho_amb * V_disp_cyl).
-    pub fn volumetric_efficiency(&self) -> f64 {
+    /// Trapped mass against the atmospheric reference at the master
+    /// cylinder's current displacement [-]: `m_trapped / (rho_amb * V_disp)`,
+    /// where `rho_amb` is what the ideal gas law gives for ambient pressure
+    /// and temperature. Unclamped — see [`EngineBlock::load_fraction`] and
+    /// [`EngineBlock::volumetric_efficiency`], which are this ratio clamped to
+    /// the range each of them is actually used over.
+    fn trapped_mass_ratio(&self) -> f64 {
         let r_air = 287.058; // specific gas constant [J/(kg K)]
         let t_amb = self.environment.temperature.max(200.0);
         let p_amb = self.environment.pressure.max(50_000.0);
         let rho_amb = p_amb / (r_air * t_amb);
         let cyl_disp = self.model.geometry.displacement().max(1e-6);
         let trapped = self.master.cylinder.mass.max(0.0);
-        (trapped / (rho_amb * cyl_disp)).clamp(0.0, 3.0)
+        trapped / (rho_amb * cyl_disp)
+    }
+
+    /// Load fraction: normalised trapped mass against what the cylinder would
+    /// trap at atmospheric pressure and ambient temperature, at this speed.
+    ///
+    /// This, not throttle position, is what the ECU schedules on. A throttle
+    /// is a valve, and how far it is open only matters through what it lets
+    /// the cylinder actually trap — which is also shaped by rpm (breathing
+    /// dynamics), back-pressure and reversion, none of which a throttle angle
+    /// alone can see. Load fraction reads the trapped charge directly instead,
+    /// so `schedule_spark_advance` and `schedule_afr` are scheduling against
+    /// what the cylinder actually got, not against where the pedal happens to
+    /// be. It coincides with [`EngineBlock::volumetric_efficiency`] for a
+    /// naturally aspirated engine — both ask "how much of a full atmospheric
+    /// charge did the cylinder trap" — and the two will diverge once a
+    /// compressor can push this past 1 while a restrictive port still caps
+    /// volumetric efficiency; see `TURBO_PLAN.md`.
+    pub fn load_fraction(&self) -> f64 {
+        self.trapped_mass_ratio().clamp(0.0, 1.5)
+    }
+
+    /// Volumetric efficiency of the master cylinder [-].
+    ///
+    /// Ratio of trapped air mass to the theoretical air mass occupying the cylinder displacement
+    /// at ambient intake conditions: eta_v = m_trapped / (rho_amb * V_disp_cyl).
+    pub fn volumetric_efficiency(&self) -> f64 {
+        self.trapped_mass_ratio().clamp(0.0, 3.0)
     }
 
     /// Brake specific fuel consumption [g / (kW h)].
@@ -2659,5 +2688,17 @@ mod tests {
             (0.5..1.5).contains(&eta_v),
             "naturally aspirated volumetric efficiency must be plausible: got {eta_v:.2}"
         );
+    }
+
+    #[test]
+    fn load_fraction_coincides_with_volumetric_efficiency_na() {
+        // Both ask "how much of a full atmospheric charge did the cylinder
+        // trap"; for a naturally aspirated engine within load_fraction's
+        // tighter clamp they must agree exactly.
+        let mut block = EngineBlock::cross_plane_v8(Environment::default());
+        for _ in 0..600 {
+            block.update(1.0 / 240.0, 3_000.0);
+        }
+        assert_eq!(block.load_fraction(), block.volumetric_efficiency());
     }
 }
