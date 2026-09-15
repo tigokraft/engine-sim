@@ -5359,4 +5359,71 @@ mod tests {
             "blade pass with no flow should be silent, got {mag:.8}"
         );
     }
+
+    #[test]
+    fn tailpipe_injection_reaches_the_mouth_before_port_injection() {
+        // The whole claim Stage M3 of docs/MECHANISM_PLAN.md rests on: an
+        // event injected close to the mouth radiates sooner, and by less pipe,
+        // than the same event injected at the port. No new physics is needed
+        // for this -- the network already has one-way delay accessors for
+        // every leg the port injection has to cross that the tailpipe
+        // injection does not.
+        use crate::physics::plumbing::{Collector, Crossover, ExhaustSystem, PipeSection};
+
+        const FS: f32 = 48_000.0;
+        let exhaust = ExhaustSystem {
+            primaries: vec![PipeSection::from_diameter(0.60, 0.040, 850.0)],
+            collector: Collector::from_diameter(1, 0.045, 0.12),
+            secondary: vec![],
+            crossover: Crossover::None,
+            silencers: vec![],
+            tailpipe: PipeSection::from_diameter(0.50, 0.045, 600.0),
+            tailpipe_flanged: false,
+            cutout_fitted: false,
+            turbine: None,
+        };
+        let cylinders = vec![crate::audio::dsp::CylinderTap {
+            evo_phase: 0.0,
+            bank: 0,
+        }];
+        let snapshot = crate::audio::dsp::EngineSnapshot::default();
+
+        // First sample at which the mouth's output rises clear of numerical
+        // silence, starting from a network with nothing else exciting it.
+        let onset = |node: InjectionNode| -> usize {
+            let mut network = ExhaustNetwork::new(&exhaust, &cylinders, 1, FS, &snapshot);
+            let excitations = [0.0f32];
+            let mut radiated = [0.0f32; 1];
+            network.inject(node, 0, 1.0);
+            for i in 0..4_000 {
+                network.step(&excitations, &mut radiated);
+                if radiated[0].abs() > 1e-5 {
+                    return i;
+                }
+            }
+            panic!("{node:?} injection never reached the mouth");
+        };
+
+        let port_onset = onset(InjectionNode::Port);
+        let tailpipe_onset = onset(InjectionNode::Tailpipe);
+        assert!(
+            tailpipe_onset < port_onset,
+            "tailpipe injection ({tailpipe_onset} samples) should reach the \
+             mouth before port injection ({port_onset} samples)"
+        );
+
+        let network = ExhaustNetwork::new(&exhaust, &cylinders, 1, FS, &snapshot);
+        let expected_extra_delay = network.primary_delay_samples(0)
+            + network.collector_delay_samples(0)
+            + network.tailpipe_delay_samples(0);
+        let measured_extra_delay = (port_onset - tailpipe_onset) as f32;
+        let tolerance = 0.15 * expected_extra_delay + 4.0;
+        assert!(
+            (measured_extra_delay - expected_extra_delay).abs() < tolerance,
+            "measured transit-time difference ({measured_extra_delay} samples) \
+             should match the network's own one-way delays for the primary, \
+             collector taper and tailpipe it crosses ({expected_extra_delay} \
+             samples), within {tolerance}"
+        );
+    }
 }

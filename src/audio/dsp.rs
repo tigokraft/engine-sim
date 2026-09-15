@@ -5453,6 +5453,45 @@ mod tests {
     }
 
     #[test]
+    fn every_backfire_node_is_bandlimited_to_the_t6_standard() {
+        // T6 established one bandlimit for the pop: no energy above 0.45 * fs,
+        // clear of the passband by 60 dB. Every node's pool shares that same
+        // filter design (`PopPool` is node-agnostic), so triggering each in
+        // turn and rendering it alone must all measure the same standard.
+        for node in [
+            InjectionNode::Port,
+            InjectionNode::Collector,
+            InjectionNode::PostSilencer,
+            InjectionNode::Tailpipe,
+        ] {
+            let mut pool = PopPool::default();
+            let mut noise = Noise::new(5);
+            let n = 4 * 48_000;
+            let mut samples = Vec::with_capacity(n);
+            let mut cooldown = 0usize;
+            let attack = backfire_attack_seconds(0.5, node);
+            for _ in 0..n {
+                if cooldown == 0 {
+                    pool.trigger(FS, 1.0, attack, 0.010, 0.80, 0.0);
+                    cooldown = (0.02 * FS) as usize;
+                } else {
+                    cooldown -= 1;
+                }
+                samples.push(pool.process(&mut noise));
+            }
+
+            let spectrum = crate::analysis::orders::AverageSpectrum::of(&samples, FS as f64);
+            let passband = spectrum.db_at(3_000.0).unwrap();
+            let edge = spectrum.db_at(0.45 * FS as f64).unwrap();
+            assert!(
+                passband - edge > 60.0,
+                "{node:?}: expected the pulse's real content well clear of \
+                 0.45 * fs: passband {passband:.1} dB, edge {edge:.1} dB"
+            );
+        }
+    }
+
+    #[test]
     fn control_block_is_shorter_than_v12_firing_interval() {
         // A V12 at 8000 rpm fires every 1.25 ms:
         // f_cycle = 8000 / 120 = 66.67 Hz -> 12 * 66.67 = 800 Hz -> T_fire = 1.25 ms.
