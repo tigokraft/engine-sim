@@ -2302,6 +2302,19 @@ impl Turbine {
         self.corner_hz
     }
 
+    /// Retunes propagation delay, admittance and the absorption corner for
+    /// the current gas state.
+    pub fn tune(&mut self, gamma: f32, gas_constant: f32, temperature: f32) {
+        self.wheel.tune(gamma, gas_constant, temperature);
+        let wheel_radius = (self.throat_area / std::f64::consts::PI).sqrt();
+        let c = speed_of_sound(gamma, gas_constant, temperature);
+        self.corner_hz = packing_corner_hz(wheel_radius, c);
+        self.shelf_forward
+            .set_cutoff(self.sample_rate, self.corner_hz);
+        self.shelf_backward
+            .set_cutoff(self.sample_rate, self.corner_hz);
+    }
+
     /// Applies the wheel's absorption shelf to one direction of travel; see
     /// [`AbsorptiveSilencer::absorb`] for the identical shelf on a muffler's
     /// packing.
@@ -2902,6 +2915,9 @@ impl ExhaustNetwork {
         }
         for coll in &mut self.collectors {
             coll.tune(gamma, gas_constant, stations.collector);
+        }
+        for turbine in self.turbines.iter_mut().flatten() {
+            turbine.tune(gamma, gas_constant, stations.collector);
         }
         let t_cross = stations.collector + (stations.tailpipe - stations.collector) * 0.25;
         self.crossover.tune(gamma, gas_constant, t_cross);
