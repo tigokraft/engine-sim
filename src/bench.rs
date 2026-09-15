@@ -40,6 +40,7 @@ use crate::physics::plumbing::{
 use crate::physics::thermodynamics::{
     CylinderModel, DieselCombustion, HeatRelease, ValveEvent, ValveTrain, WiebeProfile, DIESEL_LHV,
 };
+use crate::physics::vehicle::{Clutch, ClutchState, Gearbox, RoadLoad};
 
 /// Speed below which the engine has stalled [rev/min].
 pub const STALL_RPM: f64 = 400.0;
@@ -1527,10 +1528,27 @@ pub struct Driveline {
     /// Rotating inertia [kg m^2].
     pub inertia: f64,
     /// Brake load coefficients, see [`EnginePreset::load`].
+    ///
+    /// Accessories, bearing drag and windage — the engine's own internal
+    /// resistance, independent of whatever the wheels are asking for. This
+    /// used to be the whole of the load; since [`Gearbox`] and [`RoadLoad`]
+    /// it is only this term, and the dyno's absorber curve besides.
     pub load: (f64, f64, f64),
     /// Engine braking at a fully shut throttle [N m], see
     /// [`CLOSED_THROTTLE_PMEP`].
     pub pumping: f64,
+    /// Gearbox: ratios, final drive, and the gear currently selected.
+    pub gearbox: Gearbox,
+    /// The road the driven wheels push against.
+    pub road_load: RoadLoad,
+    /// Couples the crank to the driven side when a gear is selected.
+    pub clutch: Clutch,
+    /// Driven-side speed, referred to the crank through the current overall
+    /// ratio so it is directly comparable to `rpm` [rad/s]. Meaningless in
+    /// neutral, where nothing couples to it.
+    pub vehicle_omega: f64,
+    /// What the clutch did last frame; for telemetry.
+    pub clutch_state: ClutchState,
     /// Brake torque the block last reported at this speed [N m].
     pub torque: f64,
     /// Whether the exhaust cutout is currently open.
@@ -1568,6 +1586,11 @@ impl Driveline {
             load: preset.load,
             pumping: CLOSED_THROTTLE_PMEP * preset.displacement() / (4.0 * PI),
             torque: 0.0,
+            gearbox: Gearbox::generic_six_speed(),
+            road_load: RoadLoad::generic_road_car(),
+            clutch: Clutch::generic_road_car(),
+            vehicle_omega: 0.0,
+            clutch_state: ClutchState::Open,
             // Closed regardless of whether this preset has a cutout fitted —
             // fitment and state are different things, and a car does not
             // drive around with its cutout open by default just because it
@@ -1649,7 +1672,7 @@ impl Driveline {
     }
 
     /// Advances the flywheel one frame from the block's solved torque.
-    pub fn update(&mut self, block: &EngineBlock, dt: f64) {
+    pub fn update(&mut self, block: &mut EngineBlock, dt: f64) {
         match self.dyno_mode {
             DynoMode::FreeRev => {
                 self.dyno_absorber_torque = 0.0;
@@ -1667,26 +1690,36 @@ impl Driveline {
                 let governor = ((target + 60.0 - self.rpm) / 500.0).clamp(0.0, 0.30);
                 let effective = self.throttle.max(governor);
 
-                // The block solves torque for a speed, not for a throttle, so the pedal
-                // is applied here. See the module docs.
-                self.torque = block.mean_brake_torque(self.rpm);
-                let drive = if self.is_cutting(block) {
-                    0.0
-                } else {
-                    self.torque * (0.05 + 0.95 * effective)
-                };
+                match self.gearbox.overall_ratio() {
+                    None => {
+                        // Neutral: no drive path, so this is exactly today's
+                        // free-revving flywheel against its own drag curve —
+                        // the special case [`Gearbox::overall_ratio`] promises.
+                        // The block solves torque for a speed, not for a
+                        // throttle, so the pedal is applied here. See the
+                        // module docs.
+                        self.torque = block.mean_brake_torque(self.rpm);
+                        let drive = if self.is_cutting(block) {
+                            0.0
+                        } else {
+                            self.torque * (0.05 + 0.95 * effective)
+                        };
 
-                // Accessories, then bearing drag, then windage, then the throttle
-                // plate. Only the last of these depends on the pedal: it is the whole
-                // of engine braking, and without it a lift from the limiter takes the
-                // best part of a minute to come back to idle.
-                let (a, b, c) = self.load;
-                let omega = self.rpm * PI / 30.0;
-                let load = a + b * omega + c * omega * omega + (1.0 - effective) * self.pumping;
+                        // Accessories, then bearing drag, then windage, then the throttle
+                        // plate. Only the last of these depends on the pedal: it is the whole
+                        // of engine braking, and without it a lift from the limiter takes the
+                        // best part of a minute to come back to idle.
+                        let (a, b, c) = self.load;
+                        let omega = self.rpm * PI / 30.0;
+                        let load =
+                            a + b * omega + c * omega * omega + (1.0 - effective) * self.pumping;
 
-                let alpha = (drive - load) / self.inertia.max(1e-3);
-                let omega = (omega + alpha * dt).max(STALL_RPM * PI / 30.0);
-                self.rpm = omega * 30.0 / PI;
+                        let alpha = (drive - load) / self.inertia.max(1e-3);
+                        let omega = (omega + alpha * dt).max(STALL_RPM * PI / 30.0);
+                        self.rpm = omega * 30.0 / PI;
+                    }
+                    Some(ratio) => self.update_in_gear(block, dt, ratio, effective),
+                }
             }
             DynoMode::RpmHold { target_rpm } => {
                 let slew = 1.0 - (-dt / 0.12).exp();
@@ -1812,6 +1845,87 @@ impl Driveline {
         }
     }
 
+    /// Advances engine and driven-side speed one frame with a gear engaged.
+    ///
+    /// Two rotating masses — the crank and the vehicle, the latter reflected
+    /// to the crank through `overall_ratio` — coupled by a clutch of limited
+    /// capacity. Locked is tried first: if the torque that would take to hold
+    /// them together fits inside the clutch's capacity, they move as one
+    /// combined inertia. If it does not, or the two sides are not at the same
+    /// speed to begin with, the clutch instead transmits its capacity signed
+    /// with the slip direction, and the two sides integrate independently —
+    /// which is what makes a standing start and a shift both work without a
+    /// separate mode for either.
+    fn update_in_gear(
+        &mut self,
+        block: &mut EngineBlock,
+        dt: f64,
+        overall_ratio: f64,
+        effective: f64,
+    ) {
+        // The pedal now actually restricts what the cylinder can trap, not
+        // just how much of the block's own torque curve gets through — see
+        // `EngineBlock::intake_makeup_flow`. Takes effect on the block's next
+        // `update`, same one-frame lag as every other quantity read here off
+        // last cycle's ring.
+        block.throttle = effective;
+
+        self.torque = block.mean_brake_torque(self.rpm);
+        let drive = if self.is_cutting(block) {
+            0.0
+        } else {
+            self.torque * (0.05 + 0.95 * effective)
+        };
+
+        let (a, b, c) = self.load;
+        let engine_omega = self.rpm * PI / 30.0;
+        let internal_load = a
+            + b * engine_omega
+            + c * engine_omega * engine_omega
+            + (1.0 - effective) * self.pumping;
+
+        let i_engine = self.inertia.max(1e-3);
+        let i_reflected = self.road_load.reflected_inertia(overall_ratio).max(1e-6);
+        let vehicle_speed = self.road_load.road_speed(self.vehicle_omega, overall_ratio);
+        let road_torque = self.road_load.crank_torque(
+            vehicle_speed,
+            block.environment.air_density(),
+            overall_ratio,
+        );
+
+        let capacity = self.clutch.capacity();
+        let slip = engine_omega - self.vehicle_omega;
+
+        // Try locked: one combined inertia, and the torque the clutch would
+        // need to carry to keep it that way.
+        let i_total = i_engine + i_reflected;
+        let alpha_locked = (drive - internal_load - road_torque) / i_total;
+        let lock_torque_needed = drive - internal_load - i_engine * alpha_locked;
+
+        let (alpha_engine, alpha_vehicle) =
+            if capacity > 0.0 && slip.abs() < 1e-2 && lock_torque_needed.abs() <= capacity {
+                self.clutch_state = ClutchState::Locked;
+                (alpha_locked, alpha_locked)
+            } else if capacity <= 0.0 {
+                self.clutch_state = ClutchState::Open;
+                (
+                    (drive - internal_load) / i_engine,
+                    -road_torque / i_reflected,
+                )
+            } else {
+                self.clutch_state = ClutchState::Slipping;
+                let transmitted = self.clutch.slipping_torque(slip);
+                (
+                    (drive - internal_load - transmitted) / i_engine,
+                    (transmitted - road_torque) / i_reflected,
+                )
+            };
+
+        let new_engine_omega = (engine_omega + alpha_engine * dt).max(STALL_RPM * PI / 30.0);
+        self.rpm = new_engine_omega * 30.0 / PI;
+        self.vehicle_omega = (self.vehicle_omega + alpha_vehicle * dt).max(0.0);
+    }
+
     /// What the audio path is being asked for this frame.
     pub fn controls(&self) -> EngineControls {
         EngineControls {
@@ -1910,7 +2024,7 @@ mod tests {
             let dt = 1.0 / 240.0;
 
             for _ in 0..(240 * 25) {
-                driveline.update(&block, dt);
+                driveline.update(&mut block, dt);
                 block.update(dt, driveline.rpm);
             }
             let margin = driveline.rpm - preset.redline;
@@ -1938,7 +2052,7 @@ mod tests {
 
             let mut reached = false;
             for _ in 0..(240 * 20) {
-                driveline.update(&block, dt);
+                driveline.update(&mut block, dt);
                 block.update(dt, driveline.rpm);
                 reached |= driveline.on_the_limiter();
             }
@@ -2013,14 +2127,14 @@ mod tests {
 
         driveline.throttle_target = 1.0;
         for _ in 0..(240 * 6) {
-            driveline.update(&block, dt);
+            driveline.update(&mut block, dt);
             block.update(dt, driveline.rpm);
         }
         assert!(driveline.rpm > 3_000.0, "never pulled away from idle");
 
         driveline.throttle_target = 0.0;
         for _ in 0..(240 * 15) {
-            driveline.update(&block, dt);
+            driveline.update(&mut block, dt);
             block.update(dt, driveline.rpm);
         }
         assert!(
@@ -2734,7 +2848,7 @@ mod tests {
         let mut reached = false;
         let mut cut_kind = crate::physics::control::LimiterCut::None;
         for _ in 0..(240 * 20) {
-            driveline.update(&on_the_limiter, dt);
+            driveline.update(&mut on_the_limiter, dt);
             on_the_limiter.update(dt, driveline.rpm);
             reached |= driveline.on_the_limiter();
             if on_the_limiter.ecu.active_cut != crate::physics::control::LimiterCut::None {
@@ -2808,7 +2922,7 @@ mod tests {
 
         let dt = 1.0 / 240.0;
         for _ in 0..(240 * 3) {
-            driveline.update(&block, dt);
+            driveline.update(&mut block, dt);
             block.update(dt, driveline.rpm);
         }
 
@@ -2838,7 +2952,7 @@ mod tests {
 
         let dt = 1.0 / 240.0;
         while driveline.dyno_mode != DynoMode::FreeRev {
-            driveline.update(&block, dt);
+            driveline.update(&mut block, dt);
             block.update(dt, driveline.rpm);
         }
 

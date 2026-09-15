@@ -382,7 +382,7 @@ fn simulation_thread(
             measured_hz += (1.0 / elapsed - measured_hz) * 0.02;
         }
 
-        rig.driveline.update(&rig.block, dt);
+        rig.driveline.update(&mut rig.block, dt);
         let output = rig.block.update(dt, rig.driveline.rpm);
         frames += 1;
 
