@@ -140,6 +140,82 @@ impl RoadLoad {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Clutch
+// ---------------------------------------------------------------------------
+
+/// State the clutch is transmitting torque in this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClutchState {
+    /// No capacity engaged: nothing crosses the interface.
+    Open,
+    /// Speeds differ, or the locked torque would exceed capacity: it is
+    /// dragging the two sides together rather than moving with them.
+    Slipping,
+    /// Both sides turn together and drive torque fits inside capacity.
+    Locked,
+}
+
+/// A friction clutch with a torque capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Clutch {
+    /// Maximum torque it can transmit fully engaged [N m].
+    pub torque_capacity: f64,
+    /// Pedal position: 0 open, 1 fully engaged [-].
+    pub engagement: f64,
+}
+
+impl Clutch {
+    /// Builds a fully-engaged clutch with a given torque capacity.
+    pub fn new(torque_capacity: f64) -> Self {
+        Self {
+            torque_capacity,
+            engagement: 1.0,
+        }
+    }
+
+    /// A generic road car's clutch: enough capacity for a mid-size engine.
+    pub fn generic_road_car() -> Self {
+        Self::new(450.0)
+    }
+
+    /// Torque capacity at the current pedal position [N m].
+    pub fn capacity(&self) -> f64 {
+        (self.torque_capacity * self.engagement.clamp(0.0, 1.0)).max(0.0)
+    }
+
+    /// Torque transmitted while slipping, signed with the slip direction
+    /// (engine omega minus driven omega) [N m]. Friction drags the slower
+    /// side up and the faster side down, so the sign follows the slip.
+    pub fn slipping_torque(&self, slip_omega: f64) -> f64 {
+        self.capacity() * slip_omega.signum()
+    }
+
+    /// Power dissipated as heat while slipping [W], always `>= 0`.
+    ///
+    /// This is the clutch's whole energy balance: the engine side loses
+    /// `slipping_torque * omega_engine` and the driven side gains
+    /// `slipping_torque * omega_driven`; the difference between those two is
+    /// exactly `slipping_torque * slip_omega`, which is this quantity. It
+    /// leaves as heat and is never negative, so slip can only ever destroy
+    /// kinetic energy relative to the locked case, never create it.
+    pub fn dissipated_power(&self, slip_omega: f64) -> f64 {
+        self.slipping_torque(slip_omega) * slip_omega
+    }
+
+    /// Whether the clutch would stay locked, given the slip speed between the
+    /// two sides and the torque locking them together would need to carry.
+    pub fn state(&self, slip_omega: f64, required_lock_torque: f64) -> ClutchState {
+        if self.capacity() <= 0.0 {
+            ClutchState::Open
+        } else if slip_omega.abs() < 1e-2 && required_lock_torque.abs() <= self.capacity() {
+            ClutchState::Locked
+        } else {
+            ClutchState::Slipping
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +350,59 @@ mod tests {
         let vehicle_ke = 0.5 * road.vehicle_mass * road_speed * road_speed;
         let equivalent_ke = 0.5 * road.reflected_inertia(overall_ratio) * crank_omega * crank_omega;
         approx(vehicle_ke, equivalent_ke, 1e-6);
+    }
+
+    // -- Clutch ---------------------------------------------------------
+
+    #[test]
+    fn open_clutch_transmits_nothing() {
+        let clutch = Clutch {
+            torque_capacity: 400.0,
+            engagement: 0.0,
+        };
+        assert_eq!(clutch.capacity(), 0.0);
+        assert_eq!(clutch.state(50.0, 100.0), ClutchState::Open);
+    }
+
+    #[test]
+    fn matched_speed_within_capacity_locks() {
+        let clutch = Clutch::new(400.0);
+        assert_eq!(clutch.state(0.0, 200.0), ClutchState::Locked);
+    }
+
+    #[test]
+    fn torque_beyond_capacity_slips_even_at_matched_speed() {
+        let clutch = Clutch::new(400.0);
+        assert_eq!(clutch.state(0.0, 500.0), ClutchState::Slipping);
+    }
+
+    #[test]
+    fn speed_difference_slips_regardless_of_torque() {
+        let clutch = Clutch::new(400.0);
+        assert_eq!(clutch.state(50.0, 10.0), ClutchState::Slipping);
+    }
+
+    #[test]
+    fn slip_dissipates_the_torque_difference_and_never_creates_energy() {
+        let clutch = Clutch::new(300.0);
+        for slip_omega in [-200.0, -1.0, 1.0, 50.0, 200.0] {
+            let transmitted = clutch.slipping_torque(slip_omega);
+            // Signed with the slip: drags the driven side toward the engine.
+            assert_eq!(transmitted.signum(), slip_omega.signum());
+            approx(transmitted.abs(), clutch.capacity(), 1e-9);
+
+            let dissipated = clutch.dissipated_power(slip_omega);
+            assert!(
+                dissipated >= 0.0,
+                "slip must dissipate energy, never create it: {dissipated}"
+            );
+            approx(dissipated, transmitted * slip_omega, 1e-9);
+        }
+    }
+
+    #[test]
+    fn zero_slip_dissipates_nothing() {
+        let clutch = Clutch::new(300.0);
+        approx(clutch.dissipated_power(0.0), 0.0, 1e-9);
     }
 }
