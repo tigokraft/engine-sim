@@ -785,6 +785,18 @@ impl EnginePreset {
             note: "Even 180 deg firing under a small fast single: bark, whistle, flutter.",
             model: CylinderModel {
                 geometry: CylinderGeometry::new(0.086, 0.086, 0.1345, 9.6),
+                valves: ValveTrain {
+                    intake: ValveEvent::new(deg(706.0), deg(242.0), 0.0105, 0.0380, 0.67),
+                    exhaust: ValveEvent::new(deg(496.0), deg(238.0), 0.0098, 0.0330, 0.64),
+                }
+                .with_aggressiveness(0.30),
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    deg(342.0),
+                    deg(55.0),
+                    5.0,
+                    2.0,
+                    0.97,
+                )),
                 ..CylinderModel::default()
             },
             firing: FiringOrder::inline_four(),
@@ -803,7 +815,10 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.2, 0.060, 600.0),
                 tailpipe_flanged: false,
                 cutout_fitted: false,
-                turbine: None,
+                turbine: Some(TurbineGeometry {
+                    housing_ar: 0.63,
+                    blade_count: 11,
+                }),
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.24, 0.042, 310.0); 4],

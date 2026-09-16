@@ -22,22 +22,22 @@ bore = 0.086
 stroke = 0.086
 rod_length = 0.1345
 compression_ratio = 9.6
-intake_open_deg = 699.9999999999999
-intake_duration_deg = 239.99999999999997
-intake_lift = 0.01
-intake_diameter = 0.037
-intake_discharge_coeff = 0.65
-exhaust_open_deg = 499.99999999999994
-exhaust_duration_deg = 239.99999999999997
-exhaust_lift = 0.009
-exhaust_diameter = 0.031
-exhaust_discharge_coeff = 0.6
-cam_aggressiveness = 0.0
+intake_open_deg = 706.0
+intake_duration_deg = 242.0
+intake_lift = 0.0105
+intake_diameter = 0.038
+intake_discharge_coeff = 0.67
+exhaust_open_deg = 496.0
+exhaust_duration_deg = 238.0
+exhaust_lift = 0.0098
+exhaust_diameter = 0.033
+exhaust_discharge_coeff = 0.64
+cam_aggressiveness = 0.3
 
 [combustion]
 type = "Spark"
-spark_angle_deg = 340.0
-duration_deg = 59.99999999999999
+spark_angle_deg = 342.0
+duration_deg = 55.0
 efficiency_parameter = 5.0
 form_factor = 2.0
 combustion_efficiency = 0.97
@@ -100,6 +100,10 @@ stages = 1
 length = 1.2
 diameter = 0.06
 temperature = 600.0
+
+[exhaust.turbine]
+housing_ar = 0.63
+blade_count = 11
 
 [intake]
 plenum_volume = 0.0025
