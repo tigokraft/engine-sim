@@ -1721,29 +1721,48 @@ impl Dashboard {
 
         let peak_torque = t.curve.peak_torque();
         let peak_power = t.curve.peak_power();
-        let title = if let Some(ref pull) = t.last_pull {
-            let tq_val = pull.peak_torque.map_or(0.0, |p| p.torque);
-            let pw_val = pull.peak_power.map_or(0.0, |p| p.power_kw * 1.341_022);
-            format!(
-                "DYNO PULL: {:.0} N·m · {:.0} hp (SAE CF: {:.3}) · LIVE: {:.0} N·m / {:.0} hp",
-                tq_val,
-                pw_val,
-                pull.sae_correction,
-                t.torque,
-                t.power_hp()
-            )
-        } else {
-            match (peak_torque, peak_power) {
-                (Some(tq), Some(pw)) => format!(
-                    "DYNO   peak {:.0} N·m @ {:.0}   {:.0} hp @ {:.0}   {} of {} buckets",
-                    tq.torque,
-                    tq.rpm,
-                    pw.power * 1.341_022,
-                    pw.rpm,
-                    t.curve.len(),
-                    crate::ui::telemetry::CURVE_BUCKETS,
-                ),
-                _ => "DYNO   rev or press [P] to sweep pull".to_string(),
+        let title = match t.dyno_mode {
+            DynoMode::SweepPull { start_rpm, .. } if t.rpm < start_rpm => {
+                format!(
+                    "DYNO PULL: spooling to {:.0} rpm · LIVE: {:.0} N·m / {:.0} hp",
+                    start_rpm,
+                    t.torque,
+                    t.power_hp()
+                )
+            }
+            DynoMode::SweepPull { .. } => {
+                format!(
+                    "DYNO PULL: sweeping WOT to redline · LIVE: {:.0} N·m / {:.0} hp",
+                    t.torque,
+                    t.power_hp()
+                )
+            }
+            _ => {
+                if let Some(ref pull) = t.last_pull {
+                    let tq_val = pull.peak_torque.map_or(0.0, |p| p.torque);
+                    let pw_val = pull.peak_power.map_or(0.0, |p| p.power_kw * 1.341_022);
+                    format!(
+                        "DYNO PULL: {:.0} N·m · {:.0} hp (SAE CF: {:.3}) · LIVE: {:.0} N·m / {:.0} hp",
+                        tq_val,
+                        pw_val,
+                        pull.sae_correction,
+                        t.torque,
+                        t.power_hp()
+                    )
+                } else {
+                    match (peak_torque, peak_power) {
+                        (Some(tq), Some(pw)) => format!(
+                            "DYNO   peak {:.0} N·m @ {:.0}   {:.0} hp @ {:.0}   {} of {} buckets",
+                            tq.torque,
+                            tq.rpm,
+                            pw.power * 1.341_022,
+                            pw.rpm,
+                            t.curve.len(),
+                            crate::ui::telemetry::CURVE_BUCKETS,
+                        ),
+                        _ => "DYNO   rev or press [P] to sweep pull".to_string(),
+                    }
+                }
             }
         };
 
