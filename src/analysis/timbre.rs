@@ -1004,7 +1004,11 @@ mod tests {
         //    primaries work in falls as they lengthen, every step of the way.
         let centroid = |factor: f64| -> f64 {
             let preset = stretched(factor);
-            let script = script::calibration_sweep(&preset);
+            let script = script::RenderScript::new(
+                "t5_primary_length",
+                "a steady hold, isolating primary length from everything a full sweep also moves",
+                vec![script::Segment::hold(3.0, 4_000.0, 1.0)],
+            );
             let render = RenderPlan::new(&preset, &script).render();
             let mono = render.mono();
             let mut stft = Stft::new(8_192, render.sample_rate);
