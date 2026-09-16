@@ -237,6 +237,25 @@ impl CompressorMap {
     }
 }
 
+/// Discharge temperature from the isentropic compression relation.
+///
+/// ```text
+/// T_out = T_in (1 + (PR^((gamma-1)/gamma) - 1) / eta)
+/// ```
+///
+/// A lower efficiency turns more of the compression work into heat rather
+/// than pressure rise, so it gives a hotter charge at the same pressure
+/// ratio — a map without efficiency gives free power.
+pub fn discharge_temperature(
+    inlet_temperature: f64,
+    pressure_ratio: f64,
+    efficiency: f64,
+    gamma: f64,
+) -> f64 {
+    let exponent = (gamma - 1.0) / gamma;
+    inlet_temperature * (1.0 + (pressure_ratio.powf(exponent) - 1.0) / efficiency)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +347,23 @@ mod tests {
         ]);
         assert_eq!(narrow.evaluate(75_000.0, 0.012).region, MapRegion::Surge);
         assert_eq!(wide.evaluate(75_000.0, 0.012).region, MapRegion::Operating);
+    }
+
+    fn approx(a: f64, b: f64, tol: f64) {
+        assert!((a - b).abs() <= tol, "expected {b}, got {a} (tol {tol})");
+    }
+
+    #[test]
+    fn discharge_temperature_follows_isentropic_relation() {
+        let t_out = discharge_temperature(300.0, 2.0, 0.7, 1.4);
+        let expected = 300.0 * (1.0 + (2.0_f64.powf(1.0 / 3.5) - 1.0) / 0.7);
+        approx(t_out, expected, 1e-9);
+    }
+
+    #[test]
+    fn lower_efficiency_gives_a_hotter_charge_at_the_same_pressure_ratio() {
+        let efficient = discharge_temperature(300.0, 2.2, 0.78, 1.4);
+        let inefficient = discharge_temperature(300.0, 2.2, 0.55, 1.4);
+        assert!(inefficient > efficient);
     }
 }
