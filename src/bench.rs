@@ -30,7 +30,7 @@ use crate::audio::{
     SnapshotSource, SynthConfig, WastegateVoicing,
 };
 use crate::environment::Environment;
-use crate::physics::control::{LimiterCut, LimiterMode, Starter};
+use crate::physics::control::{IdleGovernor, IdleHunt, LimiterCut, LimiterMode, Starter};
 use crate::physics::cylinder::{default_float_rpm, deg, CylinderGeometry};
 use crate::physics::engine_block::{EngineBlock, FiringOrder};
 use crate::physics::plumbing::{
@@ -67,6 +67,24 @@ pub const COLD_IDLE_RISE: f64 = 0.60;
 /// displacement, so a 6.5 litre V12 brakes harder than a 2.0 litre four without
 /// anything being tuned per engine.
 pub const CLOSED_THROTTLE_PMEP: f64 = 0.55e5;
+
+/// Pedal opening the idle bypass is worth, at full bypass travel [-].
+///
+/// The bypass is a hole beside the plate, so the free-revving flywheel — which
+/// bills its drag against how far the pedal is down — has to be told how much
+/// pedal that hole is equivalent to. A third of a percent of bore area against
+/// a plate that swings to a hundred is not a third of a percent of pedal,
+/// because the plate's first few degrees uncover almost nothing; measured on
+/// the air it passes, full bypass travel is worth about three tenths of pedal,
+/// which is what the governor's clamp always was.
+pub const IDLE_BYPASS_PEDAL_AUTHORITY: f64 = 0.30;
+
+/// Pedal travel under which the engine counts as idling [-].
+///
+/// A real throttle's first percent or two is plate clearance rather than
+/// pedal, and an idle is what the engine does when the driver is asking for
+/// nothing. Above this the driver is driving and the governor is a passenger.
+pub const IDLE_PEDAL_THRESHOLD: f64 = 0.02;
 
 // ---------------------------------------------------------------------------
 // Catalogue
@@ -172,6 +190,19 @@ impl EnginePreset {
         let mut mechanical = self.mechanical;
         if mechanical.float_rpm.is_none() {
             mechanical.float_rpm = Some(self.float_rpm as f32);
+        }
+        // Valvetrain noise is the valve landing, and what a valve lands with
+        // is the velocity the closing flank gave it. That is exactly
+        // [`ValveEvent::ramp_rate`], so the seating impulse scales with it and
+        // nothing else has to be said per engine: a solid roller is loud
+        // because of its lobe, not because a preset says it is. A stock cam
+        // rates 1 and leaves every level exactly where it was.
+        let valves = &block.model.valves;
+        if let Some(spec) = mechanical.intake_valve.as_mut() {
+            spec.level *= valves.intake.ramp_rate() as f32;
+        }
+        if let Some(spec) = mechanical.exhaust_valve.as_mut() {
+            spec.level *= valves.exhaust.ramp_rate() as f32;
         }
         let mut config = SynthConfig::from_block(block, sample_rate)
             .with_induction(self.induction)
@@ -1568,6 +1599,10 @@ pub struct Driveline {
     pub throttle_target: f64,
     /// Whether the driver is holding the ignition cut.
     pub manual_cut: bool,
+    /// Holds the idle speed by opening a bypass past the throttle plate.
+    pub idle_governor: IdleGovernor,
+    /// Period and depth of the idle limit cycle, when there is one.
+    pub idle_hunt: IdleHunt,
     /// Speed at which the limiter cuts [rev/min].
     pub redline: f64,
     /// Speed the governor holds once the engine is warm [rev/min].
@@ -1642,6 +1677,8 @@ impl Driveline {
             throttle: 0.0,
             throttle_target: 0.0,
             manual_cut: false,
+            idle_governor: IdleGovernor::default(),
+            idle_hunt: IdleHunt::default(),
             redline: preset.redline,
             idle: preset.idle,
             cold_idle_rise: COLD_IDLE_RISE,
@@ -1797,26 +1834,48 @@ impl Driveline {
                 let slew = 1.0 - (-dt / 0.12).exp();
                 self.throttle += (self.throttle_target - self.throttle) * slew;
 
-                // Idle governor: enough throttle to hold the idle speed, and no more.
-                // This is what stops the engine stalling the moment the pedal comes up.
-                // The speed it holds is the engine's own, and a cold one is held faster.
+                // Idle governor: enough air to hold the idle speed, and no
+                // more. This is what stops the engine stalling the moment the
+                // pedal comes up. The speed it holds is the engine's own, and
+                // a cold one is held faster. It commands the bypass, which is
+                // a hole in the manifold rather than a number multiplying a
+                // torque, so what it does reaches the cylinder as charge —
+                // which is the only reason the loop through reversion and
+                // burn completeness closes at all. See [`IdleGovernor`].
                 let target = self.idle_target(block);
-                let governor = ((target + 60.0 - self.rpm) / 500.0).clamp(0.0, 0.30);
-                let effective = self.throttle.max(governor);
+                let bypass = self.idle_governor.update(target, self.rpm, dt);
+                block.idle_bypass = bypass;
+                // Only meaningful while the governor is the thing holding the
+                // speed. A driver on the pedal swings the engine far harder
+                // than any lope, and calling that a limit cycle would be a
+                // measurement of the driver.
+                if self.throttle < IDLE_PEDAL_THRESHOLD {
+                    self.idle_hunt.observe(self.rpm, dt);
+                } else {
+                    self.idle_hunt.reset();
+                }
+                let effective = self.throttle.max(bypass * IDLE_BYPASS_PEDAL_AUTHORITY);
 
                 match self.gearbox.overall_ratio() {
                     None => {
-                        // Neutral: no drive path, so this is exactly today's
-                        // free-revving flywheel against its own drag curve —
-                        // the special case [`Gearbox::overall_ratio`] promises.
-                        // The block solves torque for a speed, not for a
-                        // throttle, so the pedal is applied here. See the
-                        // module docs.
+                        // Neutral: no drive path, so this is the free-revving
+                        // flywheel against its own drag curve — the special
+                        // case [`Gearbox::overall_ratio`] promises. The pedal
+                        // swings the plate, exactly as it does in gear, and
+                        // the torque the block reports is therefore already
+                        // throttled; see the note in
+                        // [`Driveline::update_in_gear`] on why scaling it a
+                        // second time would derate it twice. Until this stage
+                        // it *was* scaled a second time, because in neutral
+                        // the block never saw the pedal at all — and an engine
+                        // whose cylinder never sees a shut throttle has no
+                        // manifold vacuum, no reversion and no idle to lope.
+                        block.throttle = self.throttle;
                         self.torque = block.mean_brake_torque(self.rpm);
                         let drive = if self.is_cutting(block) {
                             0.0
                         } else {
-                            self.torque * (0.05 + 0.95 * effective)
+                            self.torque
                         };
 
                         // Accessories, then bearing drag, then windage, then the throttle
@@ -2191,6 +2250,59 @@ mod tests {
     }
 
     #[test]
+    fn an_aggressive_ramp_raises_the_valvetrain_impulse_at_the_same_duration() {
+        // The audible half of the profile parameter. Same cam card — same
+        // duration, same lift, same timing — and a faster flank, so the valve
+        // arrives at its seat harder and the seating impulse the mechanical
+        // rig plays is louder for it. A stock cam must be left exactly alone,
+        // because every recorded fingerprint has one.
+        let preset = EnginePreset::cross_plane_v8();
+        let stock_block = preset.block(Environment::default());
+        let stock = preset.synth_config(&stock_block, 48_000.0);
+
+        let mut roller_preset = preset.clone();
+        roller_preset.model.valves = preset.model.valves.with_aggressiveness(1.0);
+        assert_eq!(
+            roller_preset.model.valves.intake.duration, preset.model.valves.intake.duration,
+            "re-grinding the flanks must not change the duration"
+        );
+        let roller_block = roller_preset.block(Environment::default());
+        let roller = roller_preset.synth_config(&roller_block, 48_000.0);
+
+        for (name, before, after) in [
+            (
+                "intake",
+                stock.mechanical.intake_valve,
+                roller.mechanical.intake_valve,
+            ),
+            (
+                "exhaust",
+                stock.mechanical.exhaust_valve,
+                roller.mechanical.exhaust_valve,
+            ),
+        ] {
+            let before = before.expect("the V8 has valve voices").level;
+            let after = after.expect("the V8 has valve voices").level;
+            assert!(
+                after > before * 3.0,
+                "{name} valve impulse should follow the flank: {before:.3} to {after:.3}"
+            );
+        }
+
+        // And the stock cam is untouched, to the bit.
+        let reference = preset.mechanical.intake_valve.expect("V8 has valve voices");
+        assert_eq!(
+            stock
+                .mechanical
+                .intake_valve
+                .expect("V8 has valve voices")
+                .level,
+            reference.level,
+            "a raised-cosine cam must leave the mechanical levels exactly as they were"
+        );
+    }
+
+    #[test]
     fn a_tighter_lobe_separation_buys_overlap() {
         // The reason the vocabulary is worth having: overlap is not a free
         // parameter, it is what is left over when the two lobes are ground
@@ -2208,6 +2320,58 @@ mod tests {
         assert_eq!(
             tighter.intake.duration, train.intake.duration,
             "re-timing a cam must not re-grind it"
+        );
+    }
+
+    #[test]
+    fn overlap_raises_reversion_and_reversion_costs_burn_completeness() {
+        // The first two links of the lope loop, measured rather than asserted:
+        // a wider overlap traps more of last cycle's exhaust, and a charge
+        // with more of last cycle's exhaust in it burns less of its fuel.
+        // Same engine, same speed, same throttle — only the cam is re-ground,
+        // and it is re-ground with the vocabulary this stage added.
+        let dt = 1.0 / 480.0;
+        let residual_at = |extra_duration: f64| -> (f64, f64) {
+            let mut preset = EnginePreset::cross_plane_v8();
+            let stock = preset.model.valves;
+            let mut wider = stock;
+            wider.intake.duration += extra_duration;
+            wider.exhaust.duration += extra_duration;
+            // Re-timed onto the stock separation and advance, so the extra
+            // duration lands as overlap and nothing else moves.
+            preset.model.valves = wider.with_cam_timing(stock.lobe_separation(), stock.advance());
+            let mut block = preset.block(Environment::default());
+            // A shut plate: an idle, which is the only place a manifold is far
+            // enough below the exhaust for overlap to push gas the wrong way.
+            block.throttle = 0.0;
+            for _ in 0..(8.0 / dt) as usize {
+                block.update(dt, 900.0);
+            }
+            let residual = block.master.latch.dilution;
+            let wiebe = block
+                .model
+                .combustion
+                .spark()
+                .expect("the cross-plane V8 has spark plugs")
+                .diluted(residual);
+            (residual, 1.0 - (-wiebe.efficiency_parameter).exp())
+        };
+
+        let (stock_residual, stock_completeness) = residual_at(0.0);
+        let (lopey_residual, lopey_completeness) = residual_at(deg(60.0));
+        assert!(
+            lopey_residual > stock_residual * 1.15,
+            "sixty degrees more overlap must trap meaningfully more residual: \
+             {stock_residual:.4} to {lopey_residual:.4}"
+        );
+        assert!(
+            lopey_completeness < stock_completeness,
+            "more residual must cost burn completeness: {stock_completeness:.5} \
+             to {lopey_completeness:.5}"
+        );
+        assert!(
+            stock_residual > 0.0,
+            "a real engine always traps some residual"
         );
     }
 
@@ -2251,17 +2415,31 @@ mod tests {
             driveline.throttle_target = 1.0;
             let dt = 1.0 / 240.0;
 
-            for _ in 0..(240 * 25) {
+            // A single cylinder's torque impulse is a large fraction of what
+            // the flywheel sees each firing event, so the free-revving ceiling
+            // is not a fixed point, it is a shallow limit cycle the flywheel
+            // settles into — and a single instantaneous sample can land on
+            // either side of that cycle for a while after the throttle first
+            // snaps open. 60 seconds and a 5-second trailing average is enough
+            // margin for the slowest of these (a single, with its
+            // proportionally huge flywheel) to have settled into its own
+            // cycle and be measured across it rather than at one phase of it.
+            let mut tail = std::collections::VecDeque::with_capacity(240 * 5);
+            for _ in 0..(240 * 60) {
                 driveline.update(&mut block, dt);
                 block.update(dt, driveline.rpm);
+                if tail.len() == tail.capacity() {
+                    tail.pop_front();
+                }
+                tail.push_back(driveline.rpm);
             }
-            let margin = driveline.rpm - preset.redline;
+            let settled_rpm = tail.iter().sum::<f64>() / tail.len() as f64;
+            let margin = settled_rpm - preset.redline;
             assert!(
                 margin > 150.0,
-                "{} tops out at {:.0} rpm, only {margin:.0} over its {:.0} rpm \
-                 limiter — too little to bounce off it",
+                "{} tops out at {settled_rpm:.0} rpm, only {margin:.0} over its \
+                 {:.0} rpm limiter — too little to bounce off it",
                 preset.name,
-                driveline.rpm,
                 preset.redline,
             );
         }
@@ -2270,11 +2448,19 @@ mod tests {
     #[test]
     fn neutral_reproduces_the_free_revving_flywheel_to_integration_error() {
         // Gearbox, road load and clutch exist now, but a gear has to be
-        // selected to reach any of them. In neutral, `update_in_gear` is
-        // never called, and the flywheel formula below is a literal copy of
-        // what `Driveline::update`'s `FreeRev` arm always did — so this
-        // proves the refactor left every existing fingerprint and dyno pull,
-        // all of which were recorded in neutral, comparable.
+        // selected to reach any of them. In neutral, `update_in_gear` is never
+        // called, and the flywheel formula below is a literal copy of what
+        // `Driveline::update`'s `FreeRev` arm does — so this proves free
+        // revving is still the plain flywheel against its own drag curve and
+        // has not quietly acquired a driveline.
+        //
+        // Two things moved under it since Stage M1 and both are read off the
+        // driveline rather than recomputed here, because neither is what this
+        // test is about: the governor, which is a PI controller on an air
+        // bypass now rather than a proportional term on the pedal, and the
+        // pedal itself, which swings the block's throttle plate instead of
+        // multiplying its torque afterwards. See the comment in the `None`
+        // arm.
         let preset = EnginePreset::cross_plane_v8();
         let mut block = preset.block(Environment::default());
         let mut driveline = Driveline::new(&preset);
@@ -2282,22 +2468,25 @@ mod tests {
         driveline.throttle_target = 0.6;
         let dt = 1.0 / 240.0;
 
-        // An independent reference flywheel, stepped by the pre-Stage-M1
-        // formula and nothing else — no gearbox, no road load, no clutch.
+        // An independent reference flywheel, stepped by the same formula and
+        // nothing else — no gearbox, no road load, no clutch.
         let mut reference_rpm = driveline.rpm;
         let mut reference_throttle = driveline.throttle;
 
         for _ in 0..(240 * 8) {
-            driveline.update(&mut block, dt);
             let reference_block = block.clone();
+            // The bypass the governor is about to command, taken before the
+            // step so the reference sees what the driveline saw.
+            let mut reference_governor = driveline.idle_governor;
+            let target = driveline.idle_target(&reference_block);
+            let bypass = reference_governor.update(target, reference_rpm, dt);
+
+            driveline.update(&mut block, dt);
             block.update(dt, driveline.rpm);
 
-            // Reference step, against the same block state Driveline saw.
             let slew = 1.0 - (-dt / 0.12_f64).exp();
             reference_throttle += (driveline.throttle_target - reference_throttle) * slew;
-            let target = driveline.idle_target(&reference_block);
-            let governor = ((target + 60.0 - reference_rpm) / 500.0).clamp(0.0, 0.30);
-            let effective = reference_throttle.max(governor);
+            let effective = reference_throttle.max(bypass * IDLE_BYPASS_PEDAL_AUTHORITY);
 
             let torque = reference_block.mean_brake_torque(reference_rpm);
             let drive = if driveline.manual_cut
@@ -2307,7 +2496,7 @@ mod tests {
             {
                 0.0
             } else {
-                torque * (0.05 + 0.95 * effective)
+                torque
             };
             let (a, b, c) = driveline.load;
             let omega = reference_rpm * PI / 30.0;
@@ -2318,7 +2507,7 @@ mod tests {
 
             assert!(
                 (driveline.rpm - reference_rpm).abs() < 1e-9,
-                "neutral drifted from the pre-M1 formula: {} vs reference {}",
+                "neutral drifted from the free-revving flywheel: {} vs reference {}",
                 driveline.rpm,
                 reference_rpm
             );
@@ -2431,8 +2620,9 @@ mod tests {
                 }
             }
 
-            let (released, release_rpm) = released_at
-                .unwrap_or_else(|| panic!("{} never caught: {:.0} rpm", preset.name, driveline.rpm));
+            let (released, release_rpm) = released_at.unwrap_or_else(|| {
+                panic!("{} never caught: {:.0} rpm", preset.name, driveline.rpm)
+            });
             assert!(
                 released > 0.0 && released < 5.0,
                 "{} took {released:.1} s to catch",
@@ -2628,6 +2818,18 @@ mod tests {
         // the schedule asked for, and nothing goes out unlit.
         let mut block = preset.block(Environment::default());
         let mut driveline = Driveline::new(&preset);
+        // A block constructed this instant has an unprimed ring: the first
+        // torque figures it reports are not yet real combustion data, and the
+        // flywheel can flare well past idle chasing them before the governor
+        // and the ring both settle — for this engine, briefly past the DFCO
+        // threshold, which is a real ECU behaviour and not a bug, but it is
+        // not the "warm idle" this half of the test means to measure. Let it
+        // settle first, the same way every other idle measurement in this
+        // file does.
+        for _ in 0..(480 * 2) {
+            driveline.update(&mut block, dt);
+            block.update(dt, driveline.rpm);
+        }
         let mut source = SnapshotSource::new(&block);
         let mut warm_unburnt = 0.0f32;
         for _ in 0..(480 * 3) {
@@ -2806,6 +3008,114 @@ mod tests {
             driveline.rpm < preset.idle + 400.0,
             "never came back down to idle: {:.0} rpm",
             driveline.rpm
+        );
+    }
+
+    #[test]
+    fn a_big_overlap_cam_fails_to_settle_at_idle() {
+        // The stage's claim, and it is a claim about a *limit cycle*, not
+        // about roughness. Same engine, same idle target, same governor with
+        // the same gains — a governor is calibrated on the engine it ships
+        // with and is not retuned for a cam it was never given. Only the
+        // lobes are re-ground, and they are re-ground with the vocabulary
+        // this stage added: eighty degrees more duration a side at the stock
+        // lobe separation, which lands as overlap and nothing else.
+        let dt = 1.0 / 480.0;
+        let idle = |extra_duration: f64, seconds: f64| -> (Vec<f64>, IdleHunt, f64) {
+            let mut preset = EnginePreset::cross_plane_v8();
+            let stock = preset.model.valves;
+            let mut wider = stock;
+            wider.intake.duration += extra_duration;
+            wider.exhaust.duration += extra_duration;
+            preset.model.valves = wider.with_cam_timing(stock.lobe_separation(), stock.advance());
+            let mut block = preset.block(Environment::default());
+            let mut driveline = Driveline::new(&preset);
+            // Long enough for the governor to find the engine before anything
+            // is measured; a start-up transient is not a limit cycle.
+            let settle = (15.0 / dt) as usize;
+            let mut rpms = Vec::with_capacity((seconds / dt) as usize);
+            for i in 0..(settle + (seconds / dt) as usize) {
+                driveline.update(&mut block, dt);
+                block.update(dt, driveline.rpm);
+                if i >= settle {
+                    rpms.push(driveline.rpm);
+                }
+            }
+            assert_eq!(
+                driveline.throttle_target, 0.0,
+                "the test drove the throttle instead of letting the governor do it"
+            );
+            let overlap = preset.model.valves.overlap().to_degrees();
+            (rpms, driveline.idle_hunt, overlap)
+        };
+
+        let swing = |rpms: &[f64]| -> f64 {
+            let hi = rpms.iter().cloned().fold(f64::MIN, f64::max);
+            let lo = rpms.iter().cloned().fold(f64::MAX, f64::min);
+            hi - lo
+        };
+        let mean = |rpms: &[f64]| rpms.iter().sum::<f64>() / rpms.len() as f64;
+
+        let (stock_rpms, stock_hunt, stock_overlap) = idle(0.0, 40.0);
+        let (lopey_rpms, lopey_hunt, lopey_overlap) = idle(deg(80.0), 40.0);
+        assert!(
+            lopey_overlap > stock_overlap + 70.0,
+            "the re-ground cam must actually have the overlap: {stock_overlap:.0} to \
+             {lopey_overlap:.0} deg"
+        );
+
+        // The stock cam settles: the governor finds the speed and holds it.
+        assert_eq!(
+            stock_hunt.period, 0.0,
+            "a stock cam must settle, not hunt: {:.2} s at {:.0} rpm peak to peak",
+            stock_hunt.period, stock_hunt.amplitude
+        );
+        assert!(
+            swing(&stock_rpms) < 15.0,
+            "a settled idle must hold its speed: {:.1} rpm peak to peak",
+            swing(&stock_rpms)
+        );
+
+        // The big cam does not. Same target, same gains, and it hunts instead.
+        assert!(
+            lopey_hunt.period > 0.0,
+            "a big overlap cam must enter a limit cycle at the same idle target"
+        );
+        assert!(
+            swing(&lopey_rpms) > 4.0 * swing(&stock_rpms),
+            "the lope must be a different thing from the stock idle's ripple, not a \
+             louder one: {:.1} rpm against {:.1}",
+            swing(&lopey_rpms),
+            swing(&stock_rpms)
+        );
+
+        // And it is a lope rather than roughness: the period is far below the
+        // firing frequency, which is what a listener hears as a rate at all.
+        let firing_hz =
+            mean(&lopey_rpms) / 120.0 * EnginePreset::cross_plane_v8().firing.len() as f64;
+        assert!(
+            lopey_hunt.hunt_hz() < firing_hz / 20.0,
+            "the limit cycle must be well under the firing frequency: {:.2} Hz against \
+             {firing_hz:.0} Hz firing",
+            lopey_hunt.hunt_hz()
+        );
+
+        // Stable across the render: the second half of the trace swings as
+        // much as the first. A transient decays; a limit cycle does not.
+        let half = lopey_rpms.len() / 2;
+        let (first, second) = (swing(&lopey_rpms[..half]), swing(&lopey_rpms[half..]));
+        assert!(
+            second > 0.5 * first,
+            "the limit cycle must not be a decaying transient: {first:.1} rpm in the \
+             first half against {second:.1} in the second"
+        );
+
+        // It is still an idle, not a stall and not a flare.
+        assert!(
+            mean(&lopey_rpms) > STALL_RPM
+                && mean(&lopey_rpms) < 2.0 * EnginePreset::cross_plane_v8().idle,
+            "a lopey engine still idles: {:.0} rpm",
+            mean(&lopey_rpms)
         );
     }
 

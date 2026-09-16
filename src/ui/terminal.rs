@@ -915,6 +915,18 @@ impl Dashboard {
             ),
             vital("BSFC", format!("{:>5.0} g/kWh", t.bsfc_g_kwh), INK),
             vital(
+                "Idle Lope",
+                if t.idle_hunt_period_s > 0.0 {
+                    format!(
+                        "{:>4.2} s {:>3.0} rpm",
+                        t.idle_hunt_period_s, t.idle_hunt_rpm
+                    )
+                } else {
+                    "      settled".to_string()
+                },
+                if t.idle_hunt_rpm > 40.0 { HOT } else { LIVE },
+            ),
+            vital(
                 "Knock Integral",
                 format!("{:>7.3}", t.knock_integral),
                 if t.knock_integral > 0.8 { HOT } else { INK },

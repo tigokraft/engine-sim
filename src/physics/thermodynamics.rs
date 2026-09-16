@@ -56,6 +56,40 @@ const MASS_FLOOR: f64 = 1e-9;
 // Combustion: Wiebe heat release
 // ---------------------------------------------------------------------------
 
+/// Residual mass fraction at which a spark flame will not propagate [-].
+///
+/// Trapped exhaust gas dilutes the fresh charge without contributing to the
+/// burn, and a homogeneous-charge spark flame gives up somewhere around a
+/// third of the trapped mass being inert. Production engines schedule external
+/// EGR to stay under roughly 0.25 for exactly this reason; a big-overlap cam
+/// at idle, with no plenum pressure to stop the exhaust coming back through
+/// the overlap, walks straight up to it. See [`WiebeProfile::diluted`].
+pub const DILUTION_LIMIT: f64 = 0.35;
+
+/// Normalised flame speed floor at and past [`DILUTION_LIMIT`] [-].
+///
+/// A flame speed of exactly zero is a burn of infinite duration and zero
+/// completeness, which is a divide by zero rather than a misfire. This is what
+/// a misfire is instead: a burn twenty times too slow that consumes five per
+/// cent of the charge, which leaves the cycle with no useful work and a
+/// cylinder full of fuel — the correct outcome, and a finite one.
+pub const MISFIRE_FLAME_SPEED: f64 = 0.05;
+
+/// Ramp fraction at which a lobe is exactly a raised cosine [-].
+///
+/// Half the event on each flank leaves no dwell between them, which is the
+/// single raised cosine [`ValveEvent::lift`] was before it had flanks. It is
+/// the default and the gentle end of the range: a stock hydraulic cam.
+pub const RAISED_COSINE_RAMP: f64 = 0.5;
+
+/// Steepest flank a valvetrain survives, as a fraction of the event [-].
+///
+/// A seventh of the duration on each flank is a little over three times the
+/// raised cosine's peak velocity, which is about where a solid roller on a
+/// serious spring sits. Past it the lifter leaves the lobe on the nose rather
+/// than at the float speed and the cam is a component, not a profile.
+pub const FASTEST_RAMP: f64 = 0.15;
+
 /// Single-zone Wiebe burn profile.
 ///
 /// ```text
@@ -136,6 +170,50 @@ impl WiebeProfile {
         }
         let tau = phase / self.duration;
         1.0 - (-self.efficiency_parameter * tau.powf(self.form_factor + 1.0)).exp()
+    }
+
+    /// The profile a charge diluted by `residual_fraction` of burned gas
+    /// actually burns to.
+    ///
+    /// Residual exhaust gas trapped with the fresh charge is inert: it absorbs
+    /// heat without releasing any, so it drops the flame temperature and with
+    /// it the laminar flame speed. Taking that fall as linear in residual
+    /// fraction, towards zero at [`DILUTION_LIMIT`], gives a single normalised
+    /// flame speed `f` that both of the Wiebe's shape parameters hang off:
+    ///
+    /// ```text
+    /// f          = 1 - x_res / DILUTION_LIMIT
+    /// dtheta_eff = dtheta / sqrt(f)     a slower flame takes longer
+    /// a_eff      = a * f                and quenches before it finishes
+    /// ```
+    ///
+    /// The two exponents are different because the two effects are. What sets
+    /// the *duration* is the turbulent burning velocity, and Damkoehler's
+    /// scaling makes that go as `sqrt(S_L u')` — the turbulence the piston
+    /// stirred up does not care what is in the charge, so halving the laminar
+    /// flame speed lengthens the burn by only the square root of two. What
+    /// sets the *completeness* is the laminar flame alone, in the crevices and
+    /// the cold boundary layer where turbulence has died away and only `S_L`
+    /// decides whether the flame gets there before it is quenched.
+    ///
+    /// The second line is the one this stage exists for. `a` is by definition
+    /// how much of the charge is consumed by the end of the burn — `x_b(1) =
+    /// 1 - exp(-a)` — so lowering it is *partial burn*, not merely slow burn:
+    /// the cycle ends with `exp(-a_eff)` of its fuel never lit, and that fuel
+    /// leaves through the exhaust valve. It is the same quantity the backfire
+    /// voice keys off, which is why an engine lopey enough to partial-burn
+    /// crackles at idle without anything being told to make it crackle.
+    ///
+    /// Exactly the identity at zero residual, so a cylinder that scavenged
+    /// cleanly burns precisely as it did before this existed.
+    pub fn diluted(&self, residual_fraction: f64) -> Self {
+        let saturation = (residual_fraction.max(0.0) / DILUTION_LIMIT).min(1.0);
+        let flame_speed = (1.0 - saturation * saturation).clamp(MISFIRE_FLAME_SPEED, 1.0);
+        Self {
+            duration: (self.duration / flame_speed.sqrt()).min(CYCLE_ANGLE),
+            efficiency_parameter: self.efficiency_parameter * flame_speed,
+            ..*self
+        }
     }
 
     /// Burn rate with respect to crank angle [1/rad].
@@ -553,7 +631,12 @@ impl HeatRelease {
     /// a fallback.
     pub fn dburned_dtheta(&self, theta: f64, latch: &CycleLatch) -> f64 {
         match self {
-            Self::Spark(wiebe) => wiebe.dburned_dtheta(theta),
+            // A spark flame has to cross a chamber, so what is in the way of
+            // it matters; a diesel's heat release is rate-limited by
+            // injection and mixing instead, and it is unthrottled, so it
+            // never sees the residual fraction a throttled idle does. Only
+            // the spark engine is diluted here, and that is why.
+            Self::Spark(wiebe) => wiebe.diluted(latch.dilution).dburned_dtheta(theta),
             Self::Compression(diesel) => match &latch.autoignition {
                 Some(ignition) => diesel.dburned_dtheta(theta, ignition),
                 None => 0.0,
@@ -564,7 +647,7 @@ impl HeatRelease {
     /// True while heat release is actively happening.
     pub fn is_burning(&self, theta: f64, latch: &CycleLatch) -> bool {
         match self {
-            Self::Spark(wiebe) => wiebe.is_burning(theta),
+            Self::Spark(wiebe) => wiebe.diluted(latch.dilution).is_burning(theta),
             Self::Compression(diesel) => match &latch.autoignition {
                 Some(ignition) => diesel.is_burning(theta, ignition),
                 None => false,
@@ -729,6 +812,17 @@ pub struct ValveEvent {
     pub diameter: f64,
     /// Discharge coefficient at the reference area [-].
     pub discharge_coefficient: f64,
+    /// Fraction of the open period spent on each flank [-].
+    ///
+    /// How aggressive the lobe is, expressed as the only thing about a cam
+    /// that can be aggressive: how much of the event it spends getting the
+    /// valve off and back onto its seat, as against holding it open. A half
+    /// is [`RAISED_COSINE_RAMP`] — the two flanks meet at the peak and the
+    /// lift curve is exactly the raised cosine this was before there was a
+    /// parameter. Smaller is a solid roller: the same duration and the same
+    /// lift, reached faster, held longer, and landed harder. See
+    /// [`ValveEvent::lift`] and [`ValveEvent::ramp_rate`].
+    pub ramp_fraction: f64,
 }
 
 impl ValveEvent {
@@ -746,7 +840,36 @@ impl ValveEvent {
             max_lift: max_lift.max(0.0),
             diameter: diameter.max(1e-4),
             discharge_coefficient: discharge_coefficient.clamp(0.0, 1.0),
+            ramp_fraction: RAISED_COSINE_RAMP,
         }
+    }
+
+    /// Re-grinds the flanks, keeping the duration, the lift and the timing.
+    ///
+    /// Clamped at the fast end by what a valvetrain can survive: a flank
+    /// steeper than [`FASTEST_RAMP`] is an acceleration no spring holds a
+    /// lifter against, and at the slow end by the raised cosine, which is the
+    /// gentlest profile that still gets the valve open at all.
+    pub fn with_ramp_fraction(mut self, ramp_fraction: f64) -> Self {
+        self.ramp_fraction = ramp_fraction.clamp(FASTEST_RAMP, RAISED_COSINE_RAMP);
+        self
+    }
+
+    /// Peak opening velocity against a raised cosine of the same duration and
+    /// lift [-].
+    ///
+    /// ```text
+    /// dL/du|max = pi L / (2 r)     so the ratio to r = 1/2 is 1 / (2 r)
+    /// ```
+    ///
+    /// One for a stock hydraulic profile and up over three for a solid roller,
+    /// which is why the two sound so different for the same duration on paper:
+    /// the valve arrives at its seat with that much more velocity, and the
+    /// seat is what you hear, and it is what
+    /// [`EnginePreset::synth_config`](crate::bench::EnginePreset::synth_config)
+    /// scales the valve voices with.
+    pub fn ramp_rate(&self) -> f64 {
+        RAISED_COSINE_RAMP / self.ramp_fraction.clamp(FASTEST_RAMP, RAISED_COSINE_RAMP)
     }
 
     /// Fraction of the event elapsed at a crank angle; `None` while shut.
@@ -760,15 +883,42 @@ impl ValveEvent {
 
     /// Valve lift [m].
     ///
-    /// A raised cosine: lift *and* lift velocity both vanish at the seat, so the
-    /// flow area the integrator sees is C1-continuous. A trapezoidal or purely
-    /// linear ramp puts a kink in `dm/dt` that costs RK4 its fourth order right
-    /// where the flow is fastest.
+    /// Two raised-cosine flanks with a dwell between them. Lift *and* lift
+    /// velocity both vanish at the seat whatever the ramp fraction is, so the
+    /// flow area the integrator sees stays C1-continuous: a trapezoidal or
+    /// purely linear ramp puts a kink in `dm/dt` that costs RK4 its fourth
+    /// order right where the flow is fastest, and that is as true of an
+    /// aggressive cam as of a gentle one. What the ramp fraction changes is
+    /// how much of the event each flank gets:
+    ///
+    /// ```text
+    /// L(u) = L_max/2 * (1 - cos(pi u / r))          u < r
+    ///      = L_max                                  r <= u <= 1 - r
+    ///      = L_max/2 * (1 - cos(pi (1-u) / r))      u > 1 - r
+    /// ```
+    ///
+    /// At `r = 1/2` the dwell has no width and the two flanks are one raised
+    /// cosine over the whole event — arithmetically identical to what this was
+    /// before the parameter existed, not merely close to it. Below that the
+    /// valve gets off its seat faster and stays up longer, which is more area
+    /// under the curve for the same duration, and that is what a fast cam buys.
     pub fn lift(&self, theta: f64) -> f64 {
-        match self.progress(theta) {
-            Some(u) => 0.5 * self.max_lift * (1.0 - (2.0 * PI * u).cos()),
-            None => 0.0,
-        }
+        let Some(u) = self.progress(theta) else {
+            return 0.0;
+        };
+        let r = self.ramp_fraction.clamp(FASTEST_RAMP, RAISED_COSINE_RAMP);
+        // Formed as `(PI / r) * u` rather than `PI * (u / r)` so that the
+        // default half ramp divides exactly by two and lands on the same
+        // `2 PI u` the single raised cosine used, to the last bit.
+        let ramp_angle = PI / r;
+        let flank = if u < r {
+            u
+        } else if u > 1.0 - r {
+            1.0 - u
+        } else {
+            return self.max_lift;
+        };
+        0.5 * self.max_lift * (1.0 - (ramp_angle * flank).cos())
     }
 
     /// Effective flow area `C_d * A_ref` [m^2].
@@ -888,6 +1038,30 @@ impl ValveTrain {
     /// opposite directions and hoping.
     pub fn overlap(&self) -> f64 {
         (self.intake.duration + self.exhaust.duration) / 2.0 - 2.0 * self.lobe_separation()
+    }
+
+    /// Re-grinds both lobes' flanks without touching their timing or lift.
+    ///
+    /// `0` is a stock hydraulic cam — the raised cosine, exactly — and `1` is
+    /// the fastest flank a valvetrain survives. Everything between is a real
+    /// cam: the duration on the card does not change, the lift does not
+    /// change, and what does change is how much of that duration the valve
+    /// spends actually open. Two cams with the same numbers on the card and
+    /// different flanks are two different engines to listen to, which is the
+    /// whole reason this is a parameter.
+    pub fn with_aggressiveness(mut self, aggressiveness: f64) -> Self {
+        let a = aggressiveness.clamp(0.0, 1.0);
+        let ramp = RAISED_COSINE_RAMP + (FASTEST_RAMP - RAISED_COSINE_RAMP) * a;
+        self.intake = self.intake.with_ramp_fraction(ramp);
+        self.exhaust = self.exhaust.with_ramp_fraction(ramp);
+        self
+    }
+
+    /// How aggressive the flanks are, as [`ValveTrain::with_aggressiveness`]
+    /// would have been asked for [-].
+    pub fn aggressiveness(&self) -> f64 {
+        let ramp = 0.5 * (self.intake.ramp_fraction + self.exhaust.ramp_fraction);
+        ((RAISED_COSINE_RAMP - ramp) / (RAISED_COSINE_RAMP - FASTEST_RAMP)).clamp(0.0, 1.0)
     }
 
     /// Re-times both lobes onto a lobe separation and an advance [rad].
@@ -1066,6 +1240,15 @@ fn port_flux(effective_area: f64, port: &PortState, cylinder: &CylinderGas) -> P
 pub struct CycleLatch {
     /// Trapped fuel mass for this cycle [kg].
     pub fuel_mass: f64,
+    /// Residual mass fraction of the trapped charge [-].
+    ///
+    /// What fraction of what the cylinder sealed at IVC is burned gas rather
+    /// than fresh mixture — the exhaust it failed to scavenge, plus whatever
+    /// came back up the port during overlap. Latched with the rest of the
+    /// cycle references because it is a property of the trapped charge and
+    /// must not move between RK4 stages, and read by
+    /// [`WiebeProfile::diluted`], which is where it costs the burn.
+    pub dilution: f64,
     /// Cylinder pressure at IVC [Pa].
     pub pressure: f64,
     /// Cylinder temperature at IVC [K].
@@ -1087,6 +1270,7 @@ impl CycleLatch {
     pub fn ambient(geometry: &CylinderGeometry, gas: &GasProperties, env: &Environment) -> Self {
         Self {
             fuel_mass: 0.0,
+            dilution: 0.0,
             pressure: env.pressure,
             temperature: env.temperature,
             volume: geometry.max_volume(),
@@ -1440,6 +1624,7 @@ impl CylinderModel {
             } else {
                 self.trapped_fuel_mass(cylinder.mass, cylinder.burned_fraction)
             },
+            dilution: cylinder.burned_fraction.clamp(0.0, 1.0),
             pressure: cylinder.pressure(&self.geometry, &self.gas),
             temperature: cylinder.temperature,
             volume: self.geometry.safe_volume(cylinder.theta),
@@ -1903,6 +2088,159 @@ mod tests {
     }
 
     #[test]
+    fn an_undiluted_charge_burns_exactly_as_it_did_before_dilution_existed() {
+        // The neutrality half of the dilution model. A cylinder that scavenged
+        // perfectly has nothing inert in it, so nothing about its burn may
+        // move — not by a tolerance, exactly.
+        let wiebe = WiebeProfile::default();
+        assert_eq!(wiebe.diluted(0.0), wiebe);
+        assert_eq!(
+            wiebe.diluted(-1.0),
+            wiebe,
+            "a negative residual is no residual"
+        );
+    }
+
+    #[test]
+    fn a_diluted_charge_burns_slower_and_less_completely() {
+        // Both halves of the claim, against the analytic Wiebe rather than
+        // against a rendered anything. `x_b` at the end of the nominal burn is
+        // `1 - exp(-a)` by construction, so the completeness is readable
+        // straight off the efficiency parameter.
+        let wiebe = WiebeProfile::default();
+        let clean = 1.0 - (-wiebe.efficiency_parameter).exp();
+
+        let mut previous_completeness = clean;
+        let mut previous_duration = wiebe.duration;
+        for residual in [0.05, 0.10, 0.20, 0.30] {
+            let diluted = wiebe.diluted(residual);
+            let completeness = 1.0 - (-diluted.efficiency_parameter).exp();
+            assert!(
+                completeness < previous_completeness,
+                "burn completeness must fall with residual: {completeness:.4} at \
+                 {residual} is not under {previous_completeness:.4}"
+            );
+            assert!(
+                diluted.duration > previous_duration,
+                "burn duration must rise with residual: {:.1} deg at {residual} is \
+                 not over {:.1} deg",
+                diluted.duration.to_degrees(),
+                previous_duration.to_degrees()
+            );
+            previous_completeness = completeness;
+            previous_duration = diluted.duration;
+        }
+
+        // At the dilution limit the flame is a misfire rather than a divide by
+        // zero: a finite, very long burn that consumes almost nothing.
+        let dead = wiebe.diluted(DILUTION_LIMIT);
+        assert!(dead.duration.is_finite() && dead.duration > 4.0 * wiebe.duration);
+        let dead_completeness = 1.0 - (-dead.efficiency_parameter).exp();
+        assert!(
+            dead_completeness < 0.3,
+            "a charge past the dilution limit must barely light: {dead_completeness:.3}"
+        );
+
+        // And the fuel that does not burn is what leaves through the port.
+        // A tenth residual is a percent or two of the charge's fuel going out
+        // unburnt, which is the quantity the backfire voice reads.
+        let lopey = wiebe.diluted(0.10);
+        let unburnt = (-lopey.efficiency_parameter).exp();
+        assert!(
+            (0.005..0.10).contains(&unburnt),
+            "a tenth residual should leave a few per cent of the fuel unburnt, got {unburnt:.4}"
+        );
+    }
+
+    #[test]
+    fn a_stock_ramp_reproduces_the_raised_cosine_it_replaced() {
+        // The neutrality proof for the profile parameter. Every preset in the
+        // catalogue ships the default ramp, so the lift curve they were
+        // measured on has to come back out of the new two-flank form
+        // unchanged, or the catalogue has been quietly re-cammed.
+        //
+        // The opening flank is exact: at a half ramp the flank angle is
+        // `PI / 0.5 * u`, and dividing by a half is exact, so it is the same
+        // `2 PI u` the single raised cosine used. The closing flank reflects
+        // about the peak and asks for the cosine of `2 PI (1 - u)` instead,
+        // which is the same angle to the mathematics and a different one to
+        // the last bit of an f64 — hence a tolerance of a few ulp rather than
+        // an equality, on the closing half only.
+        let v = ValveEvent::new(deg(700.0), deg(240.0), 0.010, 0.037, 0.65);
+        assert_eq!(v.ramp_fraction, RAISED_COSINE_RAMP);
+        for step in 0..=240 {
+            let theta = deg(700.0) + deg(step as f64);
+            // The pre-change formula, phase arithmetic and all.
+            let phase = wrap_cycle(theta - v.open_angle);
+            let u = phase / v.duration;
+            let raised_cosine = if u >= 1.0 {
+                0.0
+            } else {
+                0.5 * 0.010 * (1.0 - (2.0 * PI * u).cos())
+            };
+            let lift = v.lift(theta);
+            if u <= 0.5 {
+                assert_eq!(
+                    lift, raised_cosine,
+                    "lift moved at {step} deg into the event"
+                );
+            } else {
+                assert!(
+                    (lift - raised_cosine).abs() <= 8.0 * f64::EPSILON * 0.010,
+                    "lift moved at {step} deg into the event: {lift:e} against {raised_cosine:e}"
+                );
+            }
+        }
+        approx(v.ramp_rate(), 1.0, 0.0);
+    }
+
+    #[test]
+    fn an_aggressive_ramp_opens_faster_and_flows_more_for_the_same_duration() {
+        let stock = ValveTrain::default();
+        let roller = stock.with_aggressiveness(1.0);
+
+        // Same card: same timing, same duration, same lift.
+        assert_eq!(roller.intake.open_angle, stock.intake.open_angle);
+        assert_eq!(roller.intake.duration, stock.intake.duration);
+        assert_eq!(roller.intake.max_lift, stock.intake.max_lift);
+        assert_eq!(roller.overlap(), stock.overlap());
+
+        // Different lobe: it comes off the seat over three times as fast.
+        let ratio = roller.intake.ramp_rate() / stock.intake.ramp_rate();
+        assert!(
+            (3.0..3.6).contains(&ratio),
+            "the fastest flank should be a bit over three times the raised \
+             cosine\'s peak velocity, got {ratio:.2}"
+        );
+
+        // And it is up sooner, so there is more area under the curve. Sampled
+        // rather than integrated analytically because the flow the solver sees
+        // is the effective area, curtain cap and all.
+        let area = |v: &ValveEvent| -> f64 {
+            (0..2_400)
+                .map(|i| v.effective_area(v.open_angle + v.duration * i as f64 / 2_400.0))
+                .sum::<f64>()
+        };
+        assert!(
+            area(&roller.intake) > area(&stock.intake) * 1.10,
+            "a faster flank must flow measurably more over the same duration: \
+             {:.6} against {:.6}",
+            area(&roller.intake),
+            area(&stock.intake)
+        );
+
+        // Peak lift is still the peak, not something the dwell exceeded.
+        let peak = roller
+            .intake
+            .lift(roller.intake.open_angle + roller.intake.duration / 2.0);
+        approx(peak, stock.intake.max_lift, 1e-15);
+
+        // Round trip through the parameter it was asked for.
+        approx(roller.aggressiveness(), 1.0, 1e-12);
+        approx(stock.aggressiveness(), 0.0, 1e-12);
+    }
+
+    #[test]
     fn flow_function_chokes_at_the_critical_pressure_ratio() {
         let g = 1.4;
         let critical = (2.0f64 / (g + 1.0)).powf(g / (g - 1.0));
@@ -2019,6 +2357,7 @@ mod tests {
             env.pressure * model.geometry.max_volume() / (model.gas.r_unburned * env.temperature);
         st.latch = CycleLatch {
             fuel_mass: model.trapped_fuel_mass(st.cylinder.mass, 0.0),
+            dilution: 0.0,
             pressure: env.pressure,
             temperature: env.temperature,
             volume: model.geometry.max_volume(),
@@ -2190,6 +2529,7 @@ mod tests {
     fn trapped(geometry: &CylinderGeometry, pressure: f64, temperature: f64) -> CycleLatch {
         CycleLatch {
             fuel_mass: 1.0e-5,
+            dilution: 0.0,
             pressure,
             temperature,
             volume: geometry.max_volume(),
@@ -2375,6 +2715,7 @@ mod tests {
             st.cylinder.temperature = 380.0;
             st.latch = CycleLatch {
                 fuel_mass: model.trapped_fuel_mass(st.cylinder.mass, 0.0),
+                dilution: 0.0,
                 pressure: st.cylinder.pressure(&model.geometry, &model.gas),
                 temperature: st.cylinder.temperature,
                 volume: model.geometry.max_volume(),
@@ -2528,6 +2869,7 @@ mod tests {
                 st.latch = CycleLatch {
                     fuel_mass: model
                         .trapped_fuel_mass(st.cylinder.mass, st.cylinder.burned_fraction),
+                    dilution: st.cylinder.burned_fraction,
                     pressure: st.cylinder.pressure(&model.geometry, &model.gas),
                     temperature: st.cylinder.temperature,
                     volume: model.geometry.safe_volume(st.cylinder.theta),

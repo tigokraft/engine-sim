@@ -60,6 +60,24 @@ pub const CYCLE_TABLE: usize = 128;
 /// infinity and take the gas properties with it.
 pub const MAX_TRACKED_AFR: f64 = 60.0;
 
+/// Air path left round a shut throttle plate, as a fraction of the intake
+/// valves' reference area [-].
+///
+/// Plate clearance and nothing else. It used to be nearly seven times this,
+/// because it was standing in for the idle bypass as well; the bypass is now
+/// its own term with its own actuator, so this is back to being the leak it is
+/// named after. On its own it will not idle an engine, which is correct: shut
+/// the bypass on a warm engine with your foot off the pedal and it stalls.
+pub const PLATE_LEAK_FRACTION: f64 = 0.003;
+
+/// Air the idle bypass can pass at full travel, on the same scale [-].
+///
+/// Sized so an engine idles with the bypass only part way open, which is what
+/// gives the governor authority in both directions: it can starve the engine
+/// towards a stall as well as feed it. A governor that can only add air
+/// cannot overshoot, and an idle that cannot overshoot cannot lope.
+pub const IDLE_BYPASS_AUTHORITY: f64 = 0.050;
+
 // ---------------------------------------------------------------------------
 // Phase ring buffer
 // ---------------------------------------------------------------------------
@@ -1232,6 +1250,17 @@ pub struct EngineBlock {
     pub thermal: EngineThermal,
     /// Driver throttle demand, `0..=1` [-].
     pub throttle: f64,
+    /// Idle air bypass position, from shut to the governor's full travel [-].
+    ///
+    /// A second, small hole past the throttle plate, and the only air an
+    /// idling engine gets that the driver is not asking for. It is the idle
+    /// governor's actuator: see
+    /// [`IdleGovernor`](crate::physics::control::IdleGovernor), which owns the
+    /// controller, its lag and its authority limit, and
+    /// [`EngineBlock::intake_makeup_flow`], which is where the position
+    /// becomes area. Zero is a shut bypass, which is a stall on any engine
+    /// whose plate is shut as well.
+    pub idle_bypass: f64,
     /// Engine control unit: fuelling, timing, knock retard, limiters, and cylinder health.
     pub ecu: EngineControlUnit,
 }
@@ -1307,6 +1336,7 @@ impl EngineBlock {
             block_mass: 180.0,
             thermal,
             throttle: 1.0,
+            idle_bypass: 0.0,
             ecu,
         }
     }
@@ -1756,9 +1786,17 @@ impl EngineBlock {
         let density = self.environment.air_density();
         let valve_area =
             PI * self.model.valves.intake.diameter.powi(2) / 4.0 * self.firing.len() as f64 * 0.5;
-        // A shut plate is never quite sealed: idle bypass and plate
-        // clearance leave a small leak, the way a real one does.
-        let throttle_fraction = (0.02 + 0.98 * self.throttle.clamp(0.0, 1.0)).min(1.0);
+        // Three paths in parallel, and they add because they are three holes
+        // in the same wall: the plate the pedal swings, the clearance left
+        // round a plate that is shut, and the idle bypass drilled past it.
+        // The second and third used to be one fixed number, which is why the
+        // governor had nothing to open — see [`IDLE_BYPASS_AUTHORITY`].
+        let plate = self.throttle.clamp(0.0, 1.0);
+        let bypass = PLATE_LEAK_FRACTION + IDLE_BYPASS_AUTHORITY * self.idle_bypass.clamp(0.0, 1.0);
+        // Capped at the bore, which is the hard limit whatever is open behind
+        // it — and which is why a wide-open plate is bit-for-bit the
+        // unrestricted case every recorded fingerprint was measured against.
+        let throttle_fraction = (plate + bypass).min(1.0);
         let area = valve_area * throttle_fraction;
         let bernoulli = area * 0.8 * (2.0 * deficit * density).sqrt();
         // Never past ambient: a throttle cannot supercharge the engine.

@@ -132,6 +132,14 @@ pub struct CylinderConfig {
     /// from redline via [`default_float_rpm`].
     #[serde(default)]
     pub float_rpm: Option<f64>,
+    /// How aggressively the cam lobes ramp, `0` a stock hydraulic profile and
+    /// `1` the fastest flank a valvetrain survives [-].
+    ///
+    /// Absent is `0`, the raised cosine every existing engine file was written
+    /// against, so none of them has to name one. See
+    /// [`ValveTrain::with_aggressiveness`].
+    #[serde(default)]
+    pub cam_aggressiveness: f64,
 }
 
 fn default_intake_discharge() -> f64 {
@@ -449,6 +457,7 @@ impl EngineConfig {
             exhaust_lift: valves.exhaust.max_lift,
             exhaust_diameter: valves.exhaust.diameter,
             exhaust_discharge_coeff: valves.exhaust.discharge_coefficient,
+            cam_aggressiveness: valves.aggressiveness(),
             // Only named when it differs meaningfully from what `bore` alone
             // would give, so round-tripping a preset that never set one does
             // not clutter its file with a value that was always implicit. A
@@ -764,7 +773,8 @@ impl EngineConfig {
                 self.cylinder.exhaust_diameter,
                 self.cylinder.exhaust_discharge_coeff,
             ),
-        };
+        }
+        .with_aggressiveness(self.cylinder.cam_aggressiveness);
 
         let (combustion, fuel_lhv, air_fuel_ratio) = match &self.combustion {
             CombustionConfig::Spark {

@@ -238,6 +238,96 @@ impl Default for Starter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Idle governor
+// ---------------------------------------------------------------------------
+
+/// Proportional gain on speed error [bypass travel per rev/min].
+///
+/// A hundred rpm low opens four thousandths of the bypass' travel, which
+/// sounds like nothing until you notice how steep the other side of the loop
+/// is: near idle a percent more bypass area is worth several hundred rpm, so
+/// this is already most of the gain the loop can carry. Tuned on the stock cam
+/// — a governor is calibrated on the engine it ships with — and deliberately
+/// not retuned for the big one, because what the big one then does is the
+/// point.
+pub const IDLE_GOVERNOR_PROPORTIONAL: f64 = 4.0e-5;
+
+/// Integral gain on speed error [bypass travel per rev/min per second].
+///
+/// Three times the proportional gain, which is a reset time of a third of a
+/// second — the usual figure for a production idle loop. It is what removes
+/// the droop a purely proportional governor has to live with, so the engine
+/// idles at the speed it is asked for rather than a little under it. It is
+/// also what lets the loop wind *past* that speed, which is the half of this
+/// that matters here: an integrator plus a lag is the whole recipe for
+/// overshoot, and overshoot is the whole recipe for a lope.
+pub const IDLE_GOVERNOR_INTEGRAL: f64 = 1.2e-4;
+
+/// Time constant of the bypass actuator and the air path behind it [s].
+///
+/// A stepper valve takes a tenth of a second to move, the manifold behind it
+/// takes another to fill, and the cylinder that fills from it does not make
+/// torque until it has finished a compression and an expansion stroke. All
+/// three are the same lag as far as the loop is concerned and this is their
+/// sum. **It is not a smoothing filter and must not be tuned like one**: it
+/// is the phase lag that decides whether the governor settles or hunts, and
+/// removing it removes the lope.
+pub const IDLE_ACTUATOR_LAG: f64 = 0.18;
+
+/// A PI idle governor on an air bypass, with an actuator that lags.
+///
+/// The thing a lopey idle was missing. The speed an engine idles at is the
+/// speed at which the air the governor is letting past the throttle plate
+/// makes exactly the torque the engine's own drag is taking away, and a
+/// governor holds that point by measuring the error and moving a valve. Both
+/// of those take time: the valve has mass, the manifold behind it has volume,
+/// and the cylinder that fills from it is two strokes away from making the
+/// torque that answers. Feed a controller with integral action through that
+/// much phase lag into a torque curve steep enough and it does not settle —
+/// it overshoots, is corrected, and overshoots the other way, for ever. That
+/// is a lope, and it is why an engine with a cam too big for its idle hunts
+/// while a stock one does not.
+///
+/// It is deliberately allowed to fail to converge. Clamping the error, or
+/// slugging the actuator until it cannot overshoot, would make every engine
+/// idle like a stock one, which is the bug this replaced.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IdleGovernor {
+    /// Proportional gain [bypass travel per rev/min].
+    pub proportional: f64,
+    /// Integral gain [bypass travel per rev/min per second].
+    pub integral: f64,
+    /// Actuator and air-path time constant [s].
+    pub actuator_lag: f64,
+    /// Most bypass travel the governor is allowed to command [-].
+    ///
+    /// A real idle valve runs out of travel, and an engine that needs more air
+    /// than it has travel for does not idle. That is a correct outcome and the
+    /// clamp is how it happens.
+    pub authority: f64,
+    /// Accumulated speed error [rev/min s].
+    pub error_integral: f64,
+    /// Where the controller is asking the valve to be [-].
+    pub command: f64,
+    /// Where the valve actually is, one lag behind the command [-].
+    pub position: f64,
+}
+
+impl Default for IdleGovernor {
+    fn default() -> Self {
+        Self {
+            proportional: IDLE_GOVERNOR_PROPORTIONAL,
+            integral: IDLE_GOVERNOR_INTEGRAL,
+            actuator_lag: IDLE_ACTUATOR_LAG,
+            authority: 1.0,
+            error_integral: 0.0,
+            command: 0.0,
+            position: 0.0,
+        }
+    }
+}
+
 impl Starter {
     /// The motor this engine would be fitted with.
     ///
@@ -316,6 +406,180 @@ impl Starter {
             return 0.0;
         }
         self.whine_order * rpm.max(0.0) / 60.0
+    }
+}
+
+impl IdleGovernor {
+    /// Advances the controller and its actuator one frame, returning the
+    /// bypass position the engine will actually breathe through [-].
+    ///
+    /// The integrator is held whenever the command is against its own stop, so
+    /// an engine being driven well over its idle by the pedal does not spend
+    /// that time winding the integral down into a hole it has to climb back
+    /// out of before it can catch the engine on the way down.
+    pub fn update(&mut self, target_rpm: f64, rpm: f64, dt: f64) -> f64 {
+        if !(dt.is_finite() && dt > 0.0) {
+            return self.position;
+        }
+        let error = target_rpm - rpm;
+        let proposed = self.error_integral + error * dt;
+        let unclamped = self.proportional * error + self.integral * proposed;
+        // Conditional integration: only accumulate if doing so would not drive
+        // the command further past a limit it has already reached.
+        if (unclamped > 0.0 || proposed > self.error_integral)
+            && (unclamped < self.authority || proposed < self.error_integral)
+        {
+            self.error_integral = proposed;
+        }
+        self.command = (self.proportional * error + self.integral * self.error_integral)
+            .clamp(0.0, self.authority);
+
+        // First-order lag towards the command. Exponential rather than a fixed
+        // step so the lag is a time and not a frame count.
+        let alpha = 1.0 - (-dt / self.actuator_lag.max(1e-4)).exp();
+        self.position += (self.command - self.position) * alpha;
+        self.position
+    }
+
+    /// Resets the controller to a shut valve and no history.
+    pub fn reset(&mut self) {
+        self.error_integral = 0.0;
+        self.command = 0.0;
+        self.position = 0.0;
+    }
+}
+
+/// Time constant of the mean the hunt is measured against [s].
+///
+/// Slower than any lope worth the name and faster than a warm-up, so the mean
+/// follows the idle the engine is settling towards without following the
+/// swing about it.
+pub const IDLE_HUNT_MEAN_TAU: f64 = 4.0;
+
+/// Longest gap between crossings still counted as a hunt [s].
+///
+/// Past this the engine is not oscillating, it is drifting, and reporting a
+/// six second "period" would be worse than reporting none.
+pub const IDLE_HUNT_TIMEOUT: f64 = 6.0;
+
+/// Smallest speed swing counted as a hunt rather than as combustion roughness
+/// [rev/min].
+///
+/// Every engine's speed ripples at firing rate; a lope is something a listener
+/// hears as a *rate*, and under a few rev either side of the mean there is no
+/// rate to hear.
+pub const IDLE_HUNT_FLOOR_RPM: f64 = 3.0;
+
+/// Fraction of the last swing a crossing has to clear to count [-].
+///
+/// The trigger is a Schmitt, not a comparator. Speed crosses its own mean
+/// several times per cycle on the firing ripple alone, and timing between
+/// those gives the ripple's period rather than the lope's — which is how a
+/// hundred-rev hunt comes back reported as a seven-rev one.
+pub const IDLE_HUNT_HYSTERESIS: f64 = 0.25;
+
+/// Measures the period and depth of an idle that will not settle.
+///
+/// A lope is a limit cycle, so it has a period, and a period is a number — the
+/// point of this is that the chop can be measured rather than argued about.
+/// Engine speed is compared against its own slow mean through a Schmitt
+/// trigger, and the time from one rise through the upper threshold to the next
+/// is the period; the extremes between them are the depth.
+///
+/// Both come back zero on an engine that has converged, which is the honest
+/// answer for one: there is no period, not a very long one.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct IdleHunt {
+    /// Slow mean of engine speed, the line the swing is measured about [rev/min].
+    pub mean: f64,
+    /// Time since the speed last rose through the upper threshold [s].
+    seconds_since_crossing: f64,
+    /// Whether the trigger is currently latched high.
+    latched_high: bool,
+    /// Extremes seen since that crossing [rev/min].
+    peak: f64,
+    trough: f64,
+    /// Whether a first crossing has happened, so an interval can be timed.
+    started: bool,
+    /// Period of the limit cycle, or `0` when the idle has settled [s].
+    pub period: f64,
+    /// Peak-to-peak speed swing over that period [rev/min].
+    pub amplitude: f64,
+}
+
+impl IdleHunt {
+    /// Feeds one frame of engine speed to the detector.
+    pub fn observe(&mut self, rpm: f64, dt: f64) {
+        if !(dt.is_finite() && dt > 0.0 && rpm.is_finite()) {
+            return;
+        }
+        if self.mean <= 0.0 {
+            self.mean = rpm;
+            self.peak = rpm;
+            self.trough = rpm;
+            return;
+        }
+        self.mean += (rpm - self.mean) * (1.0 - (-dt / IDLE_HUNT_MEAN_TAU).exp());
+        self.peak = self.peak.max(rpm);
+        self.trough = self.trough.min(rpm);
+        self.seconds_since_crossing += dt;
+
+        // Sized from the swing already measured, so the trigger widens with
+        // the lope it is following and stays narrow on an engine that is only
+        // rippling.
+        let band = (IDLE_HUNT_HYSTERESIS * self.amplitude).max(IDLE_HUNT_FLOOR_RPM);
+        if self.latched_high {
+            if rpm < self.mean - band {
+                self.latched_high = false;
+            }
+        } else if rpm > self.mean + band {
+            self.latched_high = true;
+            if self.started {
+                // One-pole over successive cycles: a limit cycle in a system
+                // this nonlinear is periodic on average rather than exactly,
+                // and a figure that jumps every cycle is not a measurement.
+                let blend = 0.35;
+                self.period += (self.seconds_since_crossing - self.period) * blend;
+                self.amplitude += (self.peak - self.trough - self.amplitude) * blend;
+            } else {
+                self.period = self.seconds_since_crossing;
+                self.amplitude = self.peak - self.trough;
+                self.started = true;
+            }
+            self.seconds_since_crossing = 0.0;
+            self.peak = rpm;
+            self.trough = rpm;
+        }
+
+        // Checked outside the trigger, not inside its idle arm: a latch that
+        // is stuck high because the band grew wider than the swing still has
+        // to time out, and that is exactly the state an engine lands in when
+        // it stops hunting.
+        if self.seconds_since_crossing > IDLE_HUNT_TIMEOUT {
+            // Nothing has crossed in long enough that whatever it is, it is
+            // not a limit cycle.
+            self.period = 0.0;
+            self.amplitude = 0.0;
+            self.started = false;
+            self.latched_high = false;
+            self.seconds_since_crossing = 0.0;
+            self.peak = rpm;
+            self.trough = rpm;
+        }
+    }
+
+    /// Forgets everything, for a driveline leaving idle.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Rate of the limit cycle, or `0` when the idle has settled [Hz].
+    pub fn hunt_hz(&self) -> f64 {
+        if self.period > 0.0 {
+            1.0 / self.period
+        } else {
+            0.0
+        }
     }
 }
 
@@ -1139,6 +1403,7 @@ mod tests {
             st.cylinder.temperature = 330.0;
             st.latch = CycleLatch {
                 fuel_mass: model.trapped_fuel_mass(st.cylinder.mass, 0.0),
+                dilution: 0.0,
                 pressure: st.cylinder.pressure(&model.geometry, &model.gas),
                 temperature: st.cylinder.temperature,
                 volume: model.geometry.max_volume(),
@@ -1466,7 +1731,10 @@ mod tests {
         let ecu = EngineControlUnit::default();
         let warm = ecu.cold_enriched_afr(14.7, 0.0);
         let cold = ecu.cold_enriched_afr(14.7, 1.0);
-        assert!(cold < warm, "a cold engine was not enriched: {cold} against {warm}");
+        assert!(
+            cold < warm,
+            "a cold engine was not enriched: {cold} against {warm}"
+        );
         assert!(
             cold > 8.0,
             "enriched past anything that would burn at all: {cold}"

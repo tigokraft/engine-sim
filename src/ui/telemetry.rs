@@ -359,6 +359,14 @@ pub struct Telemetry {
     pub vehicle_speed_mps: f64,
     /// What the clutch did last frame.
     pub clutch_state: ClutchState,
+    /// Period of the idle limit cycle, or `0` when the idle has settled [s].
+    ///
+    /// The chop, as a number. A big-overlap cam sends the idle governor into a
+    /// limit cycle it cannot damp, and what a listener calls a lope is this
+    /// period. See [`IdleHunt`](crate::physics::control::IdleHunt).
+    pub idle_hunt_period_s: f64,
+    /// Peak-to-peak speed swing over that period [rev/min].
+    pub idle_hunt_rpm: f64,
 
     // --- Combustion diagnostics & efficiency ------------------------------
     /// Location of peak cylinder pressure [deg ATDC].
@@ -452,6 +460,8 @@ impl Default for Telemetry {
             lpp_deg_atdc: 0.0,
             volumetric_efficiency: 0.0,
             load_fraction: 0.0,
+            idle_hunt_period_s: 0.0,
+            idle_hunt_rpm: 0.0,
             bsfc_g_kwh: 0.0,
             coolant_k: 293.15,
             oil_k: 293.15,
