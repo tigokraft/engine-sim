@@ -154,4 +154,37 @@ mod tests {
             overlaps.map(f64::to_degrees)
         );
     }
+
+    /// Peak `dA/dtheta` across a valve event's opening flank, by finite
+    /// difference on [`ValveEvent::effective_area`] itself rather than on the
+    /// closed-form [`ValveEvent::ramp_rate`] ratio — measured, not asserted.
+    fn peak_opening_slope(event: &ValveEvent) -> f64 {
+        let step = 1e-5;
+        let flank = event.ramp_fraction * event.duration;
+        let samples = 500;
+        (0..=samples)
+            .map(|i| {
+                let theta = event.open_angle + flank * (i as f64 / samples as f64);
+                let a1 = event.effective_area(theta - step);
+                let a2 = event.effective_area(theta + step);
+                ((a2 - a1) / (2.0 * step)).abs()
+            })
+            .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn peripheral_port_opens_faster_than_side_port() {
+        // The stage's headline claim: how fast the port uncovers, measured
+        // as the steepest instantaneous flow-area slope either port's
+        // intake event reaches on its way to full open. Measured at ~2.0x;
+        // the assertion leaves margin rather than pinning the exact figure.
+        let side = peak_opening_slope(&side_port().intake);
+        let peripheral = peak_opening_slope(&peripheral_port().intake);
+        let ratio = peripheral / side;
+        assert!(
+            ratio > 1.5,
+            "a peripheral port must uncover area far faster than a side port: \
+             {ratio:.2}x ({peripheral:.5} against {side:.5} m^2/rad)"
+        );
+    }
 }
