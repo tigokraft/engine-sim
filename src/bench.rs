@@ -310,6 +310,18 @@ impl EnginePreset {
             note: "Even 180 deg firing on one bank: a hard, plain four-cylinder bark.",
             model: CylinderModel {
                 geometry: CylinderGeometry::new(0.086, 0.086, 0.1345, 11.5),
+                valves: ValveTrain {
+                    intake: ValveEvent::new(deg(696.0), deg(248.0), 0.0110, 0.0390, 0.67),
+                    exhaust: ValveEvent::new(deg(500.0), deg(244.0), 0.0100, 0.0330, 0.64),
+                }
+                .with_aggressiveness(0.35),
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    deg(338.0),
+                    deg(54.0),
+                    5.0,
+                    2.0,
+                    0.97,
+                )),
                 ..CylinderModel::default()
             },
             firing: FiringOrder::inline_four(),
@@ -331,9 +343,9 @@ impl EnginePreset {
                 turbine: None,
             },
             intake: IntakeSystem {
-                runners: vec![PipeSection::from_diameter(0.28, 0.042, 310.0); 4],
-                plenum_volume: 2.2e-3,
-                throttle: ThrottleLayout::Single { bore: 0.060 },
+                runners: vec![PipeSection::from_diameter(0.26, 0.044, 310.0); 4],
+                plenum_volume: 2.5e-3,
+                throttle: ThrottleLayout::Single { bore: 0.064 },
                 airbox: Some(PipeSection::from_diameter(0.15, 0.070, 300.0)),
                 snorkel: Some(PipeSection::from_diameter(0.30, 0.065, 300.0)),
                 trumpet_flanged: true,
