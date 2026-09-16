@@ -6,7 +6,7 @@ note = "One firing every two turns: the crank itself is the rhythm."
 mass = 45.0
 bore_spacing = 0.125
 inertia = 0.1
-redline = 7600.0
+redline = 6700.0
 idle = 1250.0
 load = [
     1.0,

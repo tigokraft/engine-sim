@@ -67,15 +67,18 @@ fn port_lobe_separation() -> f64 {
 /// legal — a housing port has no spring and no lifter to survive, so it is
 /// not held to the valvetrain limit [`ValveEvent::with_ramp_fraction`] is.
 ///
-/// Lift, diameter and discharge coefficient are the two-rotor preset's
-/// original values, held fixed across every profile on purpose: peak area is
-/// not the claim here, opening rate and overlap are, and changing area too
-/// would confound the comparison the way moving the lobe separation would.
-fn port_train(duration: f64, ramp_fraction: f64) -> ValveTrain {
+/// Lift and discharge coefficient are the two-rotor preset's original
+/// values, held fixed across every profile: what a port's cross-section
+/// looks like along its short axis is not the claim here. Diameter is not
+/// held fixed — see [`peripheral_port`]'s doc comment for why TB3 put it
+/// back in play — but every profile still shares one lobe separation, so
+/// none of the four differ in when they are centred, which would confound
+/// the comparison the way moving [`port_lobe_separation`] would.
+fn port_train(duration: f64, ramp_fraction: f64, diameter_scale: f64) -> ValveTrain {
     ValveTrain {
-        intake: ValveEvent::new(0.0, duration, 0.014, 0.048, 0.70)
+        intake: ValveEvent::new(0.0, duration, 0.014, 0.048 * diameter_scale, 0.70)
             .with_port_ramp_fraction(ramp_fraction),
-        exhaust: ValveEvent::new(0.0, duration, 0.013, 0.042, 0.68)
+        exhaust: ValveEvent::new(0.0, duration, 0.013, 0.042 * diameter_scale, 0.68)
             .with_port_ramp_fraction(ramp_fraction),
     }
     .with_cam_timing(port_lobe_separation(), 0.0)
@@ -92,7 +95,7 @@ fn port_train(duration: f64, ramp_fraction: f64) -> ValveTrain {
 /// [`peripheral_port`] for why the other three profiles stop well short of
 /// [`PERIPHERAL_PORT_RAMP`](crate::physics::thermodynamics::PERIPHERAL_PORT_RAMP)'s nominal floor.
 pub fn side_port() -> ValveTrain {
-    port_train(deg(230.0), RAISED_COSINE_RAMP)
+    port_train(deg(230.0), RAISED_COSINE_RAMP, 1.0)
 }
 
 /// Bridge port: a larger side port with a bridge of material still holding
@@ -100,34 +103,47 @@ pub fn side_port() -> ValveTrain {
 /// edge than a side port — the beginning of the lope, and unable to hold the
 /// governor's idle target at all.
 pub fn bridge_port() -> ValveTrain {
-    port_train(deg(240.0), 0.35)
+    port_train(deg(240.0), 0.32, 1.0)
 }
 
 /// Half (J-) bridge port: between a bridge and a peripheral port in both
 /// duration and opening rate.
 pub fn half_bridge_port() -> ValveTrain {
-    port_train(deg(250.0), 0.28)
+    port_train(deg(250.0), 0.24, 1.0)
 }
 
 /// Peripheral port: uncovered by the apex seal sweeping past a hole in the
 /// rotor housing rather than by the rotor's own face, which is why it opens
-/// far faster than any of the other three profiles.
+/// far faster, and far larger, than any of the other three profiles.
 ///
-/// [`PERIPHERAL_PORT_RAMP`](crate::physics::thermodynamics::PERIPHERAL_PORT_RAMP) (0.025) is the floor
-/// [`ValveEvent::with_port_ramp_fraction`] allows a port to reach, and it is
-/// not what this profile uses: measurement showed this preset's reversion
-/// model cannot sustain combustion at *any* throttle, WOT included, once
-/// duration and ramp are both pushed to their individual extremes at once —
-/// the two axes interact multiplicatively on reversion mass, not
-/// additively. `0.22` is the steepest edge, at this duration, this
-/// particular preset's block mass, inertia and load actually run on; going
-/// further made the free-rev test fail outright rather than produce a
-/// peripheral port that merely idles badly. That the four-way comparison
-/// still lands cleanly — this profile alone fails to hold the idle governor
-/// while running clean to redline — is Stage M5's actual headline result,
-/// and it came from rendering the block, not from asserting a number.
+/// Re-measured for `TURBO_PLAN.md`'s TB3, which replaced the intake plenum
+/// with a real compressible orifice that chokes and a real accounting of
+/// reversion mass, instead of discarding every reverted kilogram the way the
+/// model this was first calibrated against did. Against that older, blinder
+/// plenum, opening rate and duration alone were enough to fail the idle
+/// governor while still clearing redline; against the real one they are not —
+/// a governor with this preset's authority rides out any amount of overlap
+/// this housing's own duration and ramp range can produce, because reverted
+/// mass is capped by how little curtain area a port this size opens in a
+/// crank degree, whatever the opening rate is.
+///
+/// Area is the third axis this profile now differs on, not held fixed the
+/// way it once was: a peripheral port's whole reason to exist is that it is
+/// not gated by the rotor's own face, so it is free to be considerably larger
+/// than a side or bridge port, and a bigger throat is what actually moves
+/// enough reverted mass to overwhelm the governor rather than just roughen
+/// its output. `1.3x` the other profiles' port diameter, at this duration and
+/// ramp, is where the block stops catching from a governed idle at all —
+/// collapses to the stall floor rather than hunting around a lower one — while
+/// a hard throttle snap from the same rest state still lights it and carries
+/// it to redline with real margin to spare. Going further on any of the three
+/// axes made the free-rev side fail outright instead of merely idling badly,
+/// the same cliff the duration/ramp-only search hit. That split — fails the
+/// idle governor, clean to redline under load — is Stage M5's actual headline
+/// result, and it came from rendering the block through both scenarios, not
+/// from asserting a number.
 pub fn peripheral_port() -> ValveTrain {
-    port_train(deg(260.0), 0.22)
+    port_train(deg(260.0), 0.26, 1.3)
 }
 
 #[cfg(test)]

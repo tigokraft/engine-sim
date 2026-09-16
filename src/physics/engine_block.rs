@@ -32,7 +32,8 @@ use std::f64::consts::PI;
 use crate::environment::Environment;
 use crate::physics::control::{CylinderHealth, EngineControlUnit, LimiterCut};
 use crate::physics::cylinder::{deg, wrap_cycle, CylinderGeometry, GasProperties, CYCLE_ANGLE};
-use crate::physics::plumbing::{ExhaustSystem, IntakeSystem};
+use crate::physics::intake::{IntakePlenum, ThrottleBody, ValveDraw};
+use crate::physics::plumbing::{ExhaustSystem, IntakeSystem, ThrottleLayout};
 use crate::physics::thermal::{EngineThermal, OilViscosity};
 use crate::physics::thermodynamics::{
     CylinderModel, HeatRelease, PortConditions, Rk4Solver, StepReport, ThermoState,
@@ -68,7 +69,7 @@ pub const MAX_TRACKED_AFR: f64 = 60.0;
 /// its own term with its own actuator, so this is back to being the leak it is
 /// named after. On its own it will not idle an engine, which is correct: shut
 /// the bypass on a warm engine with your foot off the pedal and it stalls.
-pub const PLATE_LEAK_FRACTION: f64 = 0.003;
+pub const PLATE_LEAK_FRACTION: f64 = 0.005;
 
 /// Air the idle bypass can pass at full travel, on the same scale [-].
 ///
@@ -77,6 +78,15 @@ pub const PLATE_LEAK_FRACTION: f64 = 0.003;
 /// towards a stall as well as feed it. A governor that can only add air
 /// cannot overshoot, and an idle that cannot overshoot cannot lope.
 pub const IDLE_BYPASS_AUTHORITY: f64 = 0.050;
+
+/// Typical intake valve diameter as a fraction of cylinder bore [-], the
+/// usual two-valve-per-cylinder rule of thumb.
+///
+/// The reference [`EngineBlock::update_manifolds`] sizes the idle bypass and
+/// plate leak against, chosen instead of the live valve or port diameter so
+/// an exotic profile's own curtain area — a WOT and reversion claim — cannot
+/// move the idle authority a stock valve would have given.
+pub const INTAKE_VALVE_TO_BORE_RATIO: f64 = 0.44;
 
 // ---------------------------------------------------------------------------
 // Phase ring buffer
@@ -1227,7 +1237,7 @@ pub struct EngineBlock {
     /// 720-cell historical trace of the master.
     pub ring: PhaseRing,
     /// Intake plenum shared by every cylinder.
-    pub intake: Plenum,
+    pub intake: IntakePlenum,
     /// One exhaust manifold per bank.
     pub exhaust_banks: Vec<ExhaustManifold>,
     /// Friction correlation.
@@ -1257,9 +1267,9 @@ pub struct EngineBlock {
     /// governor's actuator: see
     /// [`IdleGovernor`](crate::physics::control::IdleGovernor), which owns the
     /// controller, its lag and its authority limit, and
-    /// [`EngineBlock::intake_makeup_flow`], which is where the position
-    /// becomes area. Zero is a shut bypass, which is a stall on any engine
-    /// whose plate is shut as well.
+    /// [`EngineBlock::update_manifolds`], which is where the position becomes
+    /// the throttle body's leak area. Zero is a shut bypass, which is a stall
+    /// on any engine whose plate is shut as well.
     pub idle_bypass: f64,
     /// Engine control unit: fuelling, timing, knock retard, limiters, and cylinder health.
     pub ecu: EngineControlUnit,
@@ -1293,12 +1303,24 @@ impl EngineBlock {
             })
             .collect();
 
-        let intake = Plenum::new(
+        // Sized generously past the total intake valve curtain area, so the
+        // valves stay the true bottleneck at wide-open throttle and the plate
+        // only restricts when the driver actually lifts. A choked compressible
+        // orifice cannot be sized against the old incompressible-Bernoulli
+        // model's numbers — that model had no sonic ceiling at all, so a plate
+        // sized to only match it chokes well before the old model ever did.
+        let intake_valve_area =
+            PI * model.valves.intake.diameter.powi(2) / 4.0 * firing.len() as f64;
+        let throttle = ThrottleBody::new(
+            (4.0 * intake_valve_area / PI).sqrt(),
+            0.9,
+            PLATE_LEAK_FRACTION,
+        );
+        let intake = IntakePlenum::at_ambient(
             model.geometry.displacement() * firing.len() as f64 * 0.8,
-            environment.pressure,
-            environment.temperature,
-            model.gas.r_unburned,
-            model.gas.gamma_unburned,
+            throttle,
+            &environment,
+            &model.gas,
         );
 
         let master = ThermoState::at_ambient(&model.geometry, &model.gas, &environment);
@@ -1364,6 +1386,25 @@ impl EngineBlock {
             })
             .collect();
         self.thermal.rebuild_exhaust(&self.exhaust);
+    }
+
+    /// Re-sizes the intake throttle bore from the block's own declared
+    /// intake system geometry.
+    ///
+    /// [`EngineBlock::new`] seeds the throttle off total intake valve
+    /// curtain area, a reasonable default before any preset-specific intake
+    /// is known. A real preset's [`IntakeSystem::throttle`] is the actual
+    /// number — individual throttle bodies add their bores in parallel,
+    /// since each one is its own hole into the shared plenum, where a single
+    /// central body is just the one bore.
+    pub fn rebuild_intake_throttle(&mut self) {
+        let bore_area = match self.intake_system.throttle {
+            ThrottleLayout::Single { bore } => PI * bore * bore / 4.0,
+            ThrottleLayout::IndividualBodies { bore } => {
+                self.firing.len() as f64 * PI * bore * bore / 4.0
+            }
+        };
+        self.intake.throttle.bore = (4.0 * bore_area / PI).sqrt().max(1e-4);
     }
 
     /// A 4.0 litre cross-plane V8 on the default cylinder model.
@@ -1718,28 +1759,23 @@ impl EngineBlock {
 
     /// Pushes the summed per-bank fluxes into the manifolds.
     fn update_manifolds(&mut self, dt: f64, rpm: f64) {
-        let mut intake_draw = 0.0;
-
         for bank in 0..self.exhaust_banks.len() as u8 {
             let mut flux = 0.0;
             let mut enthalpy_flux = 0.0;
             let mut open_area = 0.0;
 
             for (i, cyl) in self.firing.cylinders.iter().enumerate() {
+                if cyl.bank != bank {
+                    continue;
+                }
                 let sample = self.sample_of(i);
-                if cyl.bank == bank {
-                    // Ring flux is signed into the cylinder, so leaving the
-                    // cylinder is a negative exhaust_flow.
-                    let out = (-sample.exhaust_flow).max(0.0);
-                    flux += out;
-                    enthalpy_flux += out * sample.temperature;
-                    let theta = wrap_cycle(self.master.cylinder.theta - cyl.firing_offset);
-                    open_area += self.model.valves.exhaust.effective_area(theta);
-                }
-                if bank == 0 {
-                    // The intake plenum is shared, so accumulate it once.
-                    intake_draw += sample.intake_flow.max(0.0);
-                }
+                // Ring flux is signed into the cylinder, so leaving the
+                // cylinder is a negative exhaust_flow.
+                let out = (-sample.exhaust_flow).max(0.0);
+                flux += out;
+                enthalpy_flux += out * sample.temperature;
+                let theta = wrap_cycle(self.master.cylinder.theta - cyl.firing_offset);
+                open_area += self.model.valves.exhaust.effective_area(theta);
             }
 
             let temperature = if flux > 1e-12 {
@@ -1761,47 +1797,58 @@ impl EngineBlock {
             );
         }
 
-        // The intake plenum refills from ambient through the throttle and is
-        // drawn down by whatever the cylinders swallow.
-        let throttle_flow = self.intake_makeup_flow(dt);
-        self.intake
-            .integrate(dt, throttle_flow, self.environment.temperature, intake_draw);
-    }
+        // The intake plenum is shared, so every cylinder's draw is collected
+        // once, whatever bank it lives on. Reversion lasts a handful of crank
+        // degrees round overlap — far narrower than a wall-clock frame is
+        // wide in crank angle at real rpm — so it is read off the ring's own
+        // cycle mean rather than one instantaneous per-cylinder sample: the
+        // same smoothing the forward draw already gets for free by summing N
+        // phase-offset cylinders, applied in time instead of space. Every
+        // cylinder shares one waveform just phase-shifted, so one cylinder's
+        // cycle mean is every cylinder's.
+        let cylinders = self.firing.len() as f64;
+        let forward_flow = cylinders * self.ring.cycle_mean(|s| s.intake_flow.max(0.0));
+        let reversion_flow = cylinders * self.ring.cycle_mean(|s| s.intake_flow.min(0.0));
+        let reversion_enthalpy =
+            cylinders * self.ring.cycle_mean(|s| s.intake_flow.min(0.0) * s.temperature);
+        let reversion_temperature = if reversion_flow.abs() > 1e-9 {
+            reversion_enthalpy / reversion_flow
+        } else {
+            self.environment.temperature
+        };
+        let intake_draws = [
+            ValveDraw::new(forward_flow, self.environment.temperature),
+            ValveDraw::new(reversion_flow, reversion_temperature),
+        ];
 
-    /// Quasi-steady flow through the throttle into the intake plenum [kg/s].
-    ///
-    /// Gated by `self.throttle`, which is never anything but its `1.0`
-    /// default unless a caller — the vehicle-load driving path in
-    /// [`crate::bench::Driveline::update`] is the only one today — sets it
-    /// from the pedal. At `1.0` the gate is wide open and this is bit-for-bit
-    /// the ungated valve-area restriction every existing preset and recorded
-    /// fingerprint was measured against; below it, the plate itself becomes
-    /// the bottleneck rather than the valves, which is what lets
-    /// [`EngineBlock::load_fraction`] respond to load at all instead of being
-    /// a function of rpm alone.
-    fn intake_makeup_flow(&self, dt: f64) -> f64 {
-        let deficit = self.environment.pressure - self.intake.pressure();
-        if deficit <= 0.0 {
-            return 0.0;
-        }
-        let density = self.environment.air_density();
-        let valve_area =
-            PI * self.model.valves.intake.diameter.powi(2) / 4.0 * self.firing.len() as f64 * 0.5;
-        // Three paths in parallel, and they add because they are three holes
-        // in the same wall: the plate the pedal swings, the clearance left
-        // round a plate that is shut, and the idle bypass drilled past it.
-        // The second and third used to be one fixed number, which is why the
-        // governor had nothing to open — see [`IDLE_BYPASS_AUTHORITY`].
-        let plate = self.throttle.clamp(0.0, 1.0);
-        let bypass = PLATE_LEAK_FRACTION + IDLE_BYPASS_AUTHORITY * self.idle_bypass.clamp(0.0, 1.0);
-        // Capped at the bore, which is the hard limit whatever is open behind
-        // it — and which is why a wide-open plate is bit-for-bit the
-        // unrestricted case every recorded fingerprint was measured against.
-        let throttle_fraction = (plate + bypass).min(1.0);
-        let area = valve_area * throttle_fraction;
-        let bernoulli = area * 0.8 * (2.0 * deficit * density).sqrt();
-        // Never past ambient: a throttle cannot supercharge the engine.
-        bernoulli.min(self.intake.rate_limit(self.environment.pressure, dt))
+        // Plate clearance and the idle bypass are two holes in parallel round
+        // the same plate, but only one of them is a property of the plate.
+        // `PLATE_LEAK_FRACTION` is manufacturing clearance round a butterfly
+        // that happens to be shut, which is [`ThrottleBody::leak_area_fraction`]'s
+        // own native unit — a fraction of *this* plate's own bore — so it is
+        // used exactly as declared, whatever bore a preset was cast with.
+        //
+        // The idle bypass is a separate, real actuator with its own sizing,
+        // tracking an engine's idle air demand rather than its WOT throttle
+        // body, so [`IDLE_BYPASS_AUTHORITY`] is a fraction of a reference area
+        // sized off the cylinder bore instead. The reference is bore, not the
+        // live intake valve or port diameter: a named port profile (see
+        // `physics::rotor`) can legitimately size its own curtain area far
+        // past a stock valve's on purpose, and that is a WOT and reversion
+        // claim, not an idle-bypass one — coupling the two would move this
+        // engine's idle authority every time a cam or port profile changed,
+        // for a reason that has nothing to do with idle.
+        let bore_reference_area =
+            PI * (self.model.geometry.bore * INTAKE_VALVE_TO_BORE_RATIO).powi(2) / 4.0
+                * self.firing.len() as f64;
+        let plate_bore_area = self.intake.throttle.bore_area().max(1e-9);
+        let bypass_authority = IDLE_BYPASS_AUTHORITY * bore_reference_area / plate_bore_area;
+        self.intake.throttle.leak_area_fraction =
+            (PLATE_LEAK_FRACTION + bypass_authority * self.idle_bypass.clamp(0.0, 1.0))
+                .clamp(0.0, 1.0);
+        let upstream = IntakePlenum::ambient_upstream(&self.environment, &self.model.gas);
+        self.intake
+            .advance(dt, self.throttle, &upstream, &intake_draws);
     }
 
     /// Sums torque over the cylinders and packages the frame's telemetry.
@@ -2939,17 +2986,25 @@ mod tests {
         block.throttle = 1.0;
         // A real deficit below ambient for the gate to have something to restrict.
         block.intake.mass *= 0.9;
-        let dt = 1.0 / 480.0;
-        let gated = block.intake_makeup_flow(dt);
 
-        let valve_area =
-            PI * block.model.valves.intake.diameter.powi(2) / 4.0 * block.firing.len() as f64 * 0.5;
-        let deficit = block.environment.pressure - block.intake.pressure();
-        let density = block.environment.air_density();
-        let expected = (valve_area * 0.8 * (2.0 * deficit * density).sqrt())
-            .min(block.intake.rate_limit(block.environment.pressure, dt));
+        let upstream = IntakePlenum::ambient_upstream(&block.environment, &block.model.gas);
+        let wide_open = block.intake.throttle_flow(1.0, &upstream);
+        let half_open = block.intake.throttle_flow(0.5, &upstream);
 
-        assert_eq!(gated, expected, "throttle = 1.0 must not gate flow at all");
+        // Throttle = 1.0 must be exactly the unrestricted orifice, not
+        // something a bypass or a leak term has widened or narrowed further.
+        assert_eq!(
+            wide_open,
+            block
+                .intake
+                .throttle
+                .mass_flow(1.0, &upstream, &block.intake.port_state()),
+            "throttle = 1.0 must not gate flow through any path but the plate itself"
+        );
+        assert!(
+            wide_open > half_open,
+            "wide open must pass more air than half open"
+        );
     }
 
     #[test]
@@ -3031,8 +3086,8 @@ mod tests {
         // uses to save fuel at light, steady load, and enriching toward
         // stoichiometric the way a real ECU does once cruise gives way to
         // sustained pull.
-        let cruising = settled_at_throttle(3_000.0, 0.02);
-        let climbing = settled_at_throttle(3_000.0, 0.1);
+        let cruising = settled_at_throttle(3_000.0, 0.2);
+        let climbing = settled_at_throttle(3_000.0, 0.4);
         let cruising_load = cruising.load_fraction();
         let climbing_load = climbing.load_fraction();
         assert!(
@@ -3051,8 +3106,14 @@ mod tests {
 
     #[test]
     fn higher_load_raises_exhaust_temperature_and_moves_primary_tuning() {
-        let light = settled_at_throttle(3_000.0, 0.08);
-        let heavy = settled_at_throttle(3_000.0, 0.15);
+        // Both throttles are open enough to stay past the deep-vacuum regime
+        // where overlap reversion dominates the intake charge (see
+        // `TURBO_PLAN.md` TB3): under that regime a hotter, more diluted
+        // reversion charge at light throttle can legitimately run hotter than
+        // a cleaner, less diluted charge at a bit more throttle, which is a
+        // real effect and not what this test means by "load".
+        let light = settled_at_throttle(3_000.0, 0.3);
+        let heavy = settled_at_throttle(3_000.0, 0.5);
         assert!(heavy.load_fraction() > light.load_fraction());
 
         let light_temp = light.exhaust_banks[0].plenum.temperature;
