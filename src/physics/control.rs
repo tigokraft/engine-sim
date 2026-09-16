@@ -102,6 +102,136 @@ impl CylinderHealth {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Idle governor
+// ---------------------------------------------------------------------------
+
+/// Proportional gain on speed error [bypass travel per rev/min].
+///
+/// A hundred rpm low opens four thousandths of the bypass' travel, which
+/// sounds like nothing until you notice how steep the other side of the loop
+/// is: near idle a percent more bypass area is worth several hundred rpm, so
+/// this is already most of the gain the loop can carry. Tuned on the stock cam
+/// — a governor is calibrated on the engine it ships with — and deliberately
+/// not retuned for the big one, because what the big one then does is the
+/// point.
+pub const IDLE_GOVERNOR_PROPORTIONAL: f64 = 4.0e-5;
+
+/// Integral gain on speed error [bypass travel per rev/min per second].
+///
+/// Three times the proportional gain, which is a reset time of a third of a
+/// second — the usual figure for a production idle loop. It is what removes
+/// the droop a purely proportional governor has to live with, so the engine
+/// idles at the speed it is asked for rather than a little under it. It is
+/// also what lets the loop wind *past* that speed, which is the half of this
+/// that matters here: an integrator plus a lag is the whole recipe for
+/// overshoot, and overshoot is the whole recipe for a lope.
+pub const IDLE_GOVERNOR_INTEGRAL: f64 = 1.2e-4;
+
+/// Time constant of the bypass actuator and the air path behind it [s].
+///
+/// A stepper valve takes a tenth of a second to move, the manifold behind it
+/// takes another to fill, and the cylinder that fills from it does not make
+/// torque until it has finished a compression and an expansion stroke. All
+/// three are the same lag as far as the loop is concerned and this is their
+/// sum. **It is not a smoothing filter and must not be tuned like one**: it
+/// is the phase lag that decides whether the governor settles or hunts, and
+/// removing it removes the lope.
+pub const IDLE_ACTUATOR_LAG: f64 = 0.18;
+
+/// A PI idle governor on an air bypass, with an actuator that lags.
+///
+/// The thing a lopey idle was missing. The speed an engine idles at is the
+/// speed at which the air the governor is letting past the throttle plate
+/// makes exactly the torque the engine's own drag is taking away, and a
+/// governor holds that point by measuring the error and moving a valve. Both
+/// of those take time: the valve has mass, the manifold behind it has volume,
+/// and the cylinder that fills from it is two strokes away from making the
+/// torque that answers. Feed a controller with integral action through that
+/// much phase lag into a torque curve steep enough and it does not settle —
+/// it overshoots, is corrected, and overshoots the other way, for ever. That
+/// is a lope, and it is why an engine with a cam too big for its idle hunts
+/// while a stock one does not.
+///
+/// It is deliberately allowed to fail to converge. Clamping the error, or
+/// slugging the actuator until it cannot overshoot, would make every engine
+/// idle like a stock one, which is the bug this replaced.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IdleGovernor {
+    /// Proportional gain [bypass travel per rev/min].
+    pub proportional: f64,
+    /// Integral gain [bypass travel per rev/min per second].
+    pub integral: f64,
+    /// Actuator and air-path time constant [s].
+    pub actuator_lag: f64,
+    /// Most bypass travel the governor is allowed to command [-].
+    ///
+    /// A real idle valve runs out of travel, and an engine that needs more air
+    /// than it has travel for does not idle. That is a correct outcome and the
+    /// clamp is how it happens.
+    pub authority: f64,
+    /// Accumulated speed error [rev/min s].
+    pub error_integral: f64,
+    /// Where the controller is asking the valve to be [-].
+    pub command: f64,
+    /// Where the valve actually is, one lag behind the command [-].
+    pub position: f64,
+}
+
+impl Default for IdleGovernor {
+    fn default() -> Self {
+        Self {
+            proportional: IDLE_GOVERNOR_PROPORTIONAL,
+            integral: IDLE_GOVERNOR_INTEGRAL,
+            actuator_lag: IDLE_ACTUATOR_LAG,
+            authority: 1.0,
+            error_integral: 0.0,
+            command: 0.0,
+            position: 0.0,
+        }
+    }
+}
+
+impl IdleGovernor {
+    /// Advances the controller and its actuator one frame, returning the
+    /// bypass position the engine will actually breathe through [-].
+    ///
+    /// The integrator is held whenever the command is against its own stop, so
+    /// an engine being driven well over its idle by the pedal does not spend
+    /// that time winding the integral down into a hole it has to climb back
+    /// out of before it can catch the engine on the way down.
+    pub fn update(&mut self, target_rpm: f64, rpm: f64, dt: f64) -> f64 {
+        if !(dt.is_finite() && dt > 0.0) {
+            return self.position;
+        }
+        let error = target_rpm - rpm;
+        let proposed = self.error_integral + error * dt;
+        let unclamped = self.proportional * error + self.integral * proposed;
+        // Conditional integration: only accumulate if doing so would not drive
+        // the command further past a limit it has already reached.
+        if (unclamped > 0.0 || proposed > self.error_integral)
+            && (unclamped < self.authority || proposed < self.error_integral)
+        {
+            self.error_integral = proposed;
+        }
+        self.command = (self.proportional * error + self.integral * self.error_integral)
+            .clamp(0.0, self.authority);
+
+        // First-order lag towards the command. Exponential rather than a fixed
+        // step so the lag is a time and not a frame count.
+        let alpha = 1.0 - (-dt / self.actuator_lag.max(1e-4)).exp();
+        self.position += (self.command - self.position) * alpha;
+        self.position
+    }
+
+    /// Resets the controller to a shut valve and no history.
+    pub fn reset(&mut self) {
+        self.error_integral = 0.0;
+        self.command = 0.0;
+        self.position = 0.0;
+    }
+}
+
 /// Complete engine control unit managing fuelling, timing, knock, and limiters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineControlUnit {
