@@ -32,7 +32,7 @@ exhaust_duration_deg = 225.0
 exhaust_lift = 0.0085
 exhaust_diameter = 0.031
 exhaust_discharge_coeff = 0.57
-cam_aggressiveness = 0.0
+cam_aggressiveness = 0.20000000000000004
 
 [combustion]
 type = "Compression"

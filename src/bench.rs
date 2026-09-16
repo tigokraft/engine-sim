@@ -1074,7 +1074,8 @@ impl EnginePreset {
                     // the lower discharge coefficients are.
                     intake: ValveEvent::new(deg(710.0), deg(215.0), 0.0090, 0.035, 0.60),
                     exhaust: ValveEvent::new(deg(495.0), deg(225.0), 0.0085, 0.031, 0.57),
-                },
+                }
+                .with_aggressiveness(0.20),
                 fuel_lhv: DIESEL_LHV,
                 // Lean everywhere, because there is no throttle plate and the
                 // fuel is the only thing being metered. Twenty-two to one is a
