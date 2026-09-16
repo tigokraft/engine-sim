@@ -375,6 +375,10 @@ impl EnginePreset {
             note: "90-180-270-180 gaps on each bank: the offbeat American burble.",
             model: CylinderModel {
                 geometry: CylinderGeometry::new(0.094, 0.0895, 0.1500, 11.0),
+                valves: ValveTrain {
+                    intake: ValveEvent::new(deg(700.0), deg(240.0), 0.0102, 0.0385, 0.65),
+                    exhaust: ValveEvent::new(deg(500.0), deg(240.0), 0.0092, 0.0325, 0.60),
+                },
                 ..CylinderModel::default()
             },
             firing: FiringOrder::cross_plane_v8(),
