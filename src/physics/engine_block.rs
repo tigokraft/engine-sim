@@ -32,7 +32,7 @@ use std::f64::consts::PI;
 use crate::environment::Environment;
 use crate::physics::control::{CylinderHealth, EngineControlUnit, LimiterCut};
 use crate::physics::cylinder::{deg, wrap_cycle, CylinderGeometry, GasProperties, CYCLE_ANGLE};
-use crate::physics::intake::{IntakePlenum, ThrottleBody, ValveDraw};
+use crate::physics::intake::{ForcedInduction, IntakePlenum, ThrottleBody, ValveDraw};
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem, ThrottleLayout};
 use crate::physics::thermal::{EngineThermal, OilViscosity};
 use crate::physics::thermodynamics::{
@@ -1133,6 +1133,12 @@ impl ExhaustManifold {
     /// [kg/s], `bank_temperature` the enthalpy-carrying temperature of that
     /// stream, and `valve_open_fraction` how much of the bank's exhaust valve
     /// area is currently uncovered.
+    ///
+    /// `turbine_outflow`, when a turbocharger is fitted, is this bank's share
+    /// of the turbine's actual mass flow — see
+    /// [`crate::physics::intake::ForcedInduction::advance_exhaust`] — and
+    /// replaces [`Self::tailpipe_flow`]'s plain vent to atmosphere: a fitted
+    /// wheel is what the collector empties through now, not open air.
     #[allow(clippy::too_many_arguments)]
     pub fn integrate(
         &mut self,
@@ -1142,6 +1148,7 @@ impl ExhaustManifold {
         bank_flux: f64,
         bank_temperature: f64,
         valve_open_fraction: f64,
+        turbine_outflow: Option<f64>,
     ) {
         let c = self.speed_of_sound();
         self.tuning_ratio = self.transit.tuning_ratio(bank_interval, rpm, &self.pipe, c);
@@ -1158,7 +1165,7 @@ impl ExhaustManifold {
 
         // The collector always runs: it sets the mean back pressure that the
         // acoustic model perturbs around, so it cannot be skipped in either mode.
-        let outflow = self.tailpipe_flow(dt);
+        let outflow = turbine_outflow.unwrap_or_else(|| self.tailpipe_flow(dt));
         self.plenum
             .integrate(dt, bank_flux.max(0.0), bank_temperature, outflow);
 
@@ -1273,6 +1280,10 @@ pub struct EngineBlock {
     pub idle_bypass: f64,
     /// Engine control unit: fuelling, timing, knock retard, limiters, and cylinder health.
     pub ecu: EngineControlUnit,
+    /// Real turbocharger hardware, if this engine is boosted — see
+    /// `docs/TURBO_PLAN.md`'s TB3. `None` leaves the intake and exhaust paths
+    /// exactly as an atmospheric engine's.
+    pub forced_induction: Option<ForcedInduction>,
 }
 
 impl EngineBlock {
@@ -1360,6 +1371,7 @@ impl EngineBlock {
             throttle: 1.0,
             idle_bypass: 0.0,
             ecu,
+            forced_induction: None,
         }
     }
 
@@ -1759,43 +1771,51 @@ impl EngineBlock {
 
     /// Pushes the summed per-bank fluxes into the manifolds.
     fn update_manifolds(&mut self, dt: f64, rpm: f64) {
-        for bank in 0..self.exhaust_banks.len() as u8 {
-            let mut flux = 0.0;
-            let mut enthalpy_flux = 0.0;
-            let mut open_area = 0.0;
-
-            for (i, cyl) in self.firing.cylinders.iter().enumerate() {
-                if cyl.bank != bank {
-                    continue;
-                }
-                let sample = self.sample_of(i);
-                // Ring flux is signed into the cylinder, so leaving the
-                // cylinder is a negative exhaust_flow.
-                let out = (-sample.exhaust_flow).max(0.0);
-                flux += out;
-                enthalpy_flux += out * sample.temperature;
-                let theta = wrap_cycle(self.master.cylinder.theta - cyl.firing_offset);
-                open_area += self.model.valves.exhaust.effective_area(theta);
-            }
-
-            let temperature = if flux > 1e-12 {
-                enthalpy_flux / flux
-            } else {
-                self.exhaust_banks[bank as usize].plenum.temperature
-            };
-            let reference_area = PI * self.model.valves.exhaust.diameter.powi(2) / 4.0;
-            let open_fraction = (open_area / reference_area.max(1e-12)).clamp(0.0, 1.0);
-            let interval = self.firing.mean_bank_interval(bank);
-
-            self.exhaust_banks[bank as usize].integrate(
-                dt,
-                rpm,
-                interval,
-                flux,
-                temperature,
-                open_fraction,
-            );
+        // Bank flux is gathered in its own pass, ahead of `integrate`, so a
+        // fitted turbine can be given the combined exhaust state below before
+        // any bank's collector is advanced this frame.
+        struct BankFlux {
+            flux: f64,
+            temperature: f64,
+            open_fraction: f64,
+            interval: f64,
         }
+        let bank_flux: Vec<BankFlux> = (0..self.exhaust_banks.len() as u8)
+            .map(|bank| {
+                let mut flux = 0.0;
+                let mut enthalpy_flux = 0.0;
+                let mut open_area = 0.0;
+
+                for (i, cyl) in self.firing.cylinders.iter().enumerate() {
+                    if cyl.bank != bank {
+                        continue;
+                    }
+                    let sample = self.sample_of(i);
+                    // Ring flux is signed into the cylinder, so leaving the
+                    // cylinder is a negative exhaust_flow.
+                    let out = (-sample.exhaust_flow).max(0.0);
+                    flux += out;
+                    enthalpy_flux += out * sample.temperature;
+                    let theta = wrap_cycle(self.master.cylinder.theta - cyl.firing_offset);
+                    open_area += self.model.valves.exhaust.effective_area(theta);
+                }
+
+                let temperature = if flux > 1e-12 {
+                    enthalpy_flux / flux
+                } else {
+                    self.exhaust_banks[bank as usize].plenum.temperature
+                };
+                let reference_area = PI * self.model.valves.exhaust.diameter.powi(2) / 4.0;
+                let open_fraction = (open_area / reference_area.max(1e-12)).clamp(0.0, 1.0);
+                let interval = self.firing.mean_bank_interval(bank);
+                BankFlux {
+                    flux,
+                    temperature,
+                    open_fraction,
+                    interval,
+                }
+            })
+            .collect();
 
         // The intake plenum is shared, so every cylinder's draw is collected
         // once, whatever bank it lives on. Reversion lasts a handful of crank
@@ -1846,7 +1866,78 @@ impl EngineBlock {
         self.intake.throttle.leak_area_fraction =
             (PLATE_LEAK_FRACTION + bypass_authority * self.idle_bypass.clamp(0.0, 1.0))
                 .clamp(0.0, 1.0);
-        let upstream = IntakePlenum::ambient_upstream(&self.environment, &self.model.gas);
+        // Read before this frame's `advance_exhaust` below, so a fitted
+        // compressor's shaft is loaded with *this* frame's power draw rather
+        // than a frame-stale one.
+        let upstream = if let Some(forced) = &mut self.forced_induction {
+            let previous = forced.upstream_port_state();
+            let throttle_flow_estimate = self.intake.throttle_flow(self.throttle, &previous);
+            forced.advance_intake(dt, throttle_flow_estimate, &self.environment, &self.model.gas)
+        } else {
+            IntakePlenum::ambient_upstream(&self.environment, &self.model.gas)
+        };
+
+        // A fitted turbine sits downstream of every bank's collector at once
+        // — TB3 closes the loop for a single shared shaft; splitting it one
+        // per bank is TB5's job. The turbine's upstream state is the
+        // flux-weighted mean of what each collector is actually holding right
+        // now, and the resulting flow is handed back to each bank in
+        // proportion to its own share of the total flux.
+        let total_flux: f64 = bank_flux.iter().map(|b| b.flux).sum();
+        let turbine_outflow: Option<f64> = if let Some(forced) = &mut self.forced_induction {
+            let (pressure, temperature) = if total_flux > 1e-12 {
+                let pressure = self
+                    .exhaust_banks
+                    .iter()
+                    .zip(&bank_flux)
+                    .map(|(bank, f)| bank.port_pressure() * f.flux)
+                    .sum::<f64>()
+                    / total_flux;
+                let temperature = self
+                    .exhaust_banks
+                    .iter()
+                    .zip(&bank_flux)
+                    .map(|(bank, f)| bank.plenum.temperature * f.flux)
+                    .sum::<f64>()
+                    / total_flux;
+                (pressure, temperature)
+            } else {
+                let n = self.exhaust_banks.len().max(1) as f64;
+                (
+                    self.exhaust_banks.iter().map(|b| b.port_pressure()).sum::<f64>() / n,
+                    self.exhaust_banks.iter().map(|b| b.plenum.temperature).sum::<f64>() / n,
+                )
+            };
+            let turbine_upstream = PortConditions::from_environment(&self.environment, &self.model.gas).exhaust;
+            let turbine_upstream = crate::physics::thermodynamics::PortState {
+                pressure,
+                temperature,
+                ..turbine_upstream
+            };
+            Some(forced.advance_exhaust(dt, &turbine_upstream, self.environment.pressure))
+        } else {
+            None
+        };
+
+        for (bank, flux) in bank_flux.iter().enumerate() {
+            let bank_outflow = turbine_outflow.map(|total| {
+                if total_flux > 1e-12 {
+                    total * (flux.flux / total_flux)
+                } else {
+                    0.0
+                }
+            });
+            self.exhaust_banks[bank].integrate(
+                dt,
+                rpm,
+                flux.interval,
+                flux.flux,
+                flux.temperature,
+                flux.open_fraction,
+                bank_outflow,
+            );
+        }
+
         self.intake
             .advance(dt, self.throttle, &upstream, &intake_draws);
     }
@@ -3173,6 +3264,112 @@ mod tests {
             (pulling_spark - cruising_spark).abs() > 1e-3,
             "different load fractions at the same rpm must schedule different \
              spark advance: 2nd={pulling_spark:.2} 6th={cruising_spark:.2}"
+        );
+    }
+
+    // -- TB3: close the loop -------------------------------------------------
+
+    fn test_turbo_hardware(env: &Environment) -> crate::physics::intake::ForcedInduction {
+        use crate::physics::compressor::{CompressorMap, FrameSize};
+        use crate::physics::turbine::{BearingType, TurbineMap, TurbineMapPoint, TurbineSpeedLine};
+
+        let point = |expansion_ratio: f64, reduced_flow: f64, efficiency: f64| TurbineMapPoint {
+            expansion_ratio,
+            reduced_flow,
+            efficiency,
+        };
+        let turbine_map = TurbineMap::new(vec![
+            TurbineSpeedLine::new(
+                60_000.0,
+                vec![point(1.0, 0.05, 0.50), point(1.5, 0.14, 0.68), point(2.2, 0.22, 0.60)],
+            ),
+            TurbineSpeedLine::new(
+                160_000.0,
+                vec![point(1.0, 0.08, 0.55), point(2.0, 0.28, 0.74), point(3.2, 0.42, 0.62)],
+            ),
+        ]);
+
+        crate::physics::intake::ForcedInduction::new(
+            CompressorMap::stock(FrameSize::Medium),
+            turbine_map,
+            8.0e-5,
+            0.97,
+            BearingType::BallBearing,
+            2.0e-3,
+            None,
+            env,
+            &GasProperties::default(),
+        )
+    }
+
+    fn settled_v8(rpm: f64, throttle: f64, forced: bool) -> EngineBlock {
+        let env = Environment::default();
+        let mut block = EngineBlock::cross_plane_v8(env);
+        block.throttle = throttle;
+        if forced {
+            block.forced_induction = Some(test_turbo_hardware(&env));
+        }
+        for _ in 0..3_000 {
+            block.update(1.0 / 480.0, rpm);
+        }
+        block
+    }
+
+    #[test]
+    fn an_atmospheric_preset_is_unchanged_by_the_forced_induction_field() {
+        // `forced_induction: None` must be a complete no-op: an engine that
+        // never sets it breathes exactly as it did before TB3 existed.
+        let env = Environment::default();
+        let mut with_none = EngineBlock::cross_plane_v8(env);
+        let mut untouched = EngineBlock::cross_plane_v8(env);
+        with_none.throttle = 1.0;
+        untouched.throttle = 1.0;
+        for _ in 0..500 {
+            with_none.update(1.0 / 480.0, 4_000.0);
+            untouched.update(1.0 / 480.0, 4_000.0);
+        }
+        assert_eq!(with_none.forced_induction.is_none(), true);
+        approx(with_none.intake.pressure(), untouched.intake.pressure(), 1e-9);
+        approx(
+            with_none.exhaust_banks[0].plenum.pressure(),
+            untouched.exhaust_banks[0].plenum.pressure(),
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn boost_raises_trapped_mass_and_exhaust_back_pressure() {
+        let na = settled_v8(4_000.0, 1.0, false);
+        let boosted = settled_v8(4_000.0, 1.0, true);
+
+        let shaft_rpm = boosted
+            .forced_induction
+            .as_ref()
+            .expect("forced induction fitted")
+            .shaft
+            .shaft_rpm();
+        assert!(shaft_rpm > 5_000.0, "turbo failed to spool: {shaft_rpm} rpm");
+
+        assert!(
+            boosted.intake.pressure() > na.intake.pressure() * 1.1,
+            "a spooled turbo must trap more mass than atmospheric: na={:.0} Pa, boosted={:.0} Pa",
+            na.intake.pressure(),
+            boosted.intake.pressure()
+        );
+
+        let na_back_pressure = na.exhaust_banks[0].plenum.pressure();
+        let boosted_back_pressure = boosted.exhaust_banks[0].plenum.pressure();
+        assert!(
+            boosted_back_pressure > na_back_pressure * 1.05,
+            "a wheel in the exhaust must raise back pressure: na={na_back_pressure:.0} Pa, \
+             boosted={boosted_back_pressure:.0} Pa"
+        );
+
+        let na_torque = na.instantaneous_indicated_torque();
+        let boosted_torque = boosted.instantaneous_indicated_torque();
+        assert!(
+            boosted_torque > na_torque,
+            "more trapped mass must make more torque: na={na_torque:.1}, boosted={boosted_torque:.1}"
         );
     }
 }

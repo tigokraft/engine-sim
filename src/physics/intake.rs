@@ -734,6 +734,22 @@ impl ForcedInduction {
     /// keeps supplying its surge-line flow while the throttle's leak area
     /// draws far less, so the pipe pressure moves — the rate set by
     /// [`Plenum::volume`].
+    /// The charge pipe's current [`PortState`], without advancing anything.
+    ///
+    /// Used to get a representative throttle-flow estimate for this frame's
+    /// [`Self::advance_intake`] call before it runs — the same lagged-state
+    /// pattern [`ExhaustManifold::tailpipe_flow`](super::engine_block::ExhaustManifold::tailpipe_flow)
+    /// already uses.
+    pub fn upstream_port_state(&self) -> PortState {
+        PortState {
+            pressure: self.charge_pipe.pressure(),
+            temperature: self.charge_pipe.temperature,
+            gas_constant: self.charge_pipe.gas_constant,
+            gamma: self.charge_pipe.gamma,
+            burned_fraction: 0.0,
+        }
+    }
+
     pub fn advance_intake(
         &mut self,
         dt: f64,
