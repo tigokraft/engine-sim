@@ -221,6 +221,40 @@ impl CompressorMap {
         }
     }
 
+    /// The corrected flow that would produce a given pressure ratio at a
+    /// corrected speed, found by bisection against [`Self::evaluate`].
+    ///
+    /// The map is naturally organised the other way round — flow in,
+    /// pressure ratio out — because that is how a manufacturer measures it.
+    /// But in the running engine, flow is what the downstream system (the
+    /// throttle and the cylinders behind it) actually sets, and pressure
+    /// ratio is what results, so the inverse read is the one the physics
+    /// needs. Pressure ratio falls monotonically with flow on every speed
+    /// line, so bisection converges to the unique answer, clamping to the
+    /// surge or choke boundary if `pressure_ratio` is not achievable at all.
+    pub fn flow_for_pressure_ratio(&self, corrected_speed: f64, pressure_ratio: f64) -> (f64, MapReading) {
+        let speed = corrected_speed.clamp(self.speed_range().0, self.speed_range().1);
+        let (lo_line, hi_line) = self.bracket(speed);
+        let mut lo = 0.0f64;
+        // Bounding the search at the bracketing lines' own choke flow, rather
+        // than an arbitrary large number, matters past the choke boundary:
+        // `evaluate` clamps there, so *every* flow past choke reads back the
+        // same plateaued pressure ratio, and an unreachably low target would
+        // otherwise walk the search out to whatever the bound was instead of
+        // stopping at the choke point the map actually measured.
+        let mut hi = lo_line.choke_flow().max(hi_line.choke_flow());
+        for _ in 0..32 {
+            let mid = 0.5 * (lo + hi);
+            if self.evaluate(speed, mid).pressure_ratio > pressure_ratio {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let flow = 0.5 * (lo + hi);
+        (flow, self.evaluate(speed, flow))
+    }
+
     fn bracket(&self, corrected_speed: f64) -> (&SpeedLine, &SpeedLine) {
         let (min, max) = self.speed_range();
         assert!(
@@ -254,6 +288,26 @@ pub fn discharge_temperature(
 ) -> f64 {
     let exponent = (gamma - 1.0) / gamma;
     inlet_temperature * (1.0 + (pressure_ratio.powf(exponent) - 1.0) / efficiency)
+}
+
+/// Shaft power the compressor draws to produce `pressure_ratio` at
+/// `mass_flow` [W].
+///
+/// The enthalpy rise the gas actually receives, `m cp (T_out - T_in)`, with
+/// `T_out` from [`discharge_temperature`] — a map without efficiency gives
+/// free power, so the shaft must pay for exactly the temperature rise the
+/// map's efficiency predicts, not the isentropic minimum.
+pub fn compressor_power(
+    mass_flow: f64,
+    inlet_temperature: f64,
+    pressure_ratio: f64,
+    efficiency: f64,
+    gas_constant: f64,
+    gamma: f64,
+) -> f64 {
+    let cp = gamma * gas_constant / (gamma - 1.0);
+    let outlet_temperature = discharge_temperature(inlet_temperature, pressure_ratio, efficiency, gamma);
+    mass_flow.max(0.0) * cp * (outlet_temperature - inlet_temperature)
 }
 
 /// Turbocharger frame size, used to pick one of the stock maps below.
@@ -473,5 +527,36 @@ mod tests {
             let reading = map.evaluate(mid_line.corrected_speed(), mid_flow);
             assert_eq!(reading.region, MapRegion::Operating);
         }
+    }
+
+    #[test]
+    fn flow_for_pressure_ratio_inverts_evaluate() {
+        let map = sample_map();
+        let forward = map.evaluate(90_000.0, 0.05);
+        let (flow, reading) = map.flow_for_pressure_ratio(90_000.0, forward.pressure_ratio);
+        approx(flow, 0.05, 1e-3);
+        approx(reading.pressure_ratio, forward.pressure_ratio, 1e-3);
+    }
+
+    #[test]
+    fn flow_for_pressure_ratio_clamps_at_the_map_edges() {
+        let map = sample_map();
+        // Nothing on this speed line reaches a pressure ratio of 10; the
+        // inverse read must land at the surge point, not somewhere invented.
+        let (_, reading) = map.flow_for_pressure_ratio(90_000.0, 10.0);
+        assert_eq!(reading.region, MapRegion::Surge);
+    }
+
+    #[test]
+    fn compressor_power_is_zero_at_unity_pressure_ratio() {
+        let power = compressor_power(0.05, 300.0, 1.0, 0.7, 287.0, 1.4);
+        approx(power, 0.0, 1e-6);
+    }
+
+    #[test]
+    fn compressor_power_rises_with_pressure_ratio() {
+        let low = compressor_power(0.05, 300.0, 1.5, 0.7, 287.0, 1.4);
+        let high = compressor_power(0.05, 300.0, 2.5, 0.7, 287.0, 1.4);
+        assert!(high > low);
     }
 }
