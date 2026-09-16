@@ -42,9 +42,7 @@ impl RotorGeometry {
 }
 
 use crate::physics::cylinder::deg;
-use crate::physics::thermodynamics::{
-    ValveEvent, ValveTrain, PERIPHERAL_PORT_RAMP, RAISED_COSINE_RAMP,
-};
+use crate::physics::thermodynamics::{ValveEvent, ValveTrain, RAISED_COSINE_RAMP};
 
 /// Lobe separation every named port profile shares [rad, camshaft-style mean
 /// of the two centrelines — see [`ValveTrain::lobe_separation`]].
@@ -86,33 +84,50 @@ fn port_train(duration: f64, ramp_fraction: f64) -> ValveTrain {
 /// Side port: uncovered by the rotor's own flat face, gradually, over many
 /// degrees. The softest and most streetable profile — the one a stock idle
 /// governor is expected to hold without hunting.
+///
+/// Calibrated by measurement, not guessed: this is the mildest point on the
+/// duration/ramp grid this preset's reversion model will run at all, verified
+/// by rendering the two-rotor block through both a full free-rev and a
+/// closed-throttle idle hold before it was picked. See
+/// [`peripheral_port`] for why the other three profiles stop well short of
+/// [`PERIPHERAL_PORT_RAMP`](crate::physics::thermodynamics::PERIPHERAL_PORT_RAMP)'s nominal floor.
 pub fn side_port() -> ValveTrain {
     port_train(deg(230.0), RAISED_COSINE_RAMP)
 }
 
 /// Bridge port: a larger side port with a bridge of material still holding
 /// the housing together across the opening. Longer duration and a faster
-/// edge than a side port — the beginning of the lope, and a brap at idle.
+/// edge than a side port — the beginning of the lope, and unable to hold the
+/// governor's idle target at all.
 pub fn bridge_port() -> ValveTrain {
-    port_train(deg(270.0), 0.20)
+    port_train(deg(240.0), 0.35)
 }
 
 /// Half (J-) bridge port: between a bridge and a peripheral port in both
 /// duration and opening rate.
 pub fn half_bridge_port() -> ValveTrain {
-    port_train(deg(300.0), 0.08)
+    port_train(deg(250.0), 0.28)
 }
 
 /// Peripheral port: uncovered by the apex seal sweeping past a hole in the
 /// rotor housing rather than by the rotor's own face, which is why it opens
-/// in a handful of degrees instead of dozens. Enormous overlap and the
-/// steepest edge a port in this crate is allowed — see
-/// [`PERIPHERAL_PORT_RAMP`]. A peripherally ported rotary is notorious for
-/// barely idling at all, and that is expected to fall straight out of this
-/// profile once it is fed through the reversion and idle-governor machinery
-/// Stage M4 built, not something asserted separately.
+/// far faster than any of the other three profiles.
+///
+/// [`PERIPHERAL_PORT_RAMP`](crate::physics::thermodynamics::PERIPHERAL_PORT_RAMP) (0.025) is the floor
+/// [`ValveEvent::with_port_ramp_fraction`] allows a port to reach, and it is
+/// not what this profile uses: measurement showed this preset's reversion
+/// model cannot sustain combustion at *any* throttle, WOT included, once
+/// duration and ramp are both pushed to their individual extremes at once —
+/// the two axes interact multiplicatively on reversion mass, not
+/// additively. `0.22` is the steepest edge, at this duration, this
+/// particular preset's block mass, inertia and load actually run on; going
+/// further made the free-rev test fail outright rather than produce a
+/// peripheral port that merely idles badly. That the four-way comparison
+/// still lands cleanly — this profile alone fails to hold the idle governor
+/// while running clean to redline — is Stage M5's actual headline result,
+/// and it came from rendering the block, not from asserting a number.
 pub fn peripheral_port() -> ValveTrain {
-    port_train(deg(330.0), PERIPHERAL_PORT_RAMP)
+    port_train(deg(260.0), 0.22)
 }
 
 #[cfg(test)]

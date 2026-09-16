@@ -660,10 +660,13 @@ impl EnginePreset {
     ///   why it pops so readily on a cut.
     /// - **A low compression ratio** (10:1) is a distortion; the ports are not.
     ///   [`crate::physics::rotor::peripheral_port`] is a real area-versus-angle
-    ///   port profile — uncovered by an apex seal in a handful of degrees
-    ///   rather than lifted by a cam — and its enormous overlap is *why* this
-    ///   engine idles the way it does, not a number asserted to make it sound
-    ///   right.
+    ///   port profile, opened far faster than the other three named profiles
+    ///   in [`crate::physics::rotor`] — and its overlap is *why* this engine
+    ///   fails to hold the Stage M4 idle governor while a side-ported profile
+    ///   at the same target does not, not a number asserted to make it sound
+    ///   right. See that module's doc comments for how far this preset's
+    ///   reversion model actually tolerates pushing duration and opening rate
+    ///   together before combustion stops sustaining itself at any throttle.
     pub fn two_rotor_wankel() -> Self {
         Self {
             name: "2-Rotor Wankel",
