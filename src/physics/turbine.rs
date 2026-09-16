@@ -177,6 +177,57 @@ impl TurbineMap {
     }
 }
 
+/// The rotating inertia a turbine and compressor wheel share, driven by
+/// turbine power and loaded by compressor power and bearing drag.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TurboShaft {
+    /// Polar inertia of wheel, shaft and compressor together [kg m^2].
+    pub inertia: f64,
+    /// Mechanical transmission efficiency between turbine and compressor wheels [-].
+    pub mechanical_efficiency: f64,
+    /// Bearing viscous drag loss coefficient, `P_bearing = coefficient * w^2`
+    /// [W/(rad/s)^2].
+    bearing_drag_coefficient: f64,
+    /// Shaft angular speed [rad/s].
+    omega: f64,
+}
+
+impl TurboShaft {
+    /// A shaft at rest.
+    pub fn new(inertia: f64, mechanical_efficiency: f64, bearing_drag_coefficient: f64) -> Self {
+        Self {
+            inertia,
+            mechanical_efficiency,
+            bearing_drag_coefficient,
+            omega: 0.0,
+        }
+    }
+
+    /// Shaft speed [rpm].
+    pub fn shaft_rpm(&self) -> f64 {
+        self.omega * 60.0 / (2.0 * std::f64::consts::PI)
+    }
+
+    /// Advances the shaft by `dt` under a turbine power, a compressor power
+    /// draw, and this shaft's own bearing drag.
+    ///
+    /// Integrated in kinetic energy rather than angular speed directly. The
+    /// textbook torque form `I dw/dt = (P_t eta - P_c) / w - P_bearing(w)` is
+    /// singular at `w = 0`, which sends a stalled shaft's first step to
+    /// infinity. Writing the same balance as
+    /// `d(0.5 I w^2)/dt = P_t eta - P_c - P_bearing(w)` removes the division
+    /// entirely and is exactly the same physics, just integrated in the
+    /// variable that is actually smooth at rest.
+    pub fn integrate(&mut self, dt: f64, turbine_power: f64, compressor_power: f64) -> f64 {
+        let bearing_power = self.bearing_drag_coefficient * self.omega * self.omega;
+        let net_power = turbine_power * self.mechanical_efficiency - compressor_power - bearing_power;
+        let energy = 0.5 * self.inertia * self.omega * self.omega;
+        let next_energy = (energy + net_power * dt).max(0.0);
+        self.omega = (2.0 * next_energy / self.inertia).sqrt();
+        self.shaft_rpm()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +309,20 @@ mod tests {
     #[should_panic(expected = "outside turbine map range")]
     fn a_speed_outside_the_map_panics_rather_than_extrapolating() {
         sample_map().evaluate(200_000.0, 2.0);
+    }
+
+    #[test]
+    fn shaft_accelerates_when_turbine_power_exceeds_the_load_and_not_otherwise() {
+        let mut shaft = TurboShaft::new(3e-5, 0.97, 1.5e-5);
+        shaft.integrate(1.0 / 480.0, 7000.0, 3000.0);
+        assert!(shaft.shaft_rpm() > 0.0, "shaft did not accelerate under net positive power");
+
+        let mut stalled = TurboShaft::new(3e-5, 0.97, 1.5e-5);
+        stalled.integrate(1.0 / 480.0, 2000.0, 3000.0);
+        assert_eq!(
+            stalled.shaft_rpm(),
+            0.0,
+            "shaft accelerated with turbine power below the load it must overcome"
+        );
     }
 }
