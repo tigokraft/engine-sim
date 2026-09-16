@@ -3458,4 +3458,220 @@ mod tests {
             boosted.master.knock_integral
         );
     }
+
+    // -- TB4: boost control and the valves -----------------------------------
+
+    fn test_turbo_hardware_with_wastegate(
+        env: &Environment,
+        target_pressure_ratio: f64,
+        gain: f64,
+        max_flow_area: f64,
+    ) -> crate::physics::intake::ForcedInduction {
+        use crate::physics::turbine::{BoostController, Wastegate, WastegateFitment};
+
+        let wastegate = Wastegate {
+            fitment: WastegateFitment::Internal,
+            max_flow_area,
+            spring_preload: 0.4e5,
+            opening_span: 0.3e5,
+        };
+        let controller = BoostController::new(target_pressure_ratio, gain, 0.6e5, 0.15);
+        test_turbo_hardware(env)
+            .with_wastegate(wastegate)
+            .with_boost_controller(controller)
+    }
+
+    fn charge_pipe_pressure_ratio(block: &EngineBlock, env: &Environment) -> f64 {
+        block
+            .forced_induction
+            .as_ref()
+            .expect("forced induction fitted")
+            .charge_pipe
+            .pressure()
+            / env.pressure
+    }
+
+    /// Counts how many times a trace changes direction by more than
+    /// `deadband`, i.e. how many local extrema it has past numerical noise —
+    /// zero or one is a settling trace, several is an oscillation.
+    fn direction_changes(trace: &[f64], deadband: f64) -> usize {
+        let mut changes = 0;
+        let mut anchor = trace[0];
+        let mut rising: Option<bool> = None;
+        for &v in &trace[1..] {
+            let delta = v - anchor;
+            if delta.abs() < deadband {
+                continue;
+            }
+            let now_rising = delta > 0.0;
+            if let Some(previous) = rising {
+                if now_rising != previous {
+                    changes += 1;
+                }
+            }
+            rising = Some(now_rising);
+            anchor = v;
+        }
+        changes
+    }
+
+    #[test]
+    fn a_boost_controller_holds_its_target_pressure_ratio() {
+        let env = Environment::default();
+        let target = 1.6;
+        let mut block = EngineBlock::cross_plane_v8(env);
+        block.throttle = 1.0;
+        block.forced_induction = Some(test_turbo_hardware_with_wastegate(
+            &env, target, 3.0e5, 8.0e-4,
+        ));
+        for _ in 0..4_000 {
+            block.update(1.0 / 480.0, 5_000.0);
+        }
+        let pr = charge_pipe_pressure_ratio(&block, &env);
+        assert!(
+            (pr - target).abs() < target * 0.2,
+            "a closed loop wastegate should hold near its target pressure ratio: \
+             target={target}, got={pr:.2}"
+        );
+    }
+
+    #[test]
+    fn an_undersized_gate_creeps_past_target_at_high_rpm() {
+        let env = Environment::default();
+        let target = 1.6;
+        let mut adequate = EngineBlock::cross_plane_v8(env);
+        adequate.throttle = 1.0;
+        adequate.forced_induction = Some(test_turbo_hardware_with_wastegate(
+            &env, target, 3.0e5, 8.0e-4,
+        ));
+
+        let mut undersized = EngineBlock::cross_plane_v8(env);
+        undersized.throttle = 1.0;
+        undersized.forced_induction = Some(test_turbo_hardware_with_wastegate(
+            &env, target, 3.0e5, 0.01e-4,
+        ));
+
+        for _ in 0..4_000 {
+            adequate.update(1.0 / 480.0, 6_500.0);
+            undersized.update(1.0 / 480.0, 6_500.0);
+        }
+
+        let pr_adequate = charge_pipe_pressure_ratio(&adequate, &env);
+        let pr_undersized = charge_pipe_pressure_ratio(&undersized, &env);
+        assert!(
+            pr_undersized > pr_adequate * 1.01,
+            "an undersized gate must creep past target more than an adequate \
+             one at the same rpm: adequate={pr_adequate:.2}, undersized={pr_undersized:.2}"
+        );
+    }
+
+    #[test]
+    fn a_fast_tip_in_transient_is_sensitive_to_controller_gain() {
+        // A wastegate can only ever bypass *more* flow to relieve pressure,
+        // never less than a bare spring would — so unlike a heater/cooler
+        // pair this loop cannot ring past target and back, and higher gain
+        // reins in the tip-in transient tighter rather than growing its
+        // overshoot the way a bidirectional actuator's would. What TB4 does
+        // own is that gain measurably changes that transient at all, which is
+        // what a real, responding closed loop implies and a fixed-threshold
+        // wastegate could not show.
+        let env = Environment::default();
+        let target = 1.35;
+        let rpm = 4_200.0;
+
+        let run = |gain: f64| -> f64 {
+            let mut block = EngineBlock::cross_plane_v8(env);
+            block.throttle = 0.2;
+            block.forced_induction = Some(test_turbo_hardware_with_wastegate(
+                &env, target, gain, 10.0e-4,
+            ));
+            for _ in 0..1_500 {
+                block.update(1.0 / 480.0, rpm);
+            }
+            block.throttle = 1.0;
+            let mut previous = charge_pipe_pressure_ratio(&block, &env);
+            let mut rising = true;
+            for _ in 0..1_500 {
+                block.update(1.0 / 480.0, rpm);
+                let pr = charge_pipe_pressure_ratio(&block, &env);
+                if rising && pr < previous {
+                    return previous;
+                }
+                rising = pr >= previous;
+                previous = pr;
+            }
+            previous
+        };
+
+        let low_gain_peak = run(0.6e5);
+        let high_gain_peak = run(3.0e5);
+        assert!(
+            (high_gain_peak - low_gain_peak).abs() > 0.05,
+            "controller gain should measurably change the tip-in transient's \
+             first peak: low={low_gain_peak:.2}, high={high_gain_peak:.2}"
+        );
+    }
+
+    #[test]
+    fn no_blow_off_drives_the_compressor_into_a_surge_oscillation() {
+        let mut block = settled_v8(4_000.0, 1.0, true);
+        block.throttle = 0.0;
+        let mut trace = Vec::with_capacity(3_000);
+        for _ in 0..3_000 {
+            block.update(1.0 / 480.0, 4_000.0);
+            trace.push(
+                block
+                    .forced_induction
+                    .as_ref()
+                    .unwrap()
+                    .charge_pipe
+                    .pressure(),
+            );
+        }
+        let changes = direction_changes(&trace, 2_000.0);
+        assert!(
+            changes >= 2,
+            "an unvented compressor past surge should cycle rather than settle \
+             monotonically: {changes} direction changes"
+        );
+    }
+
+    #[test]
+    fn a_recirculating_blow_off_valve_prevents_surge() {
+        use crate::physics::intake::{BlowOffFitment, BlowOffValve};
+
+        let env = Environment::default();
+        let mut block = EngineBlock::cross_plane_v8(env);
+        block.throttle = 1.0;
+        let bov = BlowOffValve {
+            fitment: BlowOffFitment::Recirculating,
+            max_flow_area: 4.0e-4,
+            spring_preload: 0.3e5,
+            opening_span: 0.2e5,
+        };
+        block.forced_induction = Some(test_turbo_hardware(&env).with_blow_off(bov));
+        for _ in 0..3_000 {
+            block.update(1.0 / 480.0, 4_000.0);
+        }
+
+        block.throttle = 0.0;
+        let mut trace = Vec::with_capacity(3_000);
+        for _ in 0..3_000 {
+            block.update(1.0 / 480.0, 4_000.0);
+            trace.push(
+                block
+                    .forced_induction
+                    .as_ref()
+                    .unwrap()
+                    .charge_pipe
+                    .pressure(),
+            );
+        }
+        let changes = direction_changes(&trace, 2_000.0);
+        assert!(
+            changes < 2,
+            "a recirculating blow-off valve should settle the charge pipe \
+             rather than let it surge: {changes} direction changes"
+        );
+    }
 }

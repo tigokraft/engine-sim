@@ -1999,15 +1999,17 @@ impl Driveline {
                 }
             }
             DynoMode::RpmHold { target_rpm } => {
+                block.ecu.motoring = false;
                 let slew = 1.0 - (-dt / 0.12).exp();
                 self.throttle += (self.throttle_target - self.throttle) * slew;
 
                 let effective = self.throttle;
+                block.throttle = effective;
                 self.torque = block.mean_brake_torque(self.rpm);
                 let drive = if self.is_cutting(block) {
                     0.0
                 } else {
-                    self.torque * (0.05 + 0.95 * effective)
+                    self.torque
                 };
 
                 let (a, b, c) = self.load;
@@ -2035,6 +2037,7 @@ impl Driveline {
                 start_rpm,
                 rate_rpm_s,
             } => {
+                block.ecu.motoring = false;
                 self.dyno_hold_integral = 0.0;
 
                 if self.active_pull.is_none() {
@@ -2049,18 +2052,27 @@ impl Driveline {
                     self.throttle_target = 0.40;
                     let slew = 1.0 - (-dt / 0.10).exp();
                     self.throttle += (self.throttle_target - self.throttle) * slew;
+                    block.throttle = self.throttle;
                     self.torque = block.mean_brake_torque(self.rpm);
-                    let drive = self.torque * (0.05 + 0.95 * self.throttle);
+                    let drive = if self.is_cutting(block) {
+                        0.0
+                    } else {
+                        self.torque
+                    };
                     let (a, b, c) = self.load;
                     let omega = self.rpm * PI / 30.0;
-                    let natural_load = a + b * omega + c * omega * omega;
-                    let alpha = (drive - natural_load) / self.inertia.max(1e-3);
+                    let natural_load =
+                        a + b * omega + c * omega * omega + (1.0 - self.throttle) * self.pumping;
+                    // Dyno drive assist ensures the engine reaches test speed even if
+                    // cold, stalled, or running aggressive race ports at low speed.
+                    let alpha = ((drive - natural_load) / self.inertia.max(1e-3)).max(50.0);
                     let new_omega = (omega + alpha * dt).max(STALL_RPM * PI / 30.0);
                     self.rpm = new_omega * 30.0 / PI;
                     self.dyno_absorber_torque = 0.0;
                 } else {
                     self.throttle = 1.0;
                     self.throttle_target = 1.0;
+                    block.throttle = 1.0;
                     self.torque = block.mean_brake_torque(self.rpm);
 
                     if let Some(pull) = self.active_pull.as_mut() {
@@ -2091,6 +2103,7 @@ impl Driveline {
                         self.dyno_mode = DynoMode::FreeRev;
                         self.throttle = 0.0;
                         self.throttle_target = 0.0;
+                        block.throttle = 0.0;
                         self.dyno_absorber_torque = 0.0;
                     }
                 }
@@ -2099,6 +2112,8 @@ impl Driveline {
                 self.dyno_hold_integral = 0.0;
                 self.throttle = 0.0;
                 self.throttle_target = 0.0;
+                block.throttle = 0.0;
+                block.ecu.motoring = true;
 
                 let rate = 800.0 * dt;
                 if self.rpm < target_rpm {
@@ -4239,6 +4254,53 @@ mod tests {
             peak_p.rpm,
             peak_t.rpm
         );
+    }
+
+    #[test]
+    fn dyno_sweep_pull_catalogue_from_idle() {
+        for preset in EnginePreset::catalogue() {
+            let mut block = preset.block(Environment::default());
+            let mut driveline = Driveline::new(&preset);
+            driveline.rpm = preset.idle;
+            let dt = 1.0 / 240.0;
+            // Settle at idle
+            for _ in 0..(240 * 2) {
+                driveline.update(&mut block, dt);
+                block.update(dt, driveline.rpm);
+            }
+
+            driveline.trigger_sweep_pull();
+            for _ in 0..(240 * 30) {
+                driveline.update(&mut block, dt);
+                block.update(dt, driveline.rpm);
+                if driveline.last_pull.is_some() {
+                    break;
+                }
+            }
+            let pull = driveline.last_pull.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "preset '{}' failed to complete pull: rpm was {:.1}, mode was {:?}",
+                    preset.name, driveline.rpm, driveline.dyno_mode
+                )
+            });
+            assert!(
+                !pull.points.is_empty(),
+                "preset '{}' pull has no points",
+                preset.name
+            );
+            let pt = pull
+                .peak_torque
+                .unwrap_or_else(|| panic!("preset '{}' has no peak torque", preset.name));
+            let pp = pull
+                .peak_power
+                .unwrap_or_else(|| panic!("preset '{}' has no peak power", preset.name));
+            assert!(pt.torque > 0.0, "preset '{}' peak torque <= 0", preset.name);
+            assert!(
+                pp.power_kw > 0.0,
+                "preset '{}' peak power <= 0",
+                preset.name
+            );
+        }
     }
 
     #[test]

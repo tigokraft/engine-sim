@@ -771,6 +771,7 @@ pub struct ForcedInduction {
 
 impl ForcedInduction {
     /// Builds the hardware at rest, with the charge pipe filled to ambient.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         compressor_map: CompressorMap,
         turbine_map: TurbineMap,
