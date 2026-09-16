@@ -182,6 +182,58 @@ impl TurbineMap {
     }
 }
 
+impl TurbineMap {
+    /// A stock turbine map sized to match [`crate::physics::compressor::CompressorMap::stock`]'s
+    /// frame — a preset can say "small single" once and get a matched pair.
+    ///
+    /// Turbine maps are far flatter than compressor maps, so the same three
+    /// points per line used there are still more than the interesting
+    /// behaviour needs.
+    pub fn stock(frame: compressor::FrameSize) -> Self {
+        use compressor::FrameSize;
+        match frame {
+            FrameSize::Small => small_frame_map(),
+            FrameSize::Medium => medium_frame_map(),
+            FrameSize::Large => large_frame_map(),
+        }
+    }
+}
+
+fn turbine_line(corrected_speed: f64, points: &[(f64, f64, f64)]) -> TurbineSpeedLine {
+    TurbineSpeedLine::new(
+        corrected_speed,
+        points
+            .iter()
+            .map(|&(expansion_ratio, reduced_flow, efficiency)| TurbineMapPoint {
+                expansion_ratio,
+                reduced_flow,
+                efficiency,
+            })
+            .collect(),
+    )
+}
+
+fn small_frame_map() -> TurbineMap {
+    TurbineMap::new(vec![
+        turbine_line(50_000.0, &[(1.0, 0.020, 0.48), (1.6, 0.060, 0.68), (2.6, 0.095, 0.58)]),
+        turbine_line(150_000.0, &[(1.0, 0.030, 0.52), (2.0, 0.100, 0.74), (3.2, 0.150, 0.60)]),
+    ])
+}
+
+fn medium_frame_map() -> TurbineMap {
+    TurbineMap::new(vec![
+        turbine_line(40_000.0, &[(1.0, 0.045, 0.50), (1.6, 0.130, 0.70), (2.6, 0.205, 0.60)]),
+        turbine_line(125_000.0, &[(1.0, 0.065, 0.54), (2.0, 0.215, 0.76), (3.2, 0.320, 0.62)]),
+    ])
+}
+
+fn large_frame_map() -> TurbineMap {
+    TurbineMap::new(vec![
+        turbine_line(30_000.0, &[(1.0, 0.085, 0.52), (1.6, 0.245, 0.71), (2.6, 0.385, 0.61)]),
+        turbine_line(100_000.0, &[(1.0, 0.120, 0.55), (2.0, 0.400, 0.77), (3.2, 0.590, 0.63)]),
+    ])
+}
+
 /// Converts a reduced flow back to an actual mass flow at real inlet
 /// conditions — the inverse of [`compressor::corrected_flow`].
 fn reduced_flow_to_mass_flow(reduced_flow: f64, inlet_temperature: f64, inlet_pressure: f64) -> f64 {
@@ -595,5 +647,18 @@ mod tests {
             shaft.shaft_rpm(),
             expected_rpm
         );
+    }
+
+    #[test]
+    fn stock_maps_span_more_flow_as_frame_grows() {
+        use compressor::FrameSize;
+        let small = TurbineMap::stock(FrameSize::Small);
+        let medium = TurbineMap::stock(FrameSize::Medium);
+        let large = TurbineMap::stock(FrameSize::Large);
+        let max_flow = |map: &TurbineMap| {
+            map.evaluate(map.speed_range().1, 3.2).reduced_flow
+        };
+        assert!(max_flow(&medium) > max_flow(&small));
+        assert!(max_flow(&large) > max_flow(&medium));
     }
 }
