@@ -177,6 +177,27 @@ impl TurbineMap {
     }
 }
 
+/// Turbocharger bearing cartridge, which sets how much shaft power the
+/// bearing itself loses to drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BearingType {
+    /// Full-film journal bearing: cheap, and the higher-drag default.
+    Journal,
+    /// Ball bearing cartridge: measurably lower drag, which is the entire
+    /// reason people buy one.
+    BallBearing,
+}
+
+impl BearingType {
+    /// Viscous drag loss coefficient, `P_bearing = coefficient * w^2` [W/(rad/s)^2].
+    fn viscous_loss_coefficient(self) -> f64 {
+        match self {
+            BearingType::Journal => 1.5e-5,
+            BearingType::BallBearing => 5.0e-6,
+        }
+    }
+}
+
 /// The rotating inertia a turbine and compressor wheel share, driven by
 /// turbine power and loaded by compressor power and bearing drag.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -185,20 +206,19 @@ pub struct TurboShaft {
     pub inertia: f64,
     /// Mechanical transmission efficiency between turbine and compressor wheels [-].
     pub mechanical_efficiency: f64,
-    /// Bearing viscous drag loss coefficient, `P_bearing = coefficient * w^2`
-    /// [W/(rad/s)^2].
-    bearing_drag_coefficient: f64,
+    /// Bearing cartridge fitted.
+    pub bearing: BearingType,
     /// Shaft angular speed [rad/s].
     omega: f64,
 }
 
 impl TurboShaft {
     /// A shaft at rest.
-    pub fn new(inertia: f64, mechanical_efficiency: f64, bearing_drag_coefficient: f64) -> Self {
+    pub fn new(inertia: f64, mechanical_efficiency: f64, bearing: BearingType) -> Self {
         Self {
             inertia,
             mechanical_efficiency,
-            bearing_drag_coefficient,
+            bearing,
             omega: 0.0,
         }
     }
@@ -219,7 +239,7 @@ impl TurboShaft {
     /// entirely and is exactly the same physics, just integrated in the
     /// variable that is actually smooth at rest.
     pub fn integrate(&mut self, dt: f64, turbine_power: f64, compressor_power: f64) -> f64 {
-        let bearing_power = self.bearing_drag_coefficient * self.omega * self.omega;
+        let bearing_power = self.bearing.viscous_loss_coefficient() * self.omega * self.omega;
         let net_power = turbine_power * self.mechanical_efficiency - compressor_power - bearing_power;
         let energy = 0.5 * self.inertia * self.omega * self.omega;
         let next_energy = (energy + net_power * dt).max(0.0);
@@ -313,16 +333,64 @@ mod tests {
 
     #[test]
     fn shaft_accelerates_when_turbine_power_exceeds_the_load_and_not_otherwise() {
-        let mut shaft = TurboShaft::new(3e-5, 0.97, 1.5e-5);
+        let mut shaft = TurboShaft::new(3e-5, 0.97, BearingType::Journal);
         shaft.integrate(1.0 / 480.0, 7000.0, 3000.0);
         assert!(shaft.shaft_rpm() > 0.0, "shaft did not accelerate under net positive power");
 
-        let mut stalled = TurboShaft::new(3e-5, 0.97, 1.5e-5);
+        let mut stalled = TurboShaft::new(3e-5, 0.97, BearingType::Journal);
         stalled.integrate(1.0 / 480.0, 2000.0, 3000.0);
         assert_eq!(
             stalled.shaft_rpm(),
             0.0,
             "shaft accelerated with turbine power below the load it must overcome"
+        );
+    }
+
+    fn time_to_reach(target_rpm: f64, inertia: f64, bearing: BearingType) -> f64 {
+        let mut shaft = TurboShaft::new(inertia, 0.97, bearing);
+        let dt = 1.0 / 480.0;
+        let mut t = 0.0;
+        while shaft.shaft_rpm() < target_rpm && t < 10.0 {
+            shaft.integrate(dt, 7000.0, 3000.0);
+            t += dt;
+        }
+        assert!(t < 10.0, "shaft never reached {target_rpm} rpm");
+        t
+    }
+
+    #[test]
+    fn a_ball_bearing_spools_faster_than_a_journal_at_the_same_inertia() {
+        let journal = time_to_reach(60_000.0, 3e-5, BearingType::Journal);
+        let ball = time_to_reach(60_000.0, 3e-5, BearingType::BallBearing);
+        assert!(
+            ball < journal,
+            "ball bearing ({ball}s) did not spool faster than journal ({journal}s)"
+        );
+    }
+
+    #[test]
+    fn steady_state_matches_a_hand_computed_power_balance() {
+        let turbine_power = 7000.0;
+        let compressor_power = 3000.0;
+        let mechanical_efficiency = 0.97;
+        let bearing = BearingType::Journal;
+
+        let mut shaft = TurboShaft::new(3e-5, mechanical_efficiency, bearing);
+        let dt = 1.0 / 480.0;
+        for _ in 0..200_000 {
+            shaft.integrate(dt, turbine_power, compressor_power);
+        }
+
+        let net_power = turbine_power * mechanical_efficiency - compressor_power;
+        let expected_omega = (net_power / bearing.viscous_loss_coefficient()).sqrt();
+        let expected_rpm = expected_omega * 60.0 / (2.0 * std::f64::consts::PI);
+
+        let relative_error = (shaft.shaft_rpm() - expected_rpm).abs() / expected_rpm;
+        assert!(
+            relative_error < 1e-3,
+            "integrated steady state {} rpm did not match hand-computed {} rpm",
+            shaft.shaft_rpm(),
+            expected_rpm
         );
     }
 }
