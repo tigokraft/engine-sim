@@ -444,6 +444,11 @@ impl EnginePreset {
             note: "Even 180 deg on both banks: two inline-fours sharing a crank.",
             model: CylinderModel {
                 geometry: CylinderGeometry::new(0.094, 0.0810, 0.1420, 12.5),
+                valves: ValveTrain {
+                    intake: ValveEvent::new(deg(706.0), deg(276.0), 0.0126, 0.0415, 0.68),
+                    exhaust: ValveEvent::new(deg(485.0), deg(270.0), 0.0116, 0.0345, 0.65),
+                }
+                .with_aggressiveness(0.65),
                 // A shorter burn: flat-plane vees are built to rev, and a race
                 // chamber lights faster than a road one.
                 combustion: HeatRelease::Spark(WiebeProfile::new(
