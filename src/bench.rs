@@ -960,9 +960,10 @@ impl EnginePreset {
                 // built so that it can rev at all.
                 geometry: CylinderGeometry::new(0.1000, 0.0840, 0.1450, 12.0),
                 valves: ValveTrain {
-                    intake: ValveEvent::new(deg(695.0), deg(255.0), 0.0115, 0.042, 0.66),
-                    exhaust: ValveEvent::new(deg(485.0), deg(250.0), 0.0105, 0.036, 0.62),
-                },
+                    intake: ValveEvent::new(deg(695.0), deg(255.0), 0.0118, 0.043, 0.67),
+                    exhaust: ValveEvent::new(deg(485.0), deg(250.0), 0.0108, 0.037, 0.63),
+                }
+                .with_aggressiveness(0.45),
                 ..CylinderModel::default()
             },
             firing: FiringOrder::single(),
