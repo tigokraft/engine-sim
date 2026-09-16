@@ -863,6 +863,18 @@ impl EnginePreset {
             note: "Hot-vee twins over the 90-180-270-180 burble: offbeat, but muffled.",
             model: CylinderModel {
                 geometry: CylinderGeometry::new(0.0830, 0.0920, 0.1480, 10.0),
+                valves: ValveTrain {
+                    intake: ValveEvent::new(deg(704.0), deg(244.0), 0.0106, 0.0370, 0.67),
+                    exhaust: ValveEvent::new(deg(494.0), deg(240.0), 0.0098, 0.0315, 0.64),
+                }
+                .with_aggressiveness(0.35),
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    deg(342.0),
+                    deg(52.0),
+                    5.0,
+                    2.0,
+                    0.97,
+                )),
                 ..CylinderModel::default()
             },
             firing: FiringOrder::cross_plane_v8(),
