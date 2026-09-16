@@ -73,6 +73,37 @@ pub const STARTER_WHINE_ORDER: f64 = 129.0;
 /// overrun is that decision, and it is the same one a driver makes by ear.
 pub const STARTER_RELEASE_HOLD: f64 = 0.25;
 
+/// Fraction of commanded fuel that lands on a stone-cold port wall [-].
+///
+/// Petrol sprayed at a port that is at ambient does not all stay airborne: most
+/// of the droplet mass hits the back of the valve and the port floor and stays
+/// there as a liquid film. It is not lost — it evaporates and goes in later —
+/// but "later" is a different cycle from the one it was metered for.
+pub const COLD_WALL_FILM_FRACTION: f64 = 0.80;
+
+/// Evaporation time constant of the port wall film on a stone-cold engine [s].
+///
+/// How long the film takes to give back what landed on it. Scales down with
+/// the block temperature: a hot port boils fuel off it as fast as it arrives,
+/// which is why a warm engine has no film and no lag at all.
+pub const COLD_WALL_FILM_TAU: f64 = 0.90;
+
+/// How much richer a stone-cold engine is commanded than a warm one [-].
+///
+/// Choke, by another name. The calibration knows the film is about to swallow
+/// half of what it meters, so it meters more — and the two do not cancel,
+/// because the enrichment is instant and the film is not.
+pub const COLD_ENRICHMENT: f64 = 0.45;
+
+/// Air-fuel ratio past which a homogeneous charge will not light [-].
+///
+/// The lean flammability limit of a petrol-air mixture in a cylinder, near
+/// enough. Past it the spark makes a kernel and the kernel goes out, which
+/// leaves a cylinder full of fuel and air going out of the exhaust valve
+/// unburnt — the misfire that makes a cold engine stumble on its first few
+/// firings, and the fuel that makes it pop once the pipe has warmed up.
+pub const LEAN_MISFIRE_AFR: f64 = 20.5;
+
 /// Crank speed below which the ECU has no signal to meter fuel against [rev/min].
 ///
 /// An engine that is barely moving has no usable crank signal, so nothing is
@@ -379,13 +410,28 @@ pub struct EngineControlUnit {
     /// Per-cylinder operational health.
     pub cylinder_health: [CylinderHealth; MAX_CYLINDERS],
 
+    // --- Port wall film ---
+    /// Fuel on the port walls, as a multiple of one cycle's commanded mass [-].
+    pub wall_film: f64,
+    /// Fuel reaching the cylinder, as a fraction of what was commanded [-].
+    pub fuel_delivery: f64,
+    /// Whether the charge this cycle is too lean to light.
+    pub misfiring: bool,
+
     // --- Cranking ---
     /// Whether the engine is being turned by the starter rather than running.
     ///
-    /// The ECU has no crank signal to fuel against until the engine is turning,
-    /// so while this is set no fuel is metered at all and the cylinders are
-    /// pure gas springs — which is the whole of what a starter works against.
+    /// Below [`CRANK_SYNC_RPM`] the ECU has no crank signal to fuel against, so
+    /// while this is set and the engine is that slow, nothing is metered and
+    /// the cylinders are pure gas springs.
     pub cranking: bool,
+    /// Whether the engine is being turned with the fuel deliberately off.
+    ///
+    /// What a compression test is, and what
+    /// [`EngineBlock::prime_ring`](crate::physics::engine_block::EngineBlock::prime_ring)
+    /// needs: a cycle of real gas with no combustion anywhere in it. Overrides
+    /// the schedule outright rather than going through it.
+    pub motoring: bool,
 }
 
 impl Default for EngineControlUnit {
@@ -453,7 +499,11 @@ impl EngineControlUnit {
             active_cut: LimiterCut::None,
 
             cylinder_health: [CylinderHealth::healthy(); MAX_CYLINDERS],
+            wall_film: 0.0,
+            fuel_delivery: 1.0,
+            misfiring: false,
             cranking: false,
+            motoring: false,
         }
     }
 
@@ -565,6 +615,67 @@ impl EngineControlUnit {
         self.cylinder_health
             .get(cylinder)
             .map_or(1.0, |h| h.combustion_factor())
+    }
+
+    /// The mixture a cold engine is commanded, given the warm schedule's target.
+    ///
+    /// Exactly `afr` on a warm engine, by construction rather than by
+    /// calibration: at `cold_fraction == 0` the divisor is one.
+    pub fn cold_enriched_afr(&self, afr: f64, cold_fraction: f64) -> f64 {
+        afr / (1.0 + COLD_ENRICHMENT * cold_fraction.clamp(0.0, 1.0))
+    }
+
+    /// Advances the port wall film and returns delivered over commanded fuel [-].
+    ///
+    /// The standard two-parameter film: a fraction `x` of what the injector
+    /// meters lands on the wall instead of going in, and what is already on the
+    /// wall evaporates with a time constant `tau`. Both scale with how cold the
+    /// port is, so both vanish together on a warm engine — and at
+    /// `cold_fraction == 0` this returns `commanded` itself, bit for bit, which
+    /// is what keeps every fingerprint measured warm still valid.
+    ///
+    /// # It is a lag, not a loss
+    ///
+    /// In the steady state the film gives back exactly what it takes, so what
+    /// reaches the cylinder is exactly what was metered however cold the engine
+    /// is. Everything this costs is transient — and a start is the largest
+    /// transient there is, because the film begins empty and the first cycles'
+    /// fuel goes almost entirely onto the wall. That is why a cold engine
+    /// cranks lean, stumbles, and catches a second later than the fuel says it
+    /// should.
+    ///
+    /// The statement of that is the arithmetic itself: **what goes into the
+    /// cylinder is what was metered, less whatever the wall is taking on this
+    /// step**. Fuel is conserved by construction, so the steady state needs no
+    /// cancellation to come out at one.
+    ///
+    /// # Why the film is integrated exactly
+    ///
+    /// `tau` goes to zero with the block temperature, and an explicit step of a
+    /// lag shorter than the step itself does not converge — it oscillates, and
+    /// it does so hardest at the temperatures where the film should be doing
+    /// nothing at all. The closed form has no such limit and costs one
+    /// exponential.
+    pub fn update_wall_film(&mut self, commanded: f64, cold_fraction: f64, dt: f64) -> f64 {
+        let cold = cold_fraction.clamp(0.0, 1.0);
+        let deposited = COLD_WALL_FILM_FRACTION * cold;
+        if deposited <= 0.0 {
+            // A hot port is a dry port. Nothing is held and nothing is owed.
+            self.wall_film = 0.0;
+            self.fuel_delivery = commanded;
+            return commanded;
+        }
+        let tau = (COLD_WALL_FILM_TAU * cold).max(1e-6);
+        let settled = deposited * commanded * tau;
+        let was = self.wall_film;
+        self.wall_film = settled + (was - settled) * (-dt / tau).exp();
+        let onto_wall = if dt > 0.0 {
+            (self.wall_film - was) / dt
+        } else {
+            0.0
+        };
+        self.fuel_delivery = (commanded - onto_wall).max(0.0);
+        self.fuel_delivery
     }
 
     /// Calibrated Wiebe duration adjusted for flame speed at the given AFR [rad].
@@ -1263,5 +1374,101 @@ mod tests {
         assert_eq!(ecu.limiter_cut_type, LimiterCut::None);
         ecu.cycle_limiter_cut();
         assert_eq!(ecu.limiter_cut_type, LimiterCut::Spark);
+    }
+
+    #[test]
+    fn a_warm_port_has_no_film_and_delivers_exactly_what_was_metered() {
+        // The neutrality guarantee, at the source. Bit-exact, not within a
+        // tolerance: every recorded fingerprint was measured on an engine at
+        // `cold_fraction == 0`, so anything this returns other than the number
+        // it was handed has moved the whole catalogue.
+        let mut ecu = EngineControlUnit::default();
+        let dt = 1.0 / 480.0;
+        for step in 0..2_000 {
+            // Including the step from nothing to full fuelling, which is the
+            // transient the film exists to smear on a cold engine.
+            let commanded = if step < 100 { 0.0 } else { 1.0 };
+            assert_eq!(ecu.update_wall_film(commanded, 0.0, dt), commanded);
+            assert_eq!(ecu.wall_film, 0.0);
+        }
+        assert_eq!(ecu.cold_enriched_afr(14.7, 0.0), 14.7);
+    }
+
+    #[test]
+    fn a_cold_port_delays_delivered_fuel_and_the_delay_shortens_as_it_warms() {
+        // Step the injector on from nothing and count how long the cylinder
+        // waits for what it was promised. A colder port takes longer, and the
+        // whole of that ordering has to hold without anything being told what
+        // the answer should be.
+        let fill_time = |cold: f64| -> f64 {
+            let mut ecu = EngineControlUnit::default();
+            let dt = 1.0 / 480.0;
+            // The first injection is short by whatever the wall takes.
+            let first = ecu.update_wall_film(1.0, cold, dt);
+            assert!(
+                first < 1.0,
+                "a port at {cold} cold delivered all of the first injection"
+            );
+            for step in 1..4_800 {
+                if ecu.update_wall_film(1.0, cold, dt) > 0.98 {
+                    return step as f64 * dt;
+                }
+            }
+            f64::INFINITY
+        };
+
+        let stone_cold = fill_time(1.0);
+        let warming = fill_time(0.5);
+        let nearly_warm = fill_time(0.2);
+        assert!(
+            stone_cold > warming && warming > nearly_warm,
+            "the lag did not shorten as the block warmed: \
+             {stone_cold:.2} s cold, {warming:.2} s half warm, {nearly_warm:.2} s nearly warm"
+        );
+        assert!(
+            stone_cold.is_finite() && stone_cold > 0.3,
+            "a stone-cold port caught up in {stone_cold:.3} s"
+        );
+    }
+
+    #[test]
+    fn the_wall_film_gives_back_everything_it_takes() {
+        // It is a lag and not a loss, so in the steady state the cylinder gets
+        // exactly what the injector was told to meter — at any temperature.
+        let mut ecu = EngineControlUnit::default();
+        let dt = 1.0 / 480.0;
+        for _ in 0..4_800 {
+            ecu.update_wall_film(1.0, 1.0, dt);
+        }
+        assert!(
+            (ecu.fuel_delivery - 1.0).abs() < 1e-3,
+            "a settled cold port is still {:.4} of what was metered",
+            ecu.fuel_delivery
+        );
+
+        // And it hands back what it is holding once the injector shuts off:
+        // fuel keeps arriving after a cut, off the wall rather than the rail.
+        let held = ecu.wall_film;
+        assert!(held > 0.0, "a stone-cold port held no fuel at all");
+        let mut returned = 0.0;
+        for _ in 0..4_800 {
+            returned += ecu.update_wall_film(0.0, 1.0, dt) * dt;
+        }
+        assert!(
+            (returned - held).abs() < 0.02 * held,
+            "the wall held {held:.4} and gave back {returned:.4}"
+        );
+    }
+
+    #[test]
+    fn a_cold_engine_is_commanded_richer_than_a_warm_one() {
+        let ecu = EngineControlUnit::default();
+        let warm = ecu.cold_enriched_afr(14.7, 0.0);
+        let cold = ecu.cold_enriched_afr(14.7, 1.0);
+        assert!(cold < warm, "a cold engine was not enriched: {cold} against {warm}");
+        assert!(
+            cold > 8.0,
+            "enriched past anything that would burn at all: {cold}"
+        );
     }
 }

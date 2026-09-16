@@ -2459,6 +2459,130 @@ mod tests {
     }
 
     #[test]
+    fn a_cold_start_puts_unburnt_fuel_in_the_exhaust_and_a_warm_idle_does_not() {
+        // The cold engine's pops, arriving at the exhaust the way the backfire
+        // voice already reads them: not a new event type, just fuel that did
+        // not burn. Nothing schedules a misfire — the port wall takes the first
+        // injections, the charge that reaches the cylinder is past the lean
+        // limit, and the flame does not propagate.
+        use crate::audio::{EngineControls, SnapshotSource};
+
+        let preset = EnginePreset::inline_four();
+
+        let mut block = preset.block(Environment::default());
+        block.cold_start();
+        let mut driveline = Driveline::cranking(&preset, &mut block);
+        let mut source = SnapshotSource::new(&block);
+        let dt = 1.0 / 480.0;
+        let mut misfired = 0usize;
+        let mut cold_unburnt = 0.0f32;
+        for _ in 0..(480 * 3) {
+            driveline.update(&mut block, dt);
+            block.update(dt, driveline.rpm);
+            let snapshot = source.sample(&block, driveline.rpm, dt, EngineControls::default());
+            if block.ecu.misfiring {
+                misfired += 1;
+            }
+            cold_unburnt = cold_unburnt.max(snapshot.unburnt_fuel_mass);
+        }
+        assert!(
+            misfired > 0,
+            "a stone-cold start lit every charge it was given"
+        );
+        assert!(
+            cold_unburnt > 1.0e-6,
+            "a cold start sent {cold_unburnt:.3e} kg of fuel out unburnt"
+        );
+
+        // The same engine warm, idling: the port is dry, the mixture is what
+        // the schedule asked for, and nothing goes out unlit.
+        let mut block = preset.block(Environment::default());
+        let mut driveline = Driveline::new(&preset);
+        let mut source = SnapshotSource::new(&block);
+        let mut warm_unburnt = 0.0f32;
+        for _ in 0..(480 * 3) {
+            driveline.update(&mut block, dt);
+            block.update(dt, driveline.rpm);
+            let snapshot = source.sample(&block, driveline.rpm, dt, EngineControls::default());
+            assert!(!block.ecu.misfiring, "a warm idle misfired");
+            // Not asserted bit-exact here, and deliberately: a block seeded
+            // exactly on its thermostat dips a few nanokelvin under it on the
+            // first frames, before the ring holds a cycle for the chamber heat
+            // to come out of, so `cold_fraction` is a billionth rather than a
+            // zero. The exactness guarantee is the one in
+            // `a_warm_port_has_no_film_and_delivers_exactly_what_was_metered`,
+            // which is about the law itself; this is about the engine.
+            assert!(
+                (block.ecu.fuel_delivery - 1.0).abs() < 1e-6,
+                "a warm port held back {:.9} of what was metered",
+                1.0 - block.ecu.fuel_delivery
+            );
+            warm_unburnt = warm_unburnt.max(snapshot.unburnt_fuel_mass);
+        }
+        assert!(
+            warm_unburnt < 0.01 * cold_unburnt,
+            "a warm idle put {warm_unburnt:.3e} kg out against the cold start's \
+             {cold_unburnt:.3e} kg"
+        );
+    }
+
+    #[test]
+    fn the_idle_target_falls_from_its_cold_value_as_the_block_takes_heat() {
+        // Not a timer. The governor is holding a speed that is a function of
+        // block temperature, so it comes down exactly as fast as the engine
+        // warms and no faster.
+        let preset = EnginePreset::inline_four();
+        let mut block = preset.block(Environment::default());
+        block.cold_start();
+        let driveline = Driveline::cranking(&preset, &mut block);
+
+        let stone_cold = driveline.idle_target(&block);
+        assert!(
+            stone_cold > preset.idle * 1.4,
+            "a stone-cold engine was only given {stone_cold:.0} rpm against a warm {:.0}",
+            preset.idle
+        );
+
+        let mut driveline = driveline;
+        let dt = 1.0 / 480.0;
+        let mut targets = vec![stone_cold];
+        let mut temperatures = vec![block.thermal.block_temperature()];
+        for step in 0..(480 * 120) {
+            driveline.update(&mut block, dt);
+            block.update(dt, driveline.rpm);
+            if step % (480 * 10) == 0 {
+                targets.push(driveline.idle_target(&block));
+                temperatures.push(block.thermal.block_temperature());
+            }
+        }
+
+        // Monotone down, and monotone up behind it: one is the cause of the
+        // other, which is what "not on a timer" means.
+        for pair in targets.windows(2) {
+            assert!(
+                pair[1] <= pair[0] + 1.0,
+                "the idle target went back up: {:.0} then {:.0}",
+                pair[0],
+                pair[1]
+            );
+        }
+        for pair in temperatures.windows(2) {
+            assert!(
+                pair[1] >= pair[0] - 0.1,
+                "the block cooled while it was being run: {:.1} then {:.1} K",
+                pair[0],
+                pair[1]
+            );
+        }
+        let settled = *targets.last().unwrap();
+        assert!(
+            settled < stone_cold,
+            "two minutes of running left the idle target at {settled:.0} rpm, \
+             where it started"
+        );
+    }
+
+    #[test]
     fn a_momentary_overrun_does_not_throw_the_pinion_out() {
         // What the release hold is for. A single-cylinder engine spends two
         // revolutions accelerating into nothing between compressions and passes

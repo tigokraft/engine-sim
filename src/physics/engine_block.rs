@@ -52,6 +52,14 @@ pub const PHASE_CELLS: usize = 720;
 /// shovelling through a lock-free queue.
 pub const CYCLE_TABLE: usize = 128;
 
+/// Leanest mixture the solver will carry as a number [-].
+///
+/// Past the lean limit the charge does not burn at all, so how lean it is stops
+/// mattering to anything except the arithmetic — and a delivered fraction on
+/// its way to zero would otherwise divide into an air-fuel ratio on its way to
+/// infinity and take the gas properties with it.
+pub const MAX_TRACKED_AFR: f64 = 60.0;
+
 // ---------------------------------------------------------------------------
 // Phase ring buffer
 // ---------------------------------------------------------------------------
@@ -1450,15 +1458,6 @@ impl EngineBlock {
         // anything else — and the AFR schedule, which is a spark engine's map
         // of how rich to run and when, has nothing to say about it. Its mixture
         // is its own.
-        let afr = match self.model.combustion {
-            HeatRelease::Spark(_) => {
-                let scheduled = self.ecu.schedule_afr(load, rpm, self.throttle, frame_dt);
-                self.model.air_fuel_ratio = scheduled;
-                scheduled
-            }
-            HeatRelease::Compression(_) => self.model.air_fuel_ratio,
-        };
-        self.model.gas = GasProperties::for_afr(afr);
         let limiter = self.ecu.evaluate_limiter(rpm);
         let dfco = self.ecu.update_dfco(self.throttle, rpm);
         // A cranking engine is fuelled as soon as the ECU has a crank signal to
@@ -1467,7 +1466,52 @@ impl EngineBlock {
         // go that starts the engine — the engine catches under the starter and
         // the starter notices afterwards.
         let no_sync = self.ecu.cranking && rpm.abs() < crate::physics::control::CRANK_SYNC_RPM;
-        self.model.fuel_cut = dfco || limiter == LimiterCut::Fuel || no_sync;
+        self.model.fuel_cut = dfco || limiter == LimiterCut::Fuel || no_sync || self.ecu.motoring;
+        let cold = self.thermal.cold_fraction();
+        let afr = match self.model.combustion {
+            HeatRelease::Spark(_) => {
+                // What the injector is told, and then what actually arrives.
+                // A cold engine is commanded rich; a cold port swallows the
+                // difference and gives it back a second later, so the mixture
+                // the cylinder sees on a start is leaner than anything the
+                // schedule ever asks for. Both terms are identities at
+                // `cold_fraction == 0`, so a warm engine is metered exactly
+                // what it was metered before any of this existed.
+                let scheduled = self.ecu.schedule_afr(load, rpm, self.throttle, frame_dt);
+                let commanded = self.ecu.cold_enriched_afr(scheduled, cold);
+                let metered = if self.model.fuel_cut { 0.0 } else { 1.0 };
+                let delivery = self.ecu.update_wall_film(metered, cold, frame_dt);
+                // A cut engine has no mixture, so it has no mixture strength
+                // either: the schedule stands and the film quietly drains
+                // behind it. Dividing a commanded ratio by a delivery of zero
+                // would hand the gas properties a number that means nothing and
+                // change what a cut cylinder pumps.
+                let effective = if self.model.fuel_cut {
+                    commanded
+                } else if delivery > 1e-3 {
+                    (commanded / delivery).min(MAX_TRACKED_AFR)
+                } else {
+                    MAX_TRACKED_AFR
+                };
+                // A charge past the lean limit makes a kernel and no flame. The
+                // fuel stays in the cylinder and goes out of the exhaust valve
+                // with the rest of the charge — see [`CylinderModel::misfire`].
+                self.ecu.misfiring =
+                    !self.model.fuel_cut && effective > crate::physics::control::LEAN_MISFIRE_AFR;
+                self.model.misfire = self.ecu.misfiring;
+                self.model.air_fuel_ratio = effective;
+                effective
+            }
+            // A diesel injects straight into the cylinder, so it has no port to
+            // wet and no film to wait for, and it is lean everywhere by
+            // construction rather than by schedule. Nothing above applies to it.
+            HeatRelease::Compression(_) => {
+                self.ecu.misfiring = false;
+                self.model.misfire = false;
+                self.model.air_fuel_ratio
+            }
+        };
+        self.model.gas = GasProperties::for_afr(afr);
         // Spark timing is the ECU's on an engine that has a coil. A diesel has
         // none: its heat release starts where the Arrhenius integral says, and
         // the latch solves that per cycle. See [`HeatRelease`].
@@ -1620,15 +1664,18 @@ impl EngineBlock {
     /// overnight whether or not anybody worked out what was in its cylinders.
     pub fn prime_ring(&mut self, rpm: f64) {
         let rpm = rpm.max(1.0);
-        let was_cranking = self.ecu.cranking;
         let thermal = self.thermal.clone();
-        self.ecu.cranking = true;
+        let ecu = self.ecu.clone();
+        self.ecu.motoring = true;
         let dt = 1.0 / 480.0;
         let frames = (2.0 * 120.0 / rpm / dt).ceil() as usize;
         for _ in 0..frames {
             self.update(dt, rpm);
         }
-        self.ecu.cranking = was_cranking;
+        // Everything the ECU accumulated over the seed goes back too: the port
+        // wall film above all, which would otherwise arrive at the first real
+        // injection already full and hand the engine a start it has not had.
+        self.ecu = ecu;
         self.thermal = thermal;
     }
 

@@ -643,9 +643,15 @@ impl SnapshotSource {
         // only way to stop it firing is to stop fuelling it, and a cylinder
         // that never got any fuel has none to send out unburnt. That is why a
         // diesel does not pop on a lift and does not bang off its limiter.
+        // A cold misfire arrives here the same way a cut does, and for the same
+        // reason: the solver's charge is fuelled, the ECU knows the flame never
+        // propagated, and what leaves the exhaust valve is the whole of it.
         let has_spark = block.model.combustion.spark().is_some();
         let spark_cut = has_spark
-            && (controls.spark_cut || block.ecu.dfco_tip_in || limiter_spark)
+            && (controls.spark_cut
+                || block.ecu.dfco_tip_in
+                || limiter_spark
+                || block.ecu.misfiring)
             && !limiter_fuel;
 
         // The blowdown driver per cylinder. Clamped at zero because a negative difference

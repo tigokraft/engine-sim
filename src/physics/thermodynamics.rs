@@ -1203,6 +1203,15 @@ pub struct CylinderModel {
     pub air_fuel_ratio: f64,
     /// Whether fuel delivery is cut this cycle (DFCO or fuel-cut limiter).
     pub fuel_cut: bool,
+    /// Whether the charge this cycle is fuelled but will not light.
+    ///
+    /// Different from [`Self::fuel_cut`], and the difference is the whole
+    /// point: a cut cylinder has nothing in it, while a misfiring one is full
+    /// of a mixture that a spark could not propagate through. The first is
+    /// silent and the second pushes a cylinder of raw fuel down the exhaust —
+    /// which is what a cold engine does on its first few firings, and what the
+    /// backfire voice is waiting for.
+    pub misfire: bool,
 }
 
 impl Default for CylinderModel {
@@ -1217,6 +1226,7 @@ impl Default for CylinderModel {
             fuel_lhv: GASOLINE_LHV,
             air_fuel_ratio: STOICH_AFR,
             fuel_cut: false,
+            misfire: false,
         }
     }
 }
@@ -1421,7 +1431,15 @@ impl CylinderModel {
     /// and an ignition angle that moved between RK4 stages would not be one.
     pub fn latch(&self, cylinder: &CylinderState, omega: f64) -> CycleLatch {
         let mut latch = CycleLatch {
-            fuel_mass: self.trapped_fuel_mass(cylinder.mass, cylinder.burned_fraction),
+            // A misfire leaves the fuel in the cylinder and takes the heat
+            // release away, which is not the same as taking the fuel away:
+            // [`Self::trapped_fuel_mass`] still reports the whole charge, and
+            // that is what leaves through the exhaust valve unburnt.
+            fuel_mass: if self.misfire {
+                0.0
+            } else {
+                self.trapped_fuel_mass(cylinder.mass, cylinder.burned_fraction)
+            },
             pressure: cylinder.pressure(&self.geometry, &self.gas),
             temperature: cylinder.temperature,
             volume: self.geometry.safe_volume(cylinder.theta),
