@@ -88,7 +88,25 @@ pub const RAISED_COSINE_RAMP: f64 = 0.5;
 /// raised cosine's peak velocity, which is about where a solid roller on a
 /// serious spring sits. Past it the lifter leaves the lobe on the nose rather
 /// than at the float speed and the cam is a component, not a profile.
+///
+/// This is a valvetrain limit, not a limit of the ramp shape itself: it is
+/// enforced by [`ValveEvent::with_ramp_fraction`], the setter a poppet cam is
+/// built through, not by [`ValveEvent::lift`]. A rotary port has no spring and
+/// no lifter to survive, so [`ValveEvent::with_port_ramp_fraction`] is allowed
+/// past it, down to [`PERIPHERAL_PORT_RAMP`].
 pub const FASTEST_RAMP: f64 = 0.15;
+
+/// Steepest flank a housing port's edge can present, as a fraction of the
+/// event [-].
+///
+/// An apex seal crossing a peripheral port has no mass to accelerate against a
+/// spring — it is a hard edge sweeping past a hole — so it is not bound by
+/// [`FASTEST_RAMP`], which is a valvetrain survival limit. A fortieth of the
+/// event is a few crank degrees out of a typical port duration, which is
+/// "near-instantaneous" without being a literal discontinuity: the flank is
+/// still the same C1-continuous raised-cosine shape, just compressed hard
+/// against its own edge.
+pub const PERIPHERAL_PORT_RAMP: f64 = 0.025;
 
 /// Single-zone Wiebe burn profile.
 ///
@@ -855,6 +873,18 @@ impl ValveEvent {
         self
     }
 
+    /// Re-grinds the flanks past what a valvetrain survives.
+    ///
+    /// The port equivalent of [`ValveEvent::with_ramp_fraction`], for a
+    /// rotary housing port or an apex seal edge: nothing here is a lifter
+    /// riding a spring, so the floor is [`PERIPHERAL_PORT_RAMP`] rather than
+    /// [`FASTEST_RAMP`]. Everything else — the C1-continuous flank shape, the
+    /// duration and lift untouched — is exactly [`ValveEvent::lift`].
+    pub fn with_port_ramp_fraction(mut self, ramp_fraction: f64) -> Self {
+        self.ramp_fraction = ramp_fraction.clamp(PERIPHERAL_PORT_RAMP, RAISED_COSINE_RAMP);
+        self
+    }
+
     /// Peak opening velocity against a raised cosine of the same duration and
     /// lift [-].
     ///
@@ -869,7 +899,7 @@ impl ValveEvent {
     /// [`EnginePreset::synth_config`](crate::bench::EnginePreset::synth_config)
     /// scales the valve voices with.
     pub fn ramp_rate(&self) -> f64 {
-        RAISED_COSINE_RAMP / self.ramp_fraction.clamp(FASTEST_RAMP, RAISED_COSINE_RAMP)
+        RAISED_COSINE_RAMP / self.ramp_fraction.clamp(PERIPHERAL_PORT_RAMP, RAISED_COSINE_RAMP)
     }
 
     /// Fraction of the event elapsed at a crank angle; `None` while shut.
@@ -906,7 +936,7 @@ impl ValveEvent {
         let Some(u) = self.progress(theta) else {
             return 0.0;
         };
-        let r = self.ramp_fraction.clamp(FASTEST_RAMP, RAISED_COSINE_RAMP);
+        let r = self.ramp_fraction.clamp(PERIPHERAL_PORT_RAMP, RAISED_COSINE_RAMP);
         // Formed as `(PI / r) * u` rather than `PI * (u / r)` so that the
         // default half ramp divides exactly by two and lands on the same
         // `2 PI u` the single raised cosine used, to the last bit.
