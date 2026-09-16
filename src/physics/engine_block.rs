@@ -1829,8 +1829,10 @@ impl EngineBlock {
         let cylinders = self.firing.len() as f64;
         let forward_flow = cylinders * self.ring.cycle_mean(|s| s.intake_flow.max(0.0));
         let reversion_flow = cylinders * self.ring.cycle_mean(|s| s.intake_flow.min(0.0));
-        let reversion_enthalpy =
-            cylinders * self.ring.cycle_mean(|s| s.intake_flow.min(0.0) * s.temperature);
+        let reversion_enthalpy = cylinders
+            * self
+                .ring
+                .cycle_mean(|s| s.intake_flow.min(0.0) * s.temperature);
         let reversion_temperature = if reversion_flow.abs() > 1e-9 {
             reversion_enthalpy / reversion_flow
         } else {
@@ -1863,16 +1865,22 @@ impl EngineBlock {
                 * self.firing.len() as f64;
         let plate_bore_area = self.intake.throttle.bore_area().max(1e-9);
         let bypass_authority = IDLE_BYPASS_AUTHORITY * bore_reference_area / plate_bore_area;
-        self.intake.throttle.leak_area_fraction =
-            (PLATE_LEAK_FRACTION + bypass_authority * self.idle_bypass.clamp(0.0, 1.0))
-                .clamp(0.0, 1.0);
+        self.intake.throttle.leak_area_fraction = (PLATE_LEAK_FRACTION
+            + bypass_authority * self.idle_bypass.clamp(0.0, 1.0))
+        .clamp(0.0, 1.0);
         // Read before this frame's `advance_exhaust` below, so a fitted
         // compressor's shaft is loaded with *this* frame's power draw rather
         // than a frame-stale one.
         let upstream = if let Some(forced) = &mut self.forced_induction {
             let previous = forced.upstream_port_state();
             let throttle_flow_estimate = self.intake.throttle_flow(self.throttle, &previous);
-            forced.advance_intake(dt, throttle_flow_estimate, &self.environment, &self.model.gas)
+            forced.advance_intake(
+                dt,
+                throttle_flow_estimate,
+                self.intake.pressure(),
+                &self.environment,
+                &self.model.gas,
+            )
         } else {
             IntakePlenum::ambient_upstream(&self.environment, &self.model.gas)
         };
@@ -1904,11 +1912,20 @@ impl EngineBlock {
             } else {
                 let n = self.exhaust_banks.len().max(1) as f64;
                 (
-                    self.exhaust_banks.iter().map(|b| b.port_pressure()).sum::<f64>() / n,
-                    self.exhaust_banks.iter().map(|b| b.plenum.temperature).sum::<f64>() / n,
+                    self.exhaust_banks
+                        .iter()
+                        .map(|b| b.port_pressure())
+                        .sum::<f64>()
+                        / n,
+                    self.exhaust_banks
+                        .iter()
+                        .map(|b| b.plenum.temperature)
+                        .sum::<f64>()
+                        / n,
                 )
             };
-            let turbine_upstream = PortConditions::from_environment(&self.environment, &self.model.gas).exhaust;
+            let turbine_upstream =
+                PortConditions::from_environment(&self.environment, &self.model.gas).exhaust;
             let turbine_upstream = crate::physics::thermodynamics::PortState {
                 pressure,
                 temperature,
@@ -3281,11 +3298,19 @@ mod tests {
         let turbine_map = TurbineMap::new(vec![
             TurbineSpeedLine::new(
                 60_000.0,
-                vec![point(1.0, 0.05, 0.50), point(1.5, 0.14, 0.68), point(2.2, 0.22, 0.60)],
+                vec![
+                    point(1.0, 0.05, 0.50),
+                    point(1.5, 0.14, 0.68),
+                    point(2.2, 0.22, 0.60),
+                ],
             ),
             TurbineSpeedLine::new(
                 160_000.0,
-                vec![point(1.0, 0.08, 0.55), point(2.0, 0.28, 0.74), point(3.2, 0.42, 0.62)],
+                vec![
+                    point(1.0, 0.08, 0.55),
+                    point(2.0, 0.28, 0.74),
+                    point(3.2, 0.42, 0.62),
+                ],
             ),
         ]);
 
@@ -3329,7 +3354,11 @@ mod tests {
             untouched.update(1.0 / 480.0, 4_000.0);
         }
         assert_eq!(with_none.forced_induction.is_none(), true);
-        approx(with_none.intake.pressure(), untouched.intake.pressure(), 1e-9);
+        approx(
+            with_none.intake.pressure(),
+            untouched.intake.pressure(),
+            1e-9,
+        );
         approx(
             with_none.exhaust_banks[0].plenum.pressure(),
             untouched.exhaust_banks[0].plenum.pressure(),
@@ -3348,7 +3377,10 @@ mod tests {
             .expect("forced induction fitted")
             .shaft
             .shaft_rpm();
-        assert!(shaft_rpm > 5_000.0, "turbo failed to spool: {shaft_rpm} rpm");
+        assert!(
+            shaft_rpm > 5_000.0,
+            "turbo failed to spool: {shaft_rpm} rpm"
+        );
 
         assert!(
             boosted.intake.pressure() > na.intake.pressure() * 1.1,
@@ -3399,7 +3431,12 @@ mod tests {
         for _ in 0..500 {
             block.update(1.0 / 480.0, 4_000.0);
         }
-        let after_lift = block.forced_induction.as_ref().unwrap().charge_pipe.pressure();
+        let after_lift = block
+            .forced_induction
+            .as_ref()
+            .unwrap()
+            .charge_pipe
+            .pressure();
         assert!(
             (after_lift - pressurized).abs() > pressurized * 0.1,
             "a shut throttle must move the charge pipe well off its WOT \

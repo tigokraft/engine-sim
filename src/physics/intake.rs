@@ -41,7 +41,7 @@ use crate::physics::compressor::{self, CompressorMap};
 use crate::physics::cylinder::GasProperties;
 use crate::physics::engine_block::Plenum;
 use crate::physics::thermodynamics::{flow_function, PortConditions, PortState};
-use crate::physics::turbine::{BearingType, TurbineMap, TurboShaft};
+use crate::physics::turbine::{BearingType, BoostController, TurbineMap, TurboShaft, Wastegate};
 
 /// Smallest mass the plenum is allowed to hold [kg].
 ///
@@ -51,6 +51,11 @@ const MASS_FLOOR: f64 = 1e-9;
 
 /// Coldest and hottest the charge is allowed to get [K].
 const TEMPERATURE_BOUNDS: (f64, f64) = (1.0, 4000.0);
+
+/// How hard a compressor pushed past its own surge boundary reverses flow,
+/// per unit of pressure-ratio overshoot [-]. See
+/// [`ForcedInduction::advance_intake`]'s surge branch.
+const SURGE_REVERSAL_GAIN: f64 = 3.0;
 
 /// Largest number of internal steps one `advance` will take.
 ///
@@ -666,12 +671,74 @@ impl Intercooler {
     /// Discharge temperature after the core, cooled a fraction of the way
     /// back to ambient.
     pub fn cooled_temperature(&self, inlet_temperature: f64, ambient_temperature: f64) -> f64 {
-        inlet_temperature - self.effectiveness.clamp(0.0, 1.0) * (inlet_temperature - ambient_temperature)
+        inlet_temperature
+            - self.effectiveness.clamp(0.0, 1.0) * (inlet_temperature - ambient_temperature)
     }
 
     /// Pressure lost crossing the core at a given mass flow [Pa].
     pub fn pressure_drop(&self, mass_flow: f64) -> f64 {
         self.loss_coefficient.max(0.0) * mass_flow * mass_flow
+    }
+}
+
+/// Where a blow-off valve's vented flow goes.
+///
+/// See `docs/TURBO_PLAN.md`'s TB4: in this lumped model both fitments relieve
+/// the charge pipe identically — the distinction here is what a listener
+/// hears, atmospheric being a second radiating aperture and recirculating
+/// venting almost silently back ahead of the compressor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlowOffFitment {
+    /// Vents outside — the classic release, and another aperture.
+    Atmospheric,
+    /// Vents back ahead of the compressor: nearly silent, and the flow keeps
+    /// the wheel loaded rather than leaving the system.
+    Recirculating,
+}
+
+/// A blow-off / dump valve: a real vent from the charge pipe, referenced
+/// against the intake manifold pressure the way a real diaphragm is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlowOffValve {
+    pub fitment: BlowOffFitment,
+    /// Fully open vent flow area [m^2].
+    pub max_flow_area: f64,
+    /// Charge-pipe-minus-manifold differential at which the spring starts to
+    /// crack the valve [Pa].
+    pub spring_preload: f64,
+    /// Differential span from just-cracked to fully open [Pa].
+    pub opening_span: f64,
+}
+
+impl BlowOffValve {
+    /// Open fraction, `0..=1`, from how far the charge pipe sits above the
+    /// intake manifold past the spring's own preload — a shut throttle
+    /// leaves the manifold in vacuum, which is what actually opens a real
+    /// valve on lift rather than boost pressure alone.
+    pub fn open_fraction(&self, charge_pipe_pressure: f64, manifold_pressure: f64) -> f64 {
+        ((charge_pipe_pressure - manifold_pressure - self.spring_preload)
+            / self.opening_span.max(1.0))
+        .clamp(0.0, 1.0)
+    }
+
+    /// Mass flow vented from the charge pipe [kg/s].
+    pub fn mass_flow(
+        &self,
+        charge_pipe: &PortState,
+        downstream_pressure: f64,
+        manifold_pressure: f64,
+    ) -> f64 {
+        let area = self.max_flow_area * self.open_fraction(charge_pipe.pressure, manifold_pressure);
+        if area <= 0.0 {
+            return 0.0;
+        }
+        let p_up = charge_pipe.pressure.max(1.0);
+        let p_down = downstream_pressure.max(1.0);
+        if p_down >= p_up {
+            return 0.0;
+        }
+        area * p_up / (charge_pipe.gas_constant * charge_pipe.temperature.max(1.0)).sqrt()
+            * flow_function(p_down / p_up, charge_pipe.gamma)
     }
 }
 
@@ -692,6 +759,9 @@ pub struct ForcedInduction {
     /// its volume already including any intercooler core.
     pub charge_pipe: Plenum,
     pub intercooler: Option<Intercooler>,
+    pub wastegate: Option<Wastegate>,
+    pub boost_controller: Option<BoostController>,
+    pub blow_off: Option<BlowOffValve>,
     /// Shaft power the compressor drew on the most recent
     /// [`Self::advance_intake`] [W], held here so [`Self::advance_exhaust`]
     /// can load the shaft with it without recomputing the compressor's
@@ -717,9 +787,52 @@ impl ForcedInduction {
             compressor_map,
             turbine_map,
             shaft: TurboShaft::new(inertia, mechanical_efficiency, bearing),
-            charge_pipe: Plenum::new(volume, env.pressure, env.temperature, gas.r_unburned, gas.gamma_unburned),
+            charge_pipe: Plenum::new(
+                volume,
+                env.pressure,
+                env.temperature,
+                gas.r_unburned,
+                gas.gamma_unburned,
+            ),
             intercooler,
+            wastegate: None,
+            boost_controller: None,
+            blow_off: None,
             compressor_power: 0.0,
+        }
+    }
+
+    /// Fits a wastegate to bypass the turbine.
+    pub fn with_wastegate(mut self, wastegate: Wastegate) -> Self {
+        self.wastegate = Some(wastegate);
+        self
+    }
+
+    /// Fits the closed-loop controller that biases the wastegate's threshold.
+    pub fn with_boost_controller(mut self, controller: BoostController) -> Self {
+        self.boost_controller = Some(controller);
+        self
+    }
+
+    /// Fits a blow-off valve to vent the charge pipe.
+    pub fn with_blow_off(mut self, valve: BlowOffValve) -> Self {
+        self.blow_off = Some(valve);
+        self
+    }
+
+    /// The charge pipe's current [`PortState`], without advancing anything.
+    ///
+    /// Used to get a representative throttle-flow estimate for this frame's
+    /// [`Self::advance_intake`] call before it runs — the same lagged-state
+    /// pattern [`ExhaustManifold::tailpipe_flow`](super::engine_block::ExhaustManifold::tailpipe_flow)
+    /// already uses.
+    pub fn upstream_port_state(&self) -> PortState {
+        PortState {
+            pressure: self.charge_pipe.pressure(),
+            temperature: self.charge_pipe.temperature,
+            gas_constant: self.charge_pipe.gas_constant,
+            gamma: self.charge_pipe.gamma,
+            burned_fraction: 0.0,
         }
     }
 
@@ -737,38 +850,47 @@ impl ForcedInduction {
     /// keeps supplying its surge-line flow while the throttle's leak area
     /// draws far less, so the pipe pressure moves — the rate set by
     /// [`Plenum::volume`].
-    /// The charge pipe's current [`PortState`], without advancing anything.
-    ///
-    /// Used to get a representative throttle-flow estimate for this frame's
-    /// [`Self::advance_intake`] call before it runs — the same lagged-state
-    /// pattern [`ExhaustManifold::tailpipe_flow`](super::engine_block::ExhaustManifold::tailpipe_flow)
-    /// already uses.
-    pub fn upstream_port_state(&self) -> PortState {
-        PortState {
-            pressure: self.charge_pipe.pressure(),
-            temperature: self.charge_pipe.temperature,
-            gas_constant: self.charge_pipe.gas_constant,
-            gamma: self.charge_pipe.gamma,
-            burned_fraction: 0.0,
-        }
-    }
-
+    /// `manifold_pressure` is the intake manifold's own pressure, downstream
+    /// of the throttle — needed only to reference a fitted [`BlowOffValve`]
+    /// against, since a real one opens on manifold vacuum as much as on
+    /// charge pipe pressure.
     pub fn advance_intake(
         &mut self,
         dt: f64,
         throttle_flow: f64,
+        manifold_pressure: f64,
         env: &Environment,
         gas: &GasProperties,
     ) -> PortState {
         let ambient = IntakePlenum::ambient_upstream(env, gas);
         let pressure_ratio = (self.charge_pipe.pressure() / ambient.pressure.max(1.0)).max(1.0);
-        let corrected_speed = compressor::corrected_speed(self.shaft.shaft_rpm(), ambient.temperature);
+        let corrected_speed =
+            compressor::corrected_speed(self.shaft.shaft_rpm(), ambient.temperature);
         let (corrected_flow, reading) = self
             .compressor_map
             .flow_for_pressure_ratio(corrected_speed, pressure_ratio);
-        let mass_flow = (corrected_flow * (ambient.pressure / compressor::P_REF)
-            / (ambient.temperature / compressor::T_REF).sqrt())
-        .max(0.0);
+
+        // The map cannot make this pressure ratio forward at all at this
+        // speed — `flow_for_pressure_ratio` has clamped to the surge
+        // boundary rather than inventing negative data of its own (a map is
+        // a measured device). The system is not obliged to stop there: a
+        // real wheel asked for more head than it can produce surges, and
+        // flow reverses. Scaling the reversal against this speed's own surge
+        // flow, rather than a constant, is what lets the resulting
+        // oscillation's amplitude and period come from the map and the
+        // charge pipe's own capacitance instead of being tuned by hand.
+        let mass_flow = if reading.region == compressor::MapRegion::Surge {
+            let achievable = reading.pressure_ratio.max(1.0);
+            let overshoot = (pressure_ratio / achievable - 1.0).max(0.0);
+            let scale = self.compressor_map.surge_flow_at(corrected_speed);
+            let reversed_corrected = -SURGE_REVERSAL_GAIN * overshoot * scale;
+            reversed_corrected * (ambient.pressure / compressor::P_REF)
+                / (ambient.temperature / compressor::T_REF).sqrt()
+        } else {
+            (corrected_flow * (ambient.pressure / compressor::P_REF)
+                / (ambient.temperature / compressor::T_REF).sqrt())
+            .max(0.0)
+        };
 
         let discharge_temperature = compressor::discharge_temperature(
             ambient.temperature,
@@ -782,7 +904,7 @@ impl ForcedInduction {
         };
 
         self.compressor_power = compressor::compressor_power(
-            mass_flow,
+            mass_flow.max(0.0),
             ambient.temperature,
             reading.pressure_ratio,
             reading.efficiency.max(0.05),
@@ -790,8 +912,23 @@ impl ForcedInduction {
             ambient.gamma,
         );
 
-        self.charge_pipe
-            .integrate(dt, mass_flow, inflow_temperature, throttle_flow.max(0.0));
+        if let Some(controller) = &mut self.boost_controller {
+            controller.update(dt, pressure_ratio);
+        }
+
+        let charge_pipe_state = self.upstream_port_state();
+        let blow_off_flow = self
+            .blow_off
+            .as_ref()
+            .map(|bov| bov.mass_flow(&charge_pipe_state, ambient.pressure, manifold_pressure))
+            .unwrap_or(0.0);
+
+        self.charge_pipe.integrate(
+            dt,
+            mass_flow,
+            inflow_temperature,
+            throttle_flow.max(0.0) + blow_off_flow,
+        );
 
         let mut pressure = self.charge_pipe.pressure();
         if let Some(ic) = &self.intercooler {
@@ -807,12 +944,14 @@ impl ForcedInduction {
     }
 
     /// Advances the shaft from the actual exhaust manifold state, and returns
-    /// the mass flow through the turbine [kg/s] — the flow that should leave
-    /// the exhaust collector this frame, in place of a plain vent to
-    /// atmosphere, now that a wheel sits in the way of it.
+    /// the total mass flow that should leave the exhaust collector this frame
+    /// — through the turbine wheel, plus whatever a fitted wastegate bypasses
+    /// around it — in place of a plain vent to atmosphere, now that a wheel
+    /// sits in the way of it.
     ///
     /// Must be called after [`Self::advance_intake`] on the same frame: the
-    /// shaft's power balance needs that call's compressor power draw.
+    /// shaft's power balance needs that call's compressor power draw, and a
+    /// fitted wastegate needs that call's boost controller update.
     pub fn advance_exhaust(
         &mut self,
         dt: f64,
@@ -821,16 +960,35 @@ impl ForcedInduction {
     ) -> f64 {
         let corrected_speed =
             compressor::corrected_speed(self.shaft.shaft_rpm(), turbine_upstream.temperature);
-        self.shaft
-            .advance(dt, turbine_upstream, downstream_pressure, &self.turbine_map, self.compressor_power);
+        self.shaft.advance(
+            dt,
+            turbine_upstream,
+            downstream_pressure,
+            &self.turbine_map,
+            self.compressor_power,
+        );
         let (speed_lo, speed_hi) = self.turbine_map.speed_range();
-        let (mass_flow, _, _) = crate::physics::turbine::turbine_operating_point(
+        let (turbine_flow, _, _) = crate::physics::turbine::turbine_operating_point(
             turbine_upstream,
             downstream_pressure,
             &self.turbine_map,
             corrected_speed.clamp(speed_lo, speed_hi),
         );
-        mass_flow
+
+        let wastegate_flow = match &self.wastegate {
+            Some(wg) => {
+                let bias = self
+                    .boost_controller
+                    .as_ref()
+                    .map(|c| c.bias())
+                    .unwrap_or(0.0);
+                let effective_threshold = wg.spring_preload - bias;
+                wg.mass_flow(turbine_upstream, downstream_pressure, effective_threshold)
+            }
+            None => 0.0,
+        };
+
+        turbine_flow + wastegate_flow
     }
 }
 
@@ -1773,18 +1931,28 @@ mod tests {
         TurbineMap::new(vec![
             TurbineSpeedLine::new(
                 40_000.0,
-                vec![point(1.0, 0.015, 0.45), point(1.5, 0.045, 0.66), point(2.5, 0.075, 0.58)],
+                vec![
+                    point(1.0, 0.015, 0.45),
+                    point(1.5, 0.045, 0.66),
+                    point(2.5, 0.075, 0.58),
+                ],
             ),
             TurbineSpeedLine::new(
                 140_000.0,
-                vec![point(1.0, 0.025, 0.50), point(1.8, 0.085, 0.72), point(3.0, 0.135, 0.60)],
+                vec![
+                    point(1.0, 0.025, 0.50),
+                    point(1.8, 0.085, 0.72),
+                    point(3.0, 0.135, 0.60),
+                ],
             ),
         ])
     }
 
     fn forced_induction() -> ForcedInduction {
         ForcedInduction::new(
-            crate::physics::compressor::CompressorMap::stock(crate::physics::compressor::FrameSize::Small),
+            crate::physics::compressor::CompressorMap::stock(
+                crate::physics::compressor::FrameSize::Small,
+            ),
             turbine_map(),
             6.0e-5,
             0.98,
@@ -1819,7 +1987,9 @@ mod tests {
     fn settled_charge_pipe_pressure(fi: &mut ForcedInduction, throttle_flow: f64) -> f64 {
         let mut pressure = fi.charge_pipe.pressure();
         for _ in 0..2_000 {
-            pressure = fi.advance_intake(1.0e-3, throttle_flow, &env(), &gas()).pressure;
+            pressure = fi
+                .advance_intake(1.0e-3, throttle_flow, env().pressure, &env(), &gas())
+                .pressure;
         }
         pressure
     }
@@ -1836,7 +2006,11 @@ mod tests {
 
         let mut spun = forced_induction();
         spool_up(&mut spun, 2.0);
-        assert!(spun.shaft.shaft_rpm() > 1_000.0, "shaft failed to spool: {}", spun.shaft.shaft_rpm());
+        assert!(
+            spun.shaft.shaft_rpm() > 1_000.0,
+            "shaft failed to spool: {}",
+            spun.shaft.shaft_rpm()
+        );
 
         let boosted = settled_charge_pipe_pressure(&mut spun, 0.02);
         assert!(
@@ -1863,8 +2037,8 @@ mod tests {
         // Match the shafts exactly so the comparison isolates the intercooler.
         cooled.shaft = hot.shaft;
 
-        let hot_state = hot.advance_intake(1.0e-3, 0.03, &env(), &gas());
-        let cooled_state = cooled.advance_intake(1.0e-3, 0.03, &env(), &gas());
+        let hot_state = hot.advance_intake(1.0e-3, 0.03, env().pressure, &env(), &gas());
+        let cooled_state = cooled.advance_intake(1.0e-3, 0.03, env().pressure, &env(), &gas());
         assert!(
             cooled_state.temperature < hot_state.temperature,
             "intercooled charge ({}) must be cooler than bare ({})",
@@ -1876,12 +2050,12 @@ mod tests {
     #[test]
     fn compressor_power_rises_with_shaft_speed() {
         let mut idle = forced_induction();
-        idle.advance_intake(1.0e-3, 0.02, &env(), &gas());
+        idle.advance_intake(1.0e-3, 0.02, env().pressure, &env(), &gas());
         let idle_power = idle.compressor_power;
 
         let mut spun = forced_induction();
         spool_up(&mut spun, 2.0);
-        spun.advance_intake(1.0e-3, 0.02, &env(), &gas());
+        spun.advance_intake(1.0e-3, 0.02, env().pressure, &env(), &gas());
         assert!(
             spun.compressor_power > idle_power,
             "spinning the shaft must draw more compressor power: idle {idle_power}, spun {}",
