@@ -660,7 +660,7 @@ impl SnapshotSource {
         // A cold misfire arrives here the same way a cut does, and for the same
         // reason: the solver's charge is fuelled, the ECU knows the flame never
         // propagated, and what leaves the exhaust valve is the whole of it.
-        let has_spark = block.model.combustion.spark().is_some();
+        let has_spark = block.model.combustion.is_spark_ignited();
         let spark_cut = has_spark
             && (controls.spark_cut
                 || block.ecu.dfco_tip_in

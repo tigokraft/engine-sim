@@ -1312,7 +1312,7 @@ impl EngineBlock {
             // limiter simply goes quiet instead of banging: a cylinder that got
             // no fuel has none to send out of the exhaust unburnt.
             limiter_cut_type: match model.combustion {
-                HeatRelease::Spark(_) => LimiterCut::Spark,
+                HeatRelease::Spark(_) | HeatRelease::TwoPlug(_) => LimiterCut::Spark,
                 HeatRelease::Compression(_) => LimiterCut::Fuel,
             },
             ..EngineControlUnit::default()
@@ -1498,48 +1498,50 @@ impl EngineBlock {
         let no_sync = self.ecu.cranking && rpm.abs() < crate::physics::control::CRANK_SYNC_RPM;
         self.model.fuel_cut = dfco || limiter == LimiterCut::Fuel || no_sync || self.ecu.motoring;
         let cold = self.thermal.cold_fraction();
-        let afr = match self.model.combustion {
-            HeatRelease::Spark(_) => {
-                // What the injector is told, and then what actually arrives.
-                // A cold engine is commanded rich; a cold port swallows the
-                // difference and gives it back a second later, so the mixture
-                // the cylinder sees on a start is leaner than anything the
-                // schedule ever asks for. Both terms are identities at
-                // `cold_fraction == 0`, so a warm engine is metered exactly
-                // what it was metered before any of this existed.
-                let scheduled = self.ecu.schedule_afr(load, rpm, self.throttle, frame_dt);
-                let commanded = self.ecu.cold_enriched_afr(scheduled, cold);
-                let metered = if self.model.fuel_cut { 0.0 } else { 1.0 };
-                let delivery = self.ecu.update_wall_film(metered, cold, frame_dt);
-                // A cut engine has no mixture, so it has no mixture strength
-                // either: the schedule stands and the film quietly drains
-                // behind it. Dividing a commanded ratio by a delivery of zero
-                // would hand the gas properties a number that means nothing and
-                // change what a cut cylinder pumps.
-                let effective = if self.model.fuel_cut {
-                    commanded
-                } else if delivery > 1e-3 {
-                    (commanded / delivery).min(MAX_TRACKED_AFR)
-                } else {
-                    MAX_TRACKED_AFR
-                };
-                // A charge past the lean limit makes a kernel and no flame. The
-                // fuel stays in the cylinder and goes out of the exhaust valve
-                // with the rest of the charge — see [`CylinderModel::misfire`].
-                self.ecu.misfiring =
-                    !self.model.fuel_cut && effective > crate::physics::control::LEAN_MISFIRE_AFR;
-                self.model.misfire = self.ecu.misfiring;
-                self.model.air_fuel_ratio = effective;
-                effective
-            }
-            // A diesel injects straight into the cylinder, so it has no port to
-            // wet and no film to wait for, and it is lean everywhere by
-            // construction rather than by schedule. Nothing above applies to it.
-            HeatRelease::Compression(_) => {
-                self.ecu.misfiring = false;
-                self.model.misfire = false;
-                self.model.air_fuel_ratio
-            }
+        // Both spark topologies wet a port and both can misfire lean; a
+        // compression-ignition engine injects straight into the cylinder and
+        // has no port to wet, so `is_spark_ignited` is the switch here rather
+        // than a match on the variant — a two-plug engine takes the same path
+        // a single-plug one does.
+        let afr = if self.model.combustion.is_spark_ignited() {
+            // What the injector is told, and then what actually arrives. A
+            // cold engine is commanded rich; a cold port swallows the
+            // difference and gives it back a second later, so the mixture the
+            // cylinder sees on a start is leaner than anything the schedule
+            // ever asks for. Both terms are identities at `cold_fraction ==
+            // 0`, so a warm engine is metered exactly what it was metered
+            // before any of this existed.
+            let scheduled = self.ecu.schedule_afr(load, rpm, self.throttle, frame_dt);
+            let commanded = self.ecu.cold_enriched_afr(scheduled, cold);
+            let metered = if self.model.fuel_cut { 0.0 } else { 1.0 };
+            let delivery = self.ecu.update_wall_film(metered, cold, frame_dt);
+            // A cut engine has no mixture, so it has no mixture strength
+            // either: the schedule stands and the film quietly drains behind
+            // it. Dividing a commanded ratio by a delivery of zero would hand
+            // the gas properties a number that means nothing and change what
+            // a cut cylinder pumps.
+            let effective = if self.model.fuel_cut {
+                commanded
+            } else if delivery > 1e-3 {
+                (commanded / delivery).min(MAX_TRACKED_AFR)
+            } else {
+                MAX_TRACKED_AFR
+            };
+            // A charge past the lean limit makes a kernel and no flame. The
+            // fuel stays in the cylinder and goes out of the exhaust valve
+            // with the rest of the charge — see [`CylinderModel::misfire`].
+            self.ecu.misfiring =
+                !self.model.fuel_cut && effective > crate::physics::control::LEAN_MISFIRE_AFR;
+            self.model.misfire = self.ecu.misfiring;
+            self.model.air_fuel_ratio = effective;
+            effective
+        } else {
+            // A diesel injects straight into the cylinder, so it has no port
+            // to wet and no film to wait for, and it is lean everywhere by
+            // construction rather than by schedule. Nothing above applies.
+            self.ecu.misfiring = false;
+            self.model.misfire = false;
+            self.model.air_fuel_ratio
         };
         self.model.gas = GasProperties::for_afr(afr);
         // Spark timing is the ECU's on an engine that has a coil. A diesel has
@@ -1547,10 +1549,9 @@ impl EngineBlock {
         // the latch solves that per cycle. See [`HeatRelease`].
         let spark_angle = self.ecu.spark_angle_with_throttle(load, rpm, self.throttle);
         let wiebe_duration = self.ecu.wiebe_duration(afr);
-        if let Some(wiebe) = self.model.combustion.spark_mut() {
-            wiebe.spark_angle = spark_angle;
-            wiebe.duration = wiebe_duration;
-        }
+        self.model
+            .combustion
+            .set_spark_timing(spark_angle, wiebe_duration);
         for bank in &mut self.exhaust_banks {
             bank.plenum.gamma = self.model.gas.gamma_burned;
             bank.plenum.gas_constant = self.model.gas.r_burned;
@@ -2004,9 +2005,10 @@ impl EngineBlock {
         if brake_power_kw <= 0.1 || rpm <= 100.0 {
             return 0.0;
         }
-        let afr = match self.model.combustion {
-            HeatRelease::Spark(_) => self.ecu.target_afr(0.8, rpm, 1.0),
-            HeatRelease::Compression(_) => 18.0, // lean diesel combustion
+        let afr = if self.model.combustion.is_spark_ignited() {
+            self.ecu.target_afr(0.8, rpm, 1.0)
+        } else {
+            18.0 // lean diesel combustion
         }
         .max(8.0);
         let trapped_fuel = self.master.cylinder.mass / afr;
@@ -2663,6 +2665,24 @@ mod tests {
         offsets.sort_by(|a, b| a.partial_cmp(b).unwrap());
         for (i, off) in offsets.iter().enumerate() {
             approx(*off, i as f64 * 90.0, 1e-9);
+        }
+    }
+
+    /// Stage M5 changes the two-rotor's ports and its mechanical voices, not
+    /// its firing order: four events across 720 degrees of eccentric shaft,
+    /// evenly spaced, is the correct order 2 and must stay exactly that.
+    #[test]
+    fn two_rotor_wankel_still_fires_four_times_across_the_shaft() {
+        let order = FiringOrder::two_rotor_wankel();
+        assert_eq!(order.cylinders.len(), 4);
+        let mut offsets: Vec<f64> = order
+            .cylinders
+            .iter()
+            .map(|c| c.firing_offset.to_degrees())
+            .collect();
+        offsets.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for (i, off) in offsets.iter().enumerate() {
+            approx(*off, i as f64 * 180.0, 1e-9);
         }
     }
 

@@ -27,7 +27,8 @@ use crate::physics::plumbing::{
     ThrottleLayout, TurbineGeometry,
 };
 use crate::physics::thermodynamics::{
-    CylinderModel, DieselCombustion, HeatRelease, ValveEvent, ValveTrain, WiebeProfile, DIESEL_LHV,
+    CylinderModel, DieselCombustion, HeatRelease, ValveEvent, ValveTrain, WiebeProfile,
+    DIESEL_LHV, FASTEST_RAMP,
 };
 use crate::physics::vehicle::{Clutch, Gearbox, RoadLoad};
 
@@ -140,6 +141,20 @@ pub struct CylinderConfig {
     /// [`ValveTrain::with_aggressiveness`].
     #[serde(default)]
     pub cam_aggressiveness: f64,
+    /// Raw ramp fraction override, past what [`Self::cam_aggressiveness`] can
+    /// express [-].
+    ///
+    /// `cam_aggressiveness` is normalised against the valvetrain survival
+    /// limit `FASTEST_RAMP`, because every poppet cam in the catalogue is
+    /// bound by it. A rotary port is not a poppet cam and has no spring to
+    /// survive, so [`crate::physics::rotor`]'s named port profiles can ramp
+    /// past that limit — and a value `cam_aggressiveness` cannot represent
+    /// would otherwise round-trip through a TOML file rounded up to it. This
+    /// is the escape hatch: present only when the ramp fraction the preset
+    /// was built with is out of `cam_aggressiveness`'s range, absent for
+    /// every ordinary poppet-valved engine.
+    #[serde(default)]
+    pub port_ramp_fraction: Option<f64>,
 }
 
 fn default_intake_discharge() -> f64 {
@@ -176,6 +191,23 @@ pub enum CombustionConfig {
         #[serde(default = "default_diesel_lhv")]
         fuel_lhv: f64,
         #[serde(default = "default_diesel_afr")]
+        air_fuel_ratio: f64,
+    },
+    TwoPlug {
+        leading_spark_angle_deg: f64,
+        leading_duration_deg: f64,
+        leading_efficiency_parameter: f64,
+        leading_form_factor: f64,
+        leading_combustion_efficiency: f64,
+        trailing_delay_deg: f64,
+        trailing_duration_deg: f64,
+        trailing_efficiency_parameter: f64,
+        trailing_form_factor: f64,
+        trailing_combustion_efficiency: f64,
+        trailing_share: f64,
+        #[serde(default = "default_fuel_lhv")]
+        fuel_lhv: f64,
+        #[serde(default = "default_gasoline_afr")]
         air_fuel_ratio: f64,
     },
 }
@@ -458,6 +490,15 @@ impl EngineConfig {
             exhaust_diameter: valves.exhaust.diameter,
             exhaust_discharge_coeff: valves.exhaust.discharge_coefficient,
             cam_aggressiveness: valves.aggressiveness(),
+            // Only present when the ramp is past what `cam_aggressiveness`
+            // can express at all — see the field's own doc comment. Intake
+            // and exhaust are built to the same ramp fraction by every named
+            // port profile, so the mean recovers it exactly; nothing in the
+            // catalogue's poppet-valved engines ever reaches this branch.
+            port_ramp_fraction: {
+                let mean_ramp = 0.5 * (valves.intake.ramp_fraction + valves.exhaust.ramp_fraction);
+                (mean_ramp < FASTEST_RAMP).then_some(mean_ramp)
+            },
             // Only named when it differs meaningfully from what `bore` alone
             // would give, so round-tripping a preset that never set one does
             // not clutter its file with a value that was always implicit. A
@@ -498,6 +539,21 @@ impl EngineConfig {
                 diffusion_form_factor: d.diffusion_form_factor,
                 efficiency_parameter: d.efficiency_parameter,
                 combustion_efficiency: d.combustion_efficiency,
+                fuel_lhv: preset.model.fuel_lhv,
+                air_fuel_ratio: preset.model.air_fuel_ratio,
+            },
+            HeatRelease::TwoPlug(t) => CombustionConfig::TwoPlug {
+                leading_spark_angle_deg: t.leading.spark_angle.to_degrees(),
+                leading_duration_deg: t.leading.duration.to_degrees(),
+                leading_efficiency_parameter: t.leading.efficiency_parameter,
+                leading_form_factor: t.leading.form_factor,
+                leading_combustion_efficiency: t.leading.combustion_efficiency,
+                trailing_delay_deg: t.trailing_delay().to_degrees(),
+                trailing_duration_deg: t.trailing.duration.to_degrees(),
+                trailing_efficiency_parameter: t.trailing.efficiency_parameter,
+                trailing_form_factor: t.trailing.form_factor,
+                trailing_combustion_efficiency: t.trailing.combustion_efficiency,
+                trailing_share: t.trailing_share,
                 fuel_lhv: preset.model.fuel_lhv,
                 air_fuel_ratio: preset.model.air_fuel_ratio,
             },
@@ -775,6 +831,13 @@ impl EngineConfig {
             ),
         }
         .with_aggressiveness(self.cylinder.cam_aggressiveness);
+        let valves = match self.cylinder.port_ramp_fraction {
+            Some(ramp) => ValveTrain {
+                intake: valves.intake.with_port_ramp_fraction(ramp),
+                exhaust: valves.exhaust.with_port_ramp_fraction(ramp),
+            },
+            None => valves,
+        };
 
         let (combustion, fuel_lhv, air_fuel_ratio) = match &self.combustion {
             CombustionConfig::Spark {
@@ -822,6 +885,40 @@ impl EngineConfig {
                 *fuel_lhv,
                 *air_fuel_ratio,
             ),
+            CombustionConfig::TwoPlug {
+                leading_spark_angle_deg,
+                leading_duration_deg,
+                leading_efficiency_parameter,
+                leading_form_factor,
+                leading_combustion_efficiency,
+                trailing_delay_deg,
+                trailing_duration_deg,
+                trailing_efficiency_parameter,
+                trailing_form_factor,
+                trailing_combustion_efficiency,
+                trailing_share,
+                fuel_lhv,
+                air_fuel_ratio,
+            } => {
+                let leading = WiebeProfile::new(
+                    deg(*leading_spark_angle_deg),
+                    deg(*leading_duration_deg),
+                    *leading_efficiency_parameter,
+                    *leading_form_factor,
+                    *leading_combustion_efficiency,
+                );
+                let mut two_plug =
+                    crate::physics::thermodynamics::TwoPlugCombustion::new(
+                        leading,
+                        deg(*trailing_delay_deg),
+                        *trailing_share,
+                    );
+                two_plug.trailing.duration = deg(*trailing_duration_deg);
+                two_plug.trailing.efficiency_parameter = *trailing_efficiency_parameter;
+                two_plug.trailing.form_factor = *trailing_form_factor;
+                two_plug.trailing.combustion_efficiency = *trailing_combustion_efficiency;
+                (HeatRelease::TwoPlug(two_plug), *fuel_lhv, *air_fuel_ratio)
+            }
         };
 
         let model = CylinderModel {

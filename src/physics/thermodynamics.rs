@@ -88,7 +88,25 @@ pub const RAISED_COSINE_RAMP: f64 = 0.5;
 /// raised cosine's peak velocity, which is about where a solid roller on a
 /// serious spring sits. Past it the lifter leaves the lobe on the nose rather
 /// than at the float speed and the cam is a component, not a profile.
+///
+/// This is a valvetrain limit, not a limit of the ramp shape itself: it is
+/// enforced by [`ValveEvent::with_ramp_fraction`], the setter a poppet cam is
+/// built through, not by [`ValveEvent::lift`]. A rotary port has no spring and
+/// no lifter to survive, so [`ValveEvent::with_port_ramp_fraction`] is allowed
+/// past it, down to [`PERIPHERAL_PORT_RAMP`].
 pub const FASTEST_RAMP: f64 = 0.15;
+
+/// Steepest flank a housing port's edge can present, as a fraction of the
+/// event [-].
+///
+/// An apex seal crossing a peripheral port has no mass to accelerate against a
+/// spring — it is a hard edge sweeping past a hole — so it is not bound by
+/// [`FASTEST_RAMP`], which is a valvetrain survival limit. A fortieth of the
+/// event is a few crank degrees out of a typical port duration, which is
+/// "near-instantaneous" without being a literal discontinuity: the flank is
+/// still the same C1-continuous raised-cosine shape, just compressed hard
+/// against its own edge.
+pub const PERIPHERAL_PORT_RAMP: f64 = 0.025;
 
 /// Single-zone Wiebe burn profile.
 ///
@@ -615,6 +633,9 @@ pub enum HeatRelease {
     Spark(WiebeProfile),
     /// Compression ignition: two Wiebes from a solved autoignition point.
     Compression(DieselCombustion),
+    /// Two-plug spark ignition: a leading and a trailing Wiebe, each from its
+    /// own plug.
+    TwoPlug(TwoPlugCombustion),
 }
 
 impl Default for HeatRelease {
@@ -635,8 +656,9 @@ impl HeatRelease {
             // it matters; a diesel's heat release is rate-limited by
             // injection and mixing instead, and it is unthrottled, so it
             // never sees the residual fraction a throttled idle does. Only
-            // the spark engine is diluted here, and that is why.
+            // the spark engines are diluted here, and that is why.
             Self::Spark(wiebe) => wiebe.diluted(latch.dilution).dburned_dtheta(theta),
+            Self::TwoPlug(two_plug) => two_plug.dburned_dtheta(theta, latch.dilution),
             Self::Compression(diesel) => match &latch.autoignition {
                 Some(ignition) => diesel.dburned_dtheta(theta, ignition),
                 None => 0.0,
@@ -648,6 +670,7 @@ impl HeatRelease {
     pub fn is_burning(&self, theta: f64, latch: &CycleLatch) -> bool {
         match self {
             Self::Spark(wiebe) => wiebe.diluted(latch.dilution).is_burning(theta),
+            Self::TwoPlug(two_plug) => two_plug.is_burning(theta, latch.dilution),
             Self::Compression(diesel) => match &latch.autoignition {
                 Some(ignition) => diesel.is_burning(theta, ignition),
                 None => false,
@@ -659,6 +682,7 @@ impl HeatRelease {
     pub fn combustion_efficiency(&self) -> f64 {
         match self {
             Self::Spark(wiebe) => wiebe.combustion_efficiency,
+            Self::TwoPlug(two_plug) => two_plug.combustion_efficiency(),
             Self::Compression(diesel) => diesel.combustion_efficiency,
         }
     }
@@ -667,10 +691,13 @@ impl HeatRelease {
     /// [rad, cycle coords].
     ///
     /// Not where it starts on a diesel — that is
-    /// [`Autoignition::angle`], and it is solved rather than commanded.
+    /// [`Autoignition::angle`], and it is solved rather than commanded. On a
+    /// two-plug engine this is the leading plug; the trailing plug follows it
+    /// at [`TwoPlugCombustion::trailing_delay`].
     pub fn commanded_angle(&self) -> f64 {
         match self {
             Self::Spark(wiebe) => wiebe.spark_angle,
+            Self::TwoPlug(two_plug) => two_plug.leading.spark_angle,
             Self::Compression(diesel) => diesel.injection_angle,
         }
     }
@@ -679,32 +706,165 @@ impl HeatRelease {
     pub fn duration(&self) -> f64 {
         match self {
             Self::Spark(wiebe) => wiebe.duration,
+            Self::TwoPlug(two_plug) => two_plug.leading.duration,
             Self::Compression(diesel) => diesel.diffusion_duration,
         }
     }
 
-    /// The spark profile, on an engine that has a spark plug.
-    pub fn spark(&self) -> Option<&WiebeProfile> {
+    /// Whether a coil can cut this engine's ignition.
+    ///
+    /// True for both spark topologies and false for compression ignition,
+    /// which has no coil for anything to cut — the only way to stop a diesel
+    /// firing is to stop fuelling it. See [`HeatRelease::set_spark_timing`]
+    /// for the ECU write path this mirrors.
+    pub fn is_spark_ignited(&self) -> bool {
         match self {
-            Self::Spark(wiebe) => Some(wiebe),
-            Self::Compression(_) => None,
+            Self::Spark(_) | Self::TwoPlug(_) => true,
+            Self::Compression(_) => false,
         }
     }
 
-    /// The spark profile for the ECU to retime, on an engine that has one.
+    /// Retimes the spark for the ECU, on either spark topology; a no-op on
+    /// compression ignition.
+    ///
+    /// On a two-plug engine the trailing plug follows the leading plug at
+    /// its own fixed delay, and its duration is scaled by the same ratio the
+    /// leading plug's just moved by, so retiming preserves the split between
+    /// the two plugs rather than collapsing them onto one duration.
+    pub fn set_spark_timing(&mut self, angle: f64, duration: f64) {
+        match self {
+            Self::Spark(wiebe) => {
+                wiebe.spark_angle = angle;
+                wiebe.duration = duration;
+            }
+            Self::TwoPlug(two_plug) => two_plug.set_spark_timing(angle, duration),
+            Self::Compression(_) => {}
+        }
+    }
+
+    /// The spark profile, on an engine that has exactly one spark plug.
+    pub fn spark(&self) -> Option<&WiebeProfile> {
+        match self {
+            Self::Spark(wiebe) => Some(wiebe),
+            Self::TwoPlug(_) | Self::Compression(_) => None,
+        }
+    }
+
+    /// The spark profile for the ECU to retime, on an engine that has
+    /// exactly one spark plug. A two-plug engine has two profiles to move
+    /// together, which is what [`HeatRelease::set_spark_timing`] is for.
     pub fn spark_mut(&mut self) -> Option<&mut WiebeProfile> {
         match self {
             Self::Spark(wiebe) => Some(wiebe),
-            Self::Compression(_) => None,
+            Self::TwoPlug(_) | Self::Compression(_) => None,
+        }
+    }
+
+    /// The two-plug profile, on an engine that has a leading and a trailing plug.
+    pub fn two_plug(&self) -> Option<&TwoPlugCombustion> {
+        match self {
+            Self::TwoPlug(two_plug) => Some(two_plug),
+            Self::Spark(_) | Self::Compression(_) => None,
         }
     }
 
     /// The compression-ignition profile, on an engine that has no spark plug.
     pub fn compression(&self) -> Option<&DieselCombustion> {
         match self {
-            Self::Spark(_) => None,
+            Self::Spark(_) | Self::TwoPlug(_) => None,
             Self::Compression(diesel) => Some(diesel),
         }
+    }
+}
+
+/// Two-plug spark heat release, for a rotary's long, thin chamber.
+///
+/// ```text
+/// x_b(theta) = (1 - f) * wiebe_leading(theta) + f * wiebe_trailing(theta)
+/// ```
+///
+/// A single flame front from one plug cannot cross a Wankel chamber before
+/// the chamber has moved past it, so production rotaries light a second
+/// kernel — the trailing plug — closer to the exhaust port, ten to fifteen
+/// degrees after the leading one. Heat release is two overlapping events
+/// rather than one, and the trailing plug's is the smaller of the two: it
+/// lights a charge the leading flame is already consuming, so it has less
+/// left to burn.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TwoPlugCombustion {
+    /// Leading plug's burn profile; its `spark_angle` is what the ECU moves.
+    pub leading: WiebeProfile,
+    /// Trailing plug's burn profile; its `spark_angle` trails the leading
+    /// plug's by a fixed delay that [`TwoPlugCombustion::set_spark_timing`]
+    /// preserves.
+    pub trailing: WiebeProfile,
+    /// Fraction of the charge the trailing plug's kernel accounts for [-].
+    ///
+    /// Below one half: the trailing plug lights second, into a chamber the
+    /// leading flame has already started consuming, so it never gets the
+    /// majority share.
+    pub trailing_share: f64,
+}
+
+impl TwoPlugCombustion {
+    /// Builds a two-plug profile from a leading Wiebe, a trailing delay and
+    /// the trailing plug's share of the charge.
+    pub fn new(leading: WiebeProfile, trailing_delay: f64, trailing_share: f64) -> Self {
+        let mut trailing = leading;
+        trailing.spark_angle = wrap_cycle(leading.spark_angle + trailing_delay);
+        Self {
+            leading,
+            trailing,
+            trailing_share: trailing_share.clamp(0.0, 0.5),
+        }
+    }
+
+    /// Crank angle from the leading plug's spark to the trailing plug's [rad].
+    pub fn trailing_delay(&self) -> f64 {
+        wrap_cycle(self.trailing.spark_angle - self.leading.spark_angle)
+    }
+
+    /// Burn rate of the two plugs summed [1/rad].
+    pub fn dburned_dtheta(&self, theta: f64, dilution: f64) -> f64 {
+        let leading = self.leading.diluted(dilution);
+        let trailing = self.trailing.diluted(dilution);
+        (1.0 - self.trailing_share) * leading.dburned_dtheta(theta)
+            + self.trailing_share * trailing.dburned_dtheta(theta)
+    }
+
+    /// True while either plug's flame is still releasing heat.
+    pub fn is_burning(&self, theta: f64, dilution: f64) -> bool {
+        self.leading.diluted(dilution).is_burning(theta)
+            || self.trailing.diluted(dilution).is_burning(theta)
+    }
+
+    /// Fraction of the fuel's chemical energy that shows up as heat [-],
+    /// weighted by each plug's share of the charge.
+    pub fn combustion_efficiency(&self) -> f64 {
+        (1.0 - self.trailing_share) * self.leading.combustion_efficiency
+            + self.trailing_share * self.trailing.combustion_efficiency
+    }
+
+    /// Retimes both plugs together, preserving the delay and duration ratio
+    /// between them.
+    ///
+    /// The leading plug moves to `angle` with `duration` exactly, the way a
+    /// single-plug engine's spark does; the trailing plug keeps its own
+    /// fixed delay behind the leading plug and has its duration scaled by
+    /// the same ratio the leading plug's just changed by, so a schedule that
+    /// shortens the burn shortens both kernels together rather than only one
+    /// of them.
+    pub fn set_spark_timing(&mut self, angle: f64, duration: f64) {
+        let delay = self.trailing_delay();
+        let ratio = if self.leading.duration > 1e-9 {
+            duration / self.leading.duration
+        } else {
+            1.0
+        };
+        self.leading.spark_angle = angle;
+        self.leading.duration = duration;
+        self.trailing.spark_angle = wrap_cycle(angle + delay);
+        self.trailing.duration = (self.trailing.duration * ratio).clamp(deg(0.1), CYCLE_ANGLE);
     }
 }
 
@@ -855,6 +1015,18 @@ impl ValveEvent {
         self
     }
 
+    /// Re-grinds the flanks past what a valvetrain survives.
+    ///
+    /// The port equivalent of [`ValveEvent::with_ramp_fraction`], for a
+    /// rotary housing port or an apex seal edge: nothing here is a lifter
+    /// riding a spring, so the floor is [`PERIPHERAL_PORT_RAMP`] rather than
+    /// [`FASTEST_RAMP`]. Everything else — the C1-continuous flank shape, the
+    /// duration and lift untouched — is exactly [`ValveEvent::lift`].
+    pub fn with_port_ramp_fraction(mut self, ramp_fraction: f64) -> Self {
+        self.ramp_fraction = ramp_fraction.clamp(PERIPHERAL_PORT_RAMP, RAISED_COSINE_RAMP);
+        self
+    }
+
     /// Peak opening velocity against a raised cosine of the same duration and
     /// lift [-].
     ///
@@ -869,7 +1041,7 @@ impl ValveEvent {
     /// [`EnginePreset::synth_config`](crate::bench::EnginePreset::synth_config)
     /// scales the valve voices with.
     pub fn ramp_rate(&self) -> f64 {
-        RAISED_COSINE_RAMP / self.ramp_fraction.clamp(FASTEST_RAMP, RAISED_COSINE_RAMP)
+        RAISED_COSINE_RAMP / self.ramp_fraction.clamp(PERIPHERAL_PORT_RAMP, RAISED_COSINE_RAMP)
     }
 
     /// Fraction of the event elapsed at a crank angle; `None` while shut.
@@ -906,7 +1078,7 @@ impl ValveEvent {
         let Some(u) = self.progress(theta) else {
             return 0.0;
         };
-        let r = self.ramp_fraction.clamp(FASTEST_RAMP, RAISED_COSINE_RAMP);
+        let r = self.ramp_fraction.clamp(PERIPHERAL_PORT_RAMP, RAISED_COSINE_RAMP);
         // Formed as `(PI / r) * u` rather than `PI * (u / r)` so that the
         // default half ramp divides exactly by two and lands on the same
         // `2 PI u` the single raised cosine used, to the last bit.
@@ -2385,6 +2557,81 @@ mod tests {
             (1500.0..4000.0).contains(&st.cylinder.temperature),
             "unphysical peak temperature {}",
             st.cylinder.temperature
+        );
+    }
+
+    #[test]
+    fn trailing_plug_fires_second_and_smaller() {
+        let two_plug = TwoPlugCombustion::new(WiebeProfile::default(), deg(12.0), 0.35);
+        assert!(
+            two_plug.trailing_delay() > 0.0,
+            "the trailing plug must fire after the leading one"
+        );
+        assert!(
+            two_plug.trailing_share < 0.5,
+            "the trailing plug must account for less of the charge than the leading one"
+        );
+    }
+
+    /// Runs a compression-and-burn cycle on a two-plug model, returning the
+    /// pressure trace from BDC through the end of both burns.
+    fn two_plug_pressure_trace(combustion: HeatRelease) -> Vec<f64> {
+        let mut model = CylinderModel::default();
+        model.combustion = combustion;
+        let env = Environment::default();
+        let ports = PortConditions::from_environment(&env, &model.gas);
+        let solver = Rk4Solver::default();
+        let omega = rpm_to_omega(3000.0);
+
+        let mut st = ThermoState::at_ambient(&model.geometry, &model.gas, &env);
+        st.cylinder.theta = PI;
+        st.cylinder.mass =
+            env.pressure * model.geometry.max_volume() / (model.gas.r_unburned * env.temperature);
+        st.latch = CycleLatch {
+            fuel_mass: model.trapped_fuel_mass(st.cylinder.mass, 0.0),
+            dilution: 0.0,
+            pressure: env.pressure,
+            temperature: env.temperature,
+            volume: model.geometry.max_volume(),
+            gamma: model.gas.gamma_unburned,
+            autoignition: None,
+        };
+
+        let mut trace = Vec::with_capacity(260);
+        for _ in 0..260 {
+            st = solver.substep(&model, &st, omega, deg(1.0), &ports);
+            trace.push(st.cylinder.pressure(&model.geometry, &model.gas));
+        }
+        trace
+    }
+
+    #[test]
+    fn removing_the_trailing_plug_measurably_changes_the_pressure_trace() {
+        let leading = WiebeProfile::new(deg(340.0), deg(60.0), 5.0, 2.0, 0.97);
+        let with_trailing = TwoPlugCombustion::new(leading, deg(12.0), 0.35);
+        let mut without_trailing = with_trailing;
+        without_trailing.trailing_share = 0.0;
+
+        let trace_with = two_plug_pressure_trace(HeatRelease::TwoPlug(with_trailing));
+        let trace_without = two_plug_pressure_trace(HeatRelease::TwoPlug(without_trailing));
+
+        let peak_with = trace_with.iter().cloned().fold(f64::MIN, f64::max);
+        let peak_without = trace_without.iter().cloned().fold(f64::MIN, f64::max);
+        assert!(
+            (peak_with - peak_without).abs() > 1.0e4,
+            "the trailing plug's contribution must measurably move peak pressure: \
+             {peak_with:.0} Pa against {peak_without:.0} Pa"
+        );
+
+        let max_diff = trace_with
+            .iter()
+            .zip(trace_without.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            max_diff > 1.0e4,
+            "removing the trailing plug must move the pressure trace itself, not just its peak: \
+             {max_diff:.0} Pa max difference"
         );
     }
 

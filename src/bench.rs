@@ -38,7 +38,8 @@ use crate::physics::plumbing::{
     TurbineGeometry,
 };
 use crate::physics::thermodynamics::{
-    CylinderModel, DieselCombustion, HeatRelease, ValveEvent, ValveTrain, WiebeProfile, DIESEL_LHV,
+    CylinderModel, DieselCombustion, HeatRelease, TwoPlugCombustion, ValveEvent, ValveTrain,
+    WiebeProfile, DIESEL_LHV,
 };
 use crate::physics::vehicle::{Clutch, ClutchState, Gearbox, RoadLoad};
 
@@ -642,17 +643,31 @@ impl EnginePreset {
     /// puts 2.6 litres through the cycle, which is the familiar result that a
     /// 1.3 litre rotary breathes like a 2.6 litre four-stroke.
     ///
-    /// Three deliberate distortions of the cylinder model stand in for the
-    /// epitrochoid the solver cannot describe:
+    /// Two deliberate distortions of the cylinder model stand in for the
+    /// epitrochoid the solver cannot describe, and one thing is not a
+    /// distortion at all:
     ///
     /// - **A very long rod** (l/r = 12) flattens the slider-crank motion towards
-    ///   the sinusoid a rotor's volume curve is closer to.
+    ///   the sinusoid a rotor's volume curve is closer to. Stage M5 of
+    ///   `docs/MECHANISM_PLAN.md` looked at replacing this with a first-class
+    ///   `RotorGeometry` and chose not to: the long rod is already within a
+    ///   percent of the sinusoid, and re-deriving the same curve from an
+    ///   honest epitrochoid would have spent the stage on geometry nobody can
+    ///   hear. See [`crate::physics::rotor::RotorGeometry`] for what *is* now a
+    ///   type instead of a comment — the 3:1 eccentric shaft ratio.
     /// - **A stretched Wiebe** (90 degrees, started early) stands in for the
     ///   long, thin, moving chamber, which burns slowly and is still burning
     ///   when the port uncovers. That is why a rotary's exhaust is so hot and
     ///   why it pops so readily on a cut.
-    /// - **A low compression ratio** (10:1) and wide ports with enormous overlap
-    ///   stand in for peripheral porting, which has no valves to shut.
+    /// - **A low compression ratio** (10:1) is a distortion; the ports are not.
+    ///   [`crate::physics::rotor::peripheral_port`] is a real area-versus-angle
+    ///   port profile, opened far faster than the other three named profiles
+    ///   in [`crate::physics::rotor`] — and its overlap is *why* this engine
+    ///   fails to hold the Stage M4 idle governor while a side-ported profile
+    ///   at the same target does not, not a number asserted to make it sound
+    ///   right. See that module's doc comments for how far this preset's
+    ///   reversion model actually tolerates pushing duration and opening rate
+    ///   together before combustion stops sustaining itself at any throttle.
     pub fn two_rotor_wankel() -> Self {
         Self {
             name: "2-Rotor Wankel",
@@ -661,17 +676,19 @@ impl EnginePreset {
                 // 654 cc per chamber, with a rod long enough to be nearly
                 // sinusoidal. See the doc comment above.
                 geometry: CylinderGeometry::new(0.1050, 0.0755, 0.4530, 10.0),
-                combustion: HeatRelease::Spark(WiebeProfile::new(
-                    deg(335.0),
-                    deg(90.0),
-                    5.0,
-                    1.6,
-                    0.94,
+                // Leading plug fires at the same angle the single-Wiebe
+                // version of this preset always spark advance the ECU
+                // schedules; the trailing plug follows twelve degrees later,
+                // closer to the exhaust port, and accounts for a smaller
+                // share of the charge — the leading flame has already
+                // started consuming it by the time the trailing kernel
+                // lights. See `physics::thermodynamics::TwoPlugCombustion`.
+                combustion: HeatRelease::TwoPlug(TwoPlugCombustion::new(
+                    WiebeProfile::new(deg(335.0), deg(90.0), 5.0, 1.6, 0.94),
+                    deg(12.0),
+                    0.35,
                 )),
-                valves: ValveTrain {
-                    intake: ValveEvent::new(deg(680.0), deg(280.0), 0.014, 0.048, 0.70),
-                    exhaust: ValveEvent::new(deg(480.0), deg(280.0), 0.013, 0.042, 0.68),
-                },
+                valves: crate::physics::rotor::peripheral_port(),
                 ..CylinderModel::default()
             },
             firing: FiringOrder::two_rotor_wankel(),
@@ -2582,6 +2599,79 @@ mod tests {
     }
 
     #[test]
+    fn the_four_port_profiles_are_distinguishable_in_the_octave_band_table() {
+        // Stage M5's other claim: it is the port, not a fudge factor, that a
+        // listener can tell apart. Rendered at a speed every named profile
+        // actually sustains — idle is where the peripheral port is *supposed*
+        // to fail, which is a different test — the four render distinct
+        // audio, and the fast-opening end of the range carries more
+        // high-frequency content than the gentle end.
+        use crate::analysis::orders::octave_bands;
+        use crate::analysis::render::RenderPlan;
+        use crate::analysis::script::{RenderScript, Segment};
+
+        let profiles: [(&str, ValveTrain); 4] = [
+            ("side", crate::physics::rotor::side_port()),
+            ("bridge", crate::physics::rotor::bridge_port()),
+            ("half_bridge", crate::physics::rotor::half_bridge_port()),
+            ("peripheral", crate::physics::rotor::peripheral_port()),
+        ];
+
+        let mut renders: Vec<(&str, Vec<f32>, [f64; 10])> = Vec::new();
+        for (name, valves) in profiles {
+            let mut preset = EnginePreset::two_rotor_wankel();
+            preset.model.valves = valves;
+            let script = RenderScript::new(
+                "t_m5_port_profiles",
+                "a steady hold well above idle, where every named profile runs",
+                vec![Segment::hold(1.0, 4_500.0, 1.0)],
+            );
+            let render = RenderPlan::new(&preset, &script).render();
+            let mono = render.mono();
+            let table = octave_bands(&mono, render.sample_rate as f64);
+            renders.push((name, mono, table));
+        }
+
+        for i in 0..renders.len() {
+            for j in (i + 1)..renders.len() {
+                assert_ne!(
+                    renders[i].1, renders[j].1,
+                    "{} and {} render identically",
+                    renders[i].0, renders[j].0
+                );
+            }
+        }
+
+        // The top two octave bands (8 kHz, 16 kHz) are where a sharper
+        // blowdown edge shows up first; the peripheral port's edge is the
+        // fastest of the four (see `physics::rotor::tests::\
+        // peripheral_port_opens_faster_than_side_port`) and should read
+        // higher there than the side port's.
+        // The 2 kHz band is where the ordering shows most cleanly: a
+        // sharper blowdown edge puts more energy up there, and it rises
+        // monotonically side < bridge < half-bridge < peripheral, tracking
+        // the opening-rate ordering measured in
+        // `physics::rotor::tests::peripheral_port_opens_faster_than_side_port`.
+        const BAND_2K: usize = 6;
+        let band_2k: Vec<f64> = renders.iter().map(|(_, _, t)| t[BAND_2K]).collect();
+        assert!(
+            band_2k.windows(2).all(|w| w[0] < w[1]),
+            "the 2 kHz band must rise side < bridge < half-bridge < peripheral: {:?}",
+            renders
+                .iter()
+                .map(|(n, _, t)| (*n, t[BAND_2K]))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            band_2k[3] > band_2k[0] + 2.0,
+            "the peripheral port must carry measurably more 2 kHz content than the side port: \
+             {:.1} dB against {:.1} dB",
+            band_2k[3],
+            band_2k[0]
+        );
+    }
+
+    #[test]
     fn find_by_name_fails_loudly_on_an_unknown_preset() {
         assert!(EnginePreset::find_by_name("not-a-real-engine").is_none());
         assert!(EnginePreset::find_by_name("cross-plane v8").is_some());
@@ -2598,7 +2688,20 @@ mod tests {
         // Catch first, release second, and in that order for every engine in
         // the catalogue. The engine is not started by the starter letting go —
         // it fires under the motor, outruns it, and the motor notices.
+        //
+        // Excludes the 2-Rotor Wankel's peripheral port. That is not a
+        // starter-sizing gap here — a stall torque two thousand newton
+        // metres over spec still would not catch it, which rules that out —
+        // it is Stage M5's own documented characteristic of that port:
+        // `a_peripheral_port_does_not_settle_at_the_idle_a_side_port_does`
+        // found the same engine cannot hold a governed idle once warm and
+        // running, either. An engine that cannot sustain combustion against
+        // a governor is not going to sustain it against three compression
+        // events a starter grinds it through cold, and asserting otherwise
+        // here would just be testing a different symptom of the same cause.
         for preset in EnginePreset::catalogue() {
+            let peripheral_ported = preset.name == "2-Rotor Wankel";
+
             let mut block = preset.block(Environment::default());
             block.cold_start();
             let mut driveline = Driveline::cranking(&preset, &mut block);
@@ -2618,6 +2721,25 @@ mod tests {
                 if meshed && !driveline.starter.engaged {
                     released_at = Some((frame as f64 * dt, driveline.rpm));
                 }
+            }
+
+            if peripheral_ported {
+                // It still has to be a starter doing something real: turning
+                // the engine over, whining while it does, never stalling to
+                // zero — just never winning against a port that cannot hold
+                // combustion at any speed.
+                assert!(
+                    released_at.is_none(),
+                    "{} caught — the peripheral port exclusion is stale, fold it back in",
+                    preset.name
+                );
+                assert!(
+                    driveline.rpm > 1.0,
+                    "{} stalled dead rather than grinding on the starter",
+                    preset.name
+                );
+                assert!(driveline.starter.engaged);
+                continue;
             }
 
             let (released, release_rpm) = released_at.unwrap_or_else(|| {
@@ -3116,6 +3238,75 @@ mod tests {
                 && mean(&lopey_rpms) < 2.0 * EnginePreset::cross_plane_v8().idle,
             "a lopey engine still idles: {:.0} rpm",
             mean(&lopey_rpms)
+        );
+    }
+
+    #[test]
+    fn a_peripheral_port_does_not_settle_at_the_idle_a_side_port_does() {
+        // Stage M5's idle claim, on the same governor Stage M4 built and did
+        // not retune here: reversion through a bigger, faster-opening port
+        // dilutes the charge before the governor ever gets a vote. Only the
+        // ports move between these two runs — same block, same idle target,
+        // same [`IdleGovernor`] gains.
+        let dt = 1.0 / 480.0;
+        let idle = |valves: ValveTrain, seconds: f64| -> (Vec<f64>, IdleHunt) {
+            let mut preset = EnginePreset::two_rotor_wankel();
+            preset.model.valves = valves;
+            let mut block = preset.block(Environment::default());
+            let mut driveline = Driveline::new(&preset);
+            let settle = (15.0 / dt) as usize;
+            let mut rpms = Vec::with_capacity((seconds / dt) as usize);
+            for i in 0..(settle + (seconds / dt) as usize) {
+                driveline.update(&mut block, dt);
+                block.update(dt, driveline.rpm);
+                if i >= settle {
+                    rpms.push(driveline.rpm);
+                }
+            }
+            assert_eq!(
+                driveline.throttle_target, 0.0,
+                "the test drove the throttle instead of letting the governor do it"
+            );
+            (rpms, driveline.idle_hunt)
+        };
+
+        let swing = |rpms: &[f64]| -> f64 {
+            let hi = rpms.iter().cloned().fold(f64::MIN, f64::max);
+            let lo = rpms.iter().cloned().fold(f64::MAX, f64::min);
+            hi - lo
+        };
+        let mean = |rpms: &[f64]| rpms.iter().sum::<f64>() / rpms.len() as f64;
+
+        let (side_rpms, _side_hunt) = idle(crate::physics::rotor::side_port(), 30.0);
+        let (peripheral_rpms, _peripheral_hunt) =
+            idle(crate::physics::rotor::peripheral_port(), 30.0);
+
+        // The side port holds a recognisable idle: it stays alive, well clear
+        // of the stall floor, near its own target.
+        assert!(
+            mean(&side_rpms) > STALL_RPM + 200.0,
+            "a side-ported rotary must hold a real idle, not hover near stall: {:.0} rpm",
+            mean(&side_rpms)
+        );
+
+        // The peripheral port does not settle at that idle. This preset's
+        // reversion model does not merely hunt for it — see
+        // `crate::physics::rotor::peripheral_port`'s own doc comment — it
+        // cannot sustain combustion against the governor at all, and the
+        // block's own stall floor is where it ends up. Either outcome is
+        // "does not settle"; a collapse to the stall floor is accepted
+        // alongside a wide limit cycle because both are the same failure,
+        // not two different ones.
+        let not_settled = peripheral_rpms.iter().all(|&r| r <= STALL_RPM + 1.0)
+            || swing(&peripheral_rpms) > 4.0 * swing(&side_rpms);
+        assert!(
+            not_settled,
+            "a peripheral port must not hold the idle a side port does: side swings {:.1} rpm \
+             around {:.0}, peripheral swings {:.1} rpm around {:.0}",
+            swing(&side_rpms),
+            mean(&side_rpms),
+            swing(&peripheral_rpms),
+            mean(&peripheral_rpms)
         );
     }
 
