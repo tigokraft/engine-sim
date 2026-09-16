@@ -603,12 +603,17 @@ impl EnginePreset {
             note: "60 deg firing, even on both banks: no beat left to hear, only pitch.",
             model: CylinderModel {
                 geometry: CylinderGeometry::new(0.095, 0.0764, 0.1380, 11.8),
+                valves: ValveTrain {
+                    intake: ValveEvent::new(deg(706.0), deg(278.0), 0.0124, 0.0405, 0.68),
+                    exhaust: ValveEvent::new(deg(484.0), deg(272.0), 0.0114, 0.0340, 0.65),
+                }
+                .with_aggressiveness(0.65),
                 combustion: HeatRelease::Spark(WiebeProfile::new(
                     deg(344.0),
-                    deg(50.0),
+                    deg(48.0),
                     5.0,
                     2.1,
-                    0.97,
+                    0.98,
                 )),
                 ..CylinderModel::default()
             },
