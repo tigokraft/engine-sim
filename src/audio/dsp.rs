@@ -781,14 +781,29 @@ impl MechanicalSpec {
 
     /// Mechanical spec for a rotary engine: no valves, no reciprocating pistons,
     /// but phasing gears, eccentric shaft drive, oil pump gear whine and accessories.
+    ///
+    /// The phasing gears mesh between the fixed housing gear and the gear
+    /// bolted to the rotor, so what a listener hears as "gear whine" is
+    /// tied to the rotor turning, not to the eccentric shaft the engine's
+    /// own cycle coordinates run in: a Wankel's rotor completes one
+    /// revolution for every three of the shaft's (see
+    /// [`RotorGeometry`](crate::physics::rotor::RotorGeometry)), so an order
+    /// quoted at rotor rate has to come down by a factor of three before it
+    /// is an order this rig's `crank_hz` — which is shaft rate for the
+    /// two-rotor preset — can use.
+    /// [`RotorGeometry::shaft_order`](crate::physics::rotor::RotorGeometry::shaft_order)
+    /// is that conversion. The accessory drive is not converted: it is a
+    /// belt off the nose of the eccentric shaft itself, at shaft rate
+    /// already, same as on a reciprocating engine.
     pub fn rotary() -> Self {
+        use crate::physics::rotor::RotorGeometry;
         Self {
             intake_valve: None,
             exhaust_valve: None,
             piston_slap: None,
             injector: Some(ImpulsiveSpec::per_cylinder(0.35)),
             timing_chain: None,
-            gear_whine: Some(ImpulsiveSpec::order(3.0, 0.30)),
+            gear_whine: Some(ImpulsiveSpec::order(RotorGeometry::shaft_order(3.0), 0.30)),
             accessory: Some(ImpulsiveSpec::order(1.37, 0.20)),
             float_rpm: None,
         }
@@ -6603,6 +6618,41 @@ mod tests {
             check_source(&voice.gear_whine, 31.0, "gear_whine");
             check_source(&voice.accessory, 1.37, "accessory");
         }
+    }
+
+    #[test]
+    fn rotary_gear_whine_sits_at_a_third_of_the_shaft_order() {
+        // Stage M5: a rotor's mechanical noise — bearings, seals, the gear
+        // that meshes with it — vibrates at rotor rate, one third of the
+        // eccentric shaft rate this rig's `crank_hz` is quoted in. Gear
+        // whine is the rotor-driven source in `MechanicalSpec::rotary`; the
+        // accessory drive is a belt on the shaft nose and stays at shaft
+        // rate, which this test also pins down so a future edit cannot
+        // "fix" it by accident.
+        use crate::physics::rotor::RotorGeometry;
+
+        let spec = MechanicalSpec::rotary();
+        let gear_whine = spec.gear_whine.expect("rotary gear whine must exist");
+        let shaft_order = match gear_whine.rate {
+            SourceRate::Order(o) => o,
+            SourceRate::PerCylinder => panic!("gear whine must be an explicit order"),
+        };
+        let rotor_order = shaft_order * RotorGeometry::SHAFT_TO_ROTOR_RATIO as f32;
+        assert!(
+            (rotor_order.round() - rotor_order).abs() < 1e-3,
+            "gear whine order {shaft_order} is not a clean multiple of 1/3: rotor order {rotor_order}"
+        );
+        assert!(
+            (shaft_order - RotorGeometry::shaft_order(rotor_order.round())).abs() < 1e-6,
+            "gear whine order {shaft_order} does not round-trip through RotorGeometry::shaft_order"
+        );
+
+        let accessory = spec.accessory.expect("rotary accessory drive must exist");
+        assert_eq!(
+            accessory.rate,
+            SourceRate::Order(1.37),
+            "the accessory belt is on the shaft nose and must stay at shaft rate"
+        );
     }
 
     #[test]
