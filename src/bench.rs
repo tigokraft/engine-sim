@@ -30,7 +30,7 @@ use crate::audio::{
     SnapshotSource, SynthConfig, WastegateVoicing,
 };
 use crate::environment::Environment;
-use crate::physics::control::{LimiterCut, LimiterMode};
+use crate::physics::control::{IdleGovernor, LimiterCut, LimiterMode};
 use crate::physics::cylinder::{default_float_rpm, deg, CylinderGeometry};
 use crate::physics::engine_block::{EngineBlock, FiringOrder};
 use crate::physics::plumbing::{
@@ -67,6 +67,17 @@ pub const COLD_IDLE_RISE: f64 = 0.60;
 /// displacement, so a 6.5 litre V12 brakes harder than a 2.0 litre four without
 /// anything being tuned per engine.
 pub const CLOSED_THROTTLE_PMEP: f64 = 0.55e5;
+
+/// Pedal opening the idle bypass is worth, at full bypass travel [-].
+///
+/// The bypass is a hole beside the plate, so the free-revving flywheel — which
+/// bills its drag against how far the pedal is down — has to be told how much
+/// pedal that hole is equivalent to. A third of a percent of bore area against
+/// a plate that swings to a hundred is not a third of a percent of pedal,
+/// because the plate's first few degrees uncover almost nothing; measured on
+/// the air it passes, full bypass travel is worth about three tenths of pedal,
+/// which is what the governor's clamp always was.
+pub const IDLE_BYPASS_PEDAL_AUTHORITY: f64 = 0.30;
 
 // ---------------------------------------------------------------------------
 // Catalogue
@@ -1568,6 +1579,8 @@ pub struct Driveline {
     pub throttle_target: f64,
     /// Whether the driver is holding the ignition cut.
     pub manual_cut: bool,
+    /// Holds the idle speed by opening a bypass past the throttle plate.
+    pub idle_governor: IdleGovernor,
     /// Speed at which the limiter cuts [rev/min].
     pub redline: f64,
     /// Speed the governor holds once the engine is warm [rev/min].
@@ -1635,6 +1648,7 @@ impl Driveline {
             throttle: 0.0,
             throttle_target: 0.0,
             manual_cut: false,
+            idle_governor: IdleGovernor::default(),
             redline: preset.redline,
             idle: preset.idle,
             cold_idle_rise: COLD_IDLE_RISE,
@@ -1748,26 +1762,39 @@ impl Driveline {
                 let slew = 1.0 - (-dt / 0.12).exp();
                 self.throttle += (self.throttle_target - self.throttle) * slew;
 
-                // Idle governor: enough throttle to hold the idle speed, and no more.
-                // This is what stops the engine stalling the moment the pedal comes up.
-                // The speed it holds is the engine's own, and a cold one is held faster.
+                // Idle governor: enough air to hold the idle speed, and no
+                // more. This is what stops the engine stalling the moment the
+                // pedal comes up. The speed it holds is the engine's own, and
+                // a cold one is held faster. It commands the bypass, which is
+                // a hole in the manifold rather than a number multiplying a
+                // torque, so what it does reaches the cylinder as charge —
+                // which is the only reason the loop through reversion and
+                // burn completeness closes at all. See [`IdleGovernor`].
                 let target = self.idle_target(block);
-                let governor = ((target + 60.0 - self.rpm) / 500.0).clamp(0.0, 0.30);
-                let effective = self.throttle.max(governor);
+                let bypass = self.idle_governor.update(target, self.rpm, dt);
+                block.idle_bypass = bypass;
+                let effective = self.throttle.max(bypass * IDLE_BYPASS_PEDAL_AUTHORITY);
 
                 match self.gearbox.overall_ratio() {
                     None => {
-                        // Neutral: no drive path, so this is exactly today's
-                        // free-revving flywheel against its own drag curve —
-                        // the special case [`Gearbox::overall_ratio`] promises.
-                        // The block solves torque for a speed, not for a
-                        // throttle, so the pedal is applied here. See the
-                        // module docs.
+                        // Neutral: no drive path, so this is the free-revving
+                        // flywheel against its own drag curve — the special
+                        // case [`Gearbox::overall_ratio`] promises. The pedal
+                        // swings the plate, exactly as it does in gear, and
+                        // the torque the block reports is therefore already
+                        // throttled; see the note in
+                        // [`Driveline::update_in_gear`] on why scaling it a
+                        // second time would derate it twice. Until this stage
+                        // it *was* scaled a second time, because in neutral
+                        // the block never saw the pedal at all — and an engine
+                        // whose cylinder never sees a shut throttle has no
+                        // manifold vacuum, no reversion and no idle to lope.
+                        block.throttle = self.throttle;
                         self.torque = block.mean_brake_torque(self.rpm);
                         let drive = if self.is_cutting(block) {
                             0.0
                         } else {
-                            self.torque * (0.05 + 0.95 * effective)
+                            self.torque
                         };
 
                         // Accessories, then bearing drag, then windage, then the throttle
@@ -2236,11 +2263,19 @@ mod tests {
     #[test]
     fn neutral_reproduces_the_free_revving_flywheel_to_integration_error() {
         // Gearbox, road load and clutch exist now, but a gear has to be
-        // selected to reach any of them. In neutral, `update_in_gear` is
-        // never called, and the flywheel formula below is a literal copy of
-        // what `Driveline::update`'s `FreeRev` arm always did — so this
-        // proves the refactor left every existing fingerprint and dyno pull,
-        // all of which were recorded in neutral, comparable.
+        // selected to reach any of them. In neutral, `update_in_gear` is never
+        // called, and the flywheel formula below is a literal copy of what
+        // `Driveline::update`'s `FreeRev` arm does — so this proves free
+        // revving is still the plain flywheel against its own drag curve and
+        // has not quietly acquired a driveline.
+        //
+        // Two things moved under it since Stage M1 and both are read off the
+        // driveline rather than recomputed here, because neither is what this
+        // test is about: the governor, which is a PI controller on an air
+        // bypass now rather than a proportional term on the pedal, and the
+        // pedal itself, which swings the block's throttle plate instead of
+        // multiplying its torque afterwards. See the comment in the `None`
+        // arm.
         let preset = EnginePreset::cross_plane_v8();
         let mut block = preset.block(Environment::default());
         let mut driveline = Driveline::new(&preset);
@@ -2248,22 +2283,25 @@ mod tests {
         driveline.throttle_target = 0.6;
         let dt = 1.0 / 240.0;
 
-        // An independent reference flywheel, stepped by the pre-Stage-M1
-        // formula and nothing else — no gearbox, no road load, no clutch.
+        // An independent reference flywheel, stepped by the same formula and
+        // nothing else — no gearbox, no road load, no clutch.
         let mut reference_rpm = driveline.rpm;
         let mut reference_throttle = driveline.throttle;
 
         for _ in 0..(240 * 8) {
-            driveline.update(&mut block, dt);
             let reference_block = block.clone();
+            // The bypass the governor is about to command, taken before the
+            // step so the reference sees what the driveline saw.
+            let mut reference_governor = driveline.idle_governor;
+            let target = driveline.idle_target(&reference_block);
+            let bypass = reference_governor.update(target, reference_rpm, dt);
+
+            driveline.update(&mut block, dt);
             block.update(dt, driveline.rpm);
 
-            // Reference step, against the same block state Driveline saw.
             let slew = 1.0 - (-dt / 0.12_f64).exp();
             reference_throttle += (driveline.throttle_target - reference_throttle) * slew;
-            let target = driveline.idle_target(&reference_block);
-            let governor = ((target + 60.0 - reference_rpm) / 500.0).clamp(0.0, 0.30);
-            let effective = reference_throttle.max(governor);
+            let effective = reference_throttle.max(bypass * IDLE_BYPASS_PEDAL_AUTHORITY);
 
             let torque = reference_block.mean_brake_torque(reference_rpm);
             let drive = if driveline.manual_cut
@@ -2273,7 +2311,7 @@ mod tests {
             {
                 0.0
             } else {
-                torque * (0.05 + 0.95 * effective)
+                torque
             };
             let (a, b, c) = driveline.load;
             let omega = reference_rpm * PI / 30.0;
@@ -2284,7 +2322,7 @@ mod tests {
 
             assert!(
                 (driveline.rpm - reference_rpm).abs() < 1e-9,
-                "neutral drifted from the pre-M1 formula: {} vs reference {}",
+                "neutral drifted from the free-revving flywheel: {} vs reference {}",
                 driveline.rpm,
                 reference_rpm
             );
