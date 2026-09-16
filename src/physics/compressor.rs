@@ -95,6 +95,40 @@ impl SpeedLine {
     pub fn choke_flow(&self) -> f64 {
         self.points.last().expect("validated non-empty").flow
     }
+
+    /// Pressure ratio and efficiency at a corrected flow, piecewise-linear
+    /// between the nearest two measured points and clamped to the line's own
+    /// endpoints.
+    fn interpolate_at(&self, flow: f64) -> (f64, f64) {
+        let clamped = flow.clamp(self.surge_flow(), self.choke_flow());
+        let idx = self
+            .points
+            .windows(2)
+            .position(|pair| clamped <= pair[1].flow)
+            .unwrap_or(self.points.len() - 2);
+        let (lo, hi) = (self.points[idx], self.points[idx + 1]);
+        let span = hi.flow - lo.flow;
+        let t = if span > 0.0 {
+            (clamped - lo.flow) / span
+        } else {
+            0.0
+        };
+        (
+            lerp(lo.pressure_ratio, hi.pressure_ratio, t),
+            lerp(lo.efficiency, hi.efficiency, t),
+        )
+    }
+
+    /// Pressure ratio and efficiency at a normalized position between surge
+    /// (`0.0`) and choke (`1.0`).
+    fn interpolate_at_fraction(&self, fraction: f64) -> (f64, f64) {
+        let flow = lerp(self.surge_flow(), self.choke_flow(), fraction);
+        self.interpolate_at(flow)
+    }
+}
+
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
 }
 
 /// A compressor map: pressure ratio and efficiency against corrected speed
@@ -125,5 +159,108 @@ impl CompressorMap {
             self.lines.first().unwrap().corrected_speed,
             self.lines.last().unwrap().corrected_speed,
         )
+    }
+
+    /// Reads pressure ratio and efficiency at a corrected operating point.
+    ///
+    /// Interpolates in speed between the two bracketing lines at the same
+    /// normalized position between each line's own surge and choke flow, so
+    /// two lines with different flow ranges do not overshoot each other.
+    ///
+    /// Panics if `corrected_speed` falls outside the map's speed lines: a map
+    /// is a measured device, and extrapolating past its fastest or slowest
+    /// speed line invents data nobody measured.
+    pub fn evaluate(&self, corrected_speed: f64, corrected_flow: f64) -> (f64, f64) {
+        let (lo, hi) = self.bracket(corrected_speed);
+        let t = (corrected_speed - lo.corrected_speed) / (hi.corrected_speed - lo.corrected_speed);
+
+        let surge_bound = lerp(lo.surge_flow(), hi.surge_flow(), t);
+        let choke_bound = lerp(lo.choke_flow(), hi.choke_flow(), t);
+        let fraction =
+            ((corrected_flow - surge_bound) / (choke_bound - surge_bound)).clamp(0.0, 1.0);
+
+        let (pr_lo, eff_lo) = lo.interpolate_at_fraction(fraction);
+        let (pr_hi, eff_hi) = hi.interpolate_at_fraction(fraction);
+        (lerp(pr_lo, pr_hi, t), lerp(eff_lo, eff_hi, t))
+    }
+
+    fn bracket(&self, corrected_speed: f64) -> (&SpeedLine, &SpeedLine) {
+        let (min, max) = self.speed_range();
+        assert!(
+            corrected_speed >= min && corrected_speed <= max,
+            "corrected speed {corrected_speed} outside map range {min}..={max}: a map \
+             does not extrapolate past its fastest or slowest speed line"
+        );
+        let idx = self
+            .lines
+            .windows(2)
+            .position(|pair| corrected_speed <= pair[1].corrected_speed)
+            .unwrap_or(self.lines.len() - 2);
+        (&self.lines[idx], &self.lines[idx + 1])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn point(flow: f64, pressure_ratio: f64, efficiency: f64) -> MapPoint {
+        MapPoint {
+            flow,
+            pressure_ratio,
+            efficiency,
+        }
+    }
+
+    fn sample_map() -> CompressorMap {
+        CompressorMap::new(vec![
+            SpeedLine::new(
+                60_000.0,
+                vec![point(0.02, 1.5, 0.6), point(0.04, 1.4, 0.72), point(0.06, 1.1, 0.55)],
+            ),
+            SpeedLine::new(
+                90_000.0,
+                vec![point(0.03, 2.0, 0.62), point(0.06, 1.85, 0.75), point(0.09, 1.35, 0.58)],
+            ),
+            SpeedLine::new(
+                120_000.0,
+                vec![point(0.04, 2.5, 0.6), point(0.08, 2.3, 0.74), point(0.12, 1.6, 0.56)],
+            ),
+        ])
+    }
+
+    #[test]
+    fn interpolation_is_monotone_along_a_speed_line() {
+        let map = sample_map();
+        let mut previous = f64::INFINITY;
+        let mut flow = 0.021;
+        while flow < 0.059 {
+            let (pressure_ratio, _) = map.evaluate(60_000.0, flow);
+            assert!(
+                pressure_ratio <= previous + 1e-9,
+                "pressure ratio rose from {previous} to {pressure_ratio} at flow {flow}"
+            );
+            previous = pressure_ratio;
+            flow += 0.001;
+        }
+    }
+
+    #[test]
+    fn interpolation_does_not_overshoot_between_speed_lines() {
+        let map = sample_map();
+        let (lo, _) = map.evaluate(60_000.0, 0.03);
+        let (hi, _) = map.evaluate(90_000.0, 0.03);
+        let (mid, _) = map.evaluate(75_000.0, 0.03);
+        let (low, high) = if lo < hi { (lo, hi) } else { (hi, lo) };
+        assert!(
+            mid >= low - 1e-9 && mid <= high + 1e-9,
+            "midpoint pressure ratio {mid} overshot the bracket {low}..{high}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "outside map range")]
+    fn a_speed_outside_the_map_panics_rather_than_extrapolating() {
+        sample_map().evaluate(200_000.0, 0.04);
     }
 }
