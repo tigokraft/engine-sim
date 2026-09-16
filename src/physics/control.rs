@@ -293,7 +293,7 @@ pub struct IdleHunt {
 impl IdleHunt {
     /// Feeds one frame of engine speed to the detector.
     pub fn observe(&mut self, rpm: f64, dt: f64) {
-        if !(dt.is_finite() && dt > 0.0) || !rpm.is_finite() {
+        if !(dt.is_finite() && dt > 0.0 && rpm.is_finite()) {
             return;
         }
         if self.mean <= 0.0 {
