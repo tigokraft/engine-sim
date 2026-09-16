@@ -2543,6 +2543,81 @@ mod tests {
     }
 
     #[test]
+    fn trailing_plug_fires_second_and_smaller() {
+        let two_plug = TwoPlugCombustion::new(WiebeProfile::default(), deg(12.0), 0.35);
+        assert!(
+            two_plug.trailing_delay() > 0.0,
+            "the trailing plug must fire after the leading one"
+        );
+        assert!(
+            two_plug.trailing_share < 0.5,
+            "the trailing plug must account for less of the charge than the leading one"
+        );
+    }
+
+    /// Runs a compression-and-burn cycle on a two-plug model, returning the
+    /// pressure trace from BDC through the end of both burns.
+    fn two_plug_pressure_trace(combustion: HeatRelease) -> Vec<f64> {
+        let mut model = CylinderModel::default();
+        model.combustion = combustion;
+        let env = Environment::default();
+        let ports = PortConditions::from_environment(&env, &model.gas);
+        let solver = Rk4Solver::default();
+        let omega = rpm_to_omega(3000.0);
+
+        let mut st = ThermoState::at_ambient(&model.geometry, &model.gas, &env);
+        st.cylinder.theta = PI;
+        st.cylinder.mass =
+            env.pressure * model.geometry.max_volume() / (model.gas.r_unburned * env.temperature);
+        st.latch = CycleLatch {
+            fuel_mass: model.trapped_fuel_mass(st.cylinder.mass, 0.0),
+            dilution: 0.0,
+            pressure: env.pressure,
+            temperature: env.temperature,
+            volume: model.geometry.max_volume(),
+            gamma: model.gas.gamma_unburned,
+            autoignition: None,
+        };
+
+        let mut trace = Vec::with_capacity(260);
+        for _ in 0..260 {
+            st = solver.substep(&model, &st, omega, deg(1.0), &ports);
+            trace.push(st.cylinder.pressure(&model.geometry, &model.gas));
+        }
+        trace
+    }
+
+    #[test]
+    fn removing_the_trailing_plug_measurably_changes_the_pressure_trace() {
+        let leading = WiebeProfile::new(deg(340.0), deg(60.0), 5.0, 2.0, 0.97);
+        let with_trailing = TwoPlugCombustion::new(leading, deg(12.0), 0.35);
+        let mut without_trailing = with_trailing;
+        without_trailing.trailing_share = 0.0;
+
+        let trace_with = two_plug_pressure_trace(HeatRelease::TwoPlug(with_trailing));
+        let trace_without = two_plug_pressure_trace(HeatRelease::TwoPlug(without_trailing));
+
+        let peak_with = trace_with.iter().cloned().fold(f64::MIN, f64::max);
+        let peak_without = trace_without.iter().cloned().fold(f64::MIN, f64::max);
+        assert!(
+            (peak_with - peak_without).abs() > 1.0e4,
+            "the trailing plug's contribution must measurably move peak pressure: \
+             {peak_with:.0} Pa against {peak_without:.0} Pa"
+        );
+
+        let max_diff = trace_with
+            .iter()
+            .zip(trace_without.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            max_diff > 1.0e4,
+            "removing the trailing plug must move the pressure trace itself, not just its peak: \
+             {max_diff:.0} Pa max difference"
+        );
+    }
+
+    #[test]
     fn wall_loss_cools_the_charge_relative_to_adiabatic() {
         let env = Environment::default();
         let omega = rpm_to_omega(3000.0);
