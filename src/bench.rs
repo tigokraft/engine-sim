@@ -1257,7 +1257,8 @@ impl EnginePreset {
                 valves: ValveTrain {
                     intake: ValveEvent::new(deg(705.0), deg(275.0), 0.0125, 0.0405, 0.68),
                     exhaust: ValveEvent::new(deg(485.0), deg(270.0), 0.0115, 0.0345, 0.65),
-                },
+                }
+                .with_aggressiveness(0.75),
                 combustion: HeatRelease::Spark(WiebeProfile::new(
                     deg(344.0),
                     deg(50.0),
