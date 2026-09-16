@@ -520,12 +520,17 @@ impl EnginePreset {
             note: "72 deg firing, unevenly split across the banks: metallic and hard.",
             model: CylinderModel {
                 geometry: CylinderGeometry::new(0.0845, 0.0928, 0.1540, 12.7),
+                valves: ValveTrain {
+                    intake: ValveEvent::new(deg(704.0), deg(274.0), 0.0120, 0.0385, 0.68),
+                    exhaust: ValveEvent::new(deg(486.0), deg(268.0), 0.0110, 0.0325, 0.65),
+                }
+                .with_aggressiveness(0.60),
                 combustion: HeatRelease::Spark(WiebeProfile::new(
-                    deg(344.0),
-                    deg(54.0),
+                    deg(342.0),
+                    deg(50.0),
                     5.0,
-                    2.0,
-                    0.97,
+                    2.1,
+                    0.98,
                 )),
                 ..CylinderModel::default()
             },
