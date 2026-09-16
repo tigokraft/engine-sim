@@ -2644,6 +2644,75 @@ mod tests {
     }
 
     #[test]
+    fn a_peripheral_port_does_not_settle_at_the_idle_a_side_port_does() {
+        // Stage M5's idle claim, on the same governor Stage M4 built and did
+        // not retune here: reversion through a bigger, faster-opening port
+        // dilutes the charge before the governor ever gets a vote. Only the
+        // ports move between these two runs — same block, same idle target,
+        // same [`IdleGovernor`] gains.
+        let dt = 1.0 / 480.0;
+        let idle = |valves: ValveTrain, seconds: f64| -> (Vec<f64>, IdleHunt) {
+            let mut preset = EnginePreset::two_rotor_wankel();
+            preset.model.valves = valves;
+            let mut block = preset.block(Environment::default());
+            let mut driveline = Driveline::new(&preset);
+            let settle = (15.0 / dt) as usize;
+            let mut rpms = Vec::with_capacity((seconds / dt) as usize);
+            for i in 0..(settle + (seconds / dt) as usize) {
+                driveline.update(&mut block, dt);
+                block.update(dt, driveline.rpm);
+                if i >= settle {
+                    rpms.push(driveline.rpm);
+                }
+            }
+            assert_eq!(
+                driveline.throttle_target, 0.0,
+                "the test drove the throttle instead of letting the governor do it"
+            );
+            (rpms, driveline.idle_hunt)
+        };
+
+        let swing = |rpms: &[f64]| -> f64 {
+            let hi = rpms.iter().cloned().fold(f64::MIN, f64::max);
+            let lo = rpms.iter().cloned().fold(f64::MAX, f64::min);
+            hi - lo
+        };
+        let mean = |rpms: &[f64]| rpms.iter().sum::<f64>() / rpms.len() as f64;
+
+        let (side_rpms, _side_hunt) = idle(crate::physics::rotor::side_port(), 30.0);
+        let (peripheral_rpms, _peripheral_hunt) =
+            idle(crate::physics::rotor::peripheral_port(), 30.0);
+
+        // The side port holds a recognisable idle: it stays alive, well clear
+        // of the stall floor, near its own target.
+        assert!(
+            mean(&side_rpms) > STALL_RPM + 200.0,
+            "a side-ported rotary must hold a real idle, not hover near stall: {:.0} rpm",
+            mean(&side_rpms)
+        );
+
+        // The peripheral port does not settle at that idle. This preset's
+        // reversion model does not merely hunt for it — see
+        // `crate::physics::rotor::peripheral_port`'s own doc comment — it
+        // cannot sustain combustion against the governor at all, and the
+        // block's own stall floor is where it ends up. Either outcome is
+        // "does not settle"; a collapse to the stall floor is accepted
+        // alongside a wide limit cycle because both are the same failure,
+        // not two different ones.
+        let not_settled = peripheral_rpms.iter().all(|&r| r <= STALL_RPM + 1.0)
+            || swing(&peripheral_rpms) > 4.0 * swing(&side_rpms);
+        assert!(
+            not_settled,
+            "a peripheral port must not hold the idle a side port does: side swings {:.1} rpm \
+             around {:.0}, peripheral swings {:.1} rpm around {:.0}",
+            swing(&side_rpms),
+            mean(&side_rpms),
+            swing(&peripheral_rpms),
+            mean(&peripheral_rpms)
+        );
+    }
+
+    #[test]
     fn a_cold_engine_idles_above_a_warm_one_and_converges() {
         let preset = EnginePreset::cross_plane_v8();
         let dt = 1.0 / 120.0;
