@@ -376,8 +376,8 @@ impl EnginePreset {
             model: CylinderModel {
                 geometry: CylinderGeometry::new(0.094, 0.0895, 0.1500, 11.0),
                 valves: ValveTrain {
-                    intake: ValveEvent::new(deg(700.0), deg(240.0), 0.0102, 0.0385, 0.65),
-                    exhaust: ValveEvent::new(deg(500.0), deg(240.0), 0.0092, 0.0325, 0.60),
+                    intake: ValveEvent::new(deg(700.0), deg(240.0), 0.0100, 0.0370, 0.65),
+                    exhaust: ValveEvent::new(deg(500.0), deg(240.0), 0.0090, 0.0310, 0.60),
                 },
                 ..CylinderModel::default()
             },
@@ -445,10 +445,10 @@ impl EnginePreset {
             model: CylinderModel {
                 geometry: CylinderGeometry::new(0.094, 0.0810, 0.1420, 12.5),
                 valves: ValveTrain {
-                    intake: ValveEvent::new(deg(706.0), deg(276.0), 0.0126, 0.0415, 0.68),
-                    exhaust: ValveEvent::new(deg(485.0), deg(270.0), 0.0116, 0.0345, 0.65),
+                    intake: ValveEvent::new(deg(702.0), deg(258.0), 0.0120, 0.0400, 0.68),
+                    exhaust: ValveEvent::new(deg(492.0), deg(252.0), 0.0110, 0.0340, 0.65),
                 }
-                .with_aggressiveness(0.65),
+                .with_aggressiveness(0.40),
                 // A shorter burn: flat-plane vees are built to rev, and a race
                 // chamber lights faster than a road one.
                 combustion: HeatRelease::Spark(WiebeProfile::new(
@@ -960,10 +960,9 @@ impl EnginePreset {
                 // built so that it can rev at all.
                 geometry: CylinderGeometry::new(0.1000, 0.0840, 0.1450, 12.0),
                 valves: ValveTrain {
-                    intake: ValveEvent::new(deg(695.0), deg(255.0), 0.0118, 0.043, 0.67),
-                    exhaust: ValveEvent::new(deg(485.0), deg(250.0), 0.0108, 0.037, 0.63),
-                }
-                .with_aggressiveness(0.45),
+                    intake: ValveEvent::new(deg(695.0), deg(255.0), 0.0115, 0.042, 0.66),
+                    exhaust: ValveEvent::new(deg(485.0), deg(250.0), 0.0105, 0.036, 0.62),
+                },
                 ..CylinderModel::default()
             },
             firing: FiringOrder::single(),
@@ -1257,8 +1256,7 @@ impl EnginePreset {
                 valves: ValveTrain {
                     intake: ValveEvent::new(deg(705.0), deg(275.0), 0.0125, 0.0405, 0.68),
                     exhaust: ValveEvent::new(deg(485.0), deg(270.0), 0.0115, 0.0345, 0.65),
-                }
-                .with_aggressiveness(0.75),
+                },
                 combustion: HeatRelease::Spark(WiebeProfile::new(
                     deg(344.0),
                     deg(50.0),

@@ -24,15 +24,15 @@ rod_length = 0.145
 compression_ratio = 12.0
 intake_open_deg = 695.0
 intake_duration_deg = 255.00000000000003
-intake_lift = 0.0118
-intake_diameter = 0.043
-intake_discharge_coeff = 0.67
+intake_lift = 0.0115
+intake_diameter = 0.042
+intake_discharge_coeff = 0.66
 exhaust_open_deg = 484.99999999999994
 exhaust_duration_deg = 249.99999999999997
-exhaust_lift = 0.0108
-exhaust_diameter = 0.037
-exhaust_discharge_coeff = 0.63
-cam_aggressiveness = 0.44999999999999996
+exhaust_lift = 0.0105
+exhaust_diameter = 0.036
+exhaust_discharge_coeff = 0.62
+cam_aggressiveness = 0.0
 
 [combustion]
 type = "Spark"
