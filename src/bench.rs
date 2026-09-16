@@ -2462,6 +2462,132 @@ mod tests {
         }
     }
 
+    /// Cranks a preset that cannot fire, and returns the speed trace [rev/min].
+    ///
+    /// A fuel-cut limiter pinned at one rev/min is an engine being turned over
+    /// with nothing to burn — a compression test, or a car with the pump relay
+    /// out. It is the only way to listen to cranking on its own, because an
+    /// engine that can start does so inside a second and is then a different
+    /// thing entirely.
+    #[cfg(test)]
+    fn crank_without_fuel(preset: &EnginePreset, seconds: f64) -> Vec<f64> {
+        let mut block = preset.block(Environment::default());
+        block.cold_start();
+        let mut driveline = Driveline::cranking(preset, &mut block);
+        block.ecu.limiter_mode = LimiterMode::HardCut;
+        block.ecu.limiter_cut_type = LimiterCut::Fuel;
+        block.ecu.redline = 1.0;
+
+        let dt = 1.0 / 480.0;
+        let mut trace = Vec::new();
+        for _ in 0..(seconds / dt) as usize {
+            driveline.update(&mut block, dt);
+            block.update(dt, driveline.rpm);
+            trace.push(driveline.rpm);
+        }
+        assert!(
+            driveline.starter.engaged,
+            "{} caught with its fuel cut off",
+            preset.name
+        );
+        trace
+    }
+
+    #[test]
+    fn cranking_speed_ripples_on_compression_and_never_settles() {
+        // The stage's whole claim, and the reason none of it is synthesised.
+        // Nothing here has a period in it: the starter has one torque curve with
+        // no time in it, and the ripple is the engine's own compression strokes
+        // arriving underneath it. If this ever converges to a constant, then
+        // something has started handing the crank a torque averaged over a
+        // cycle — which is exactly the number that has nothing to say here.
+        for preset in EnginePreset::catalogue() {
+            let trace = crank_without_fuel(&preset, 3.0);
+            // The first second is the spin-up from rest, where the speed is
+            // still climbing; the ripple under test is what the crank does once
+            // the motor and the drag have found each other.
+            let tail = &trace[480..];
+            let mean = tail.iter().sum::<f64>() / tail.len() as f64;
+            let lo = tail.iter().cloned().fold(f64::INFINITY, f64::min);
+            let hi = tail.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+            assert!(
+                lo > 1.0,
+                "{} stalled the starter on its own compression",
+                preset.name
+            );
+            assert!(
+                hi - lo > 0.04 * mean,
+                "{} cranked at a flat {mean:.0} rpm: {lo:.0}..{hi:.0}",
+                preset.name
+            );
+
+            // And it is a ripple, not a drift: the speed crosses its own mean
+            // over and over, which a curve settling onto a constant does not do.
+            let crossings = tail
+                .windows(2)
+                .filter(|w| (w[0] - mean) * (w[1] - mean) < 0.0)
+                .count();
+            assert!(
+                crossings >= 8,
+                "{} crossed its own mean only {crossings} times in two seconds, \
+                 which is a drift and not a chug",
+                preset.name
+            );
+
+            // The chug is one compression stroke, so its rate has to be the
+            // engine's own event rate rather than any number written down: half
+            // a crank order per cylinder, at whatever speed the crank reached.
+            let expected_hz = mean / 60.0 * preset.firing.len() as f64 * 0.5;
+            let measured_hz = crossings as f64 / 2.0 / 2.0;
+            assert!(
+                measured_hz > 0.25 * expected_hz && measured_hz < 2.5 * expected_hz,
+                "{} chugged at {measured_hz:.1} Hz on {} cylinders at {mean:.0} rpm, \
+                 nowhere near the {expected_hz:.1} Hz its compressions arrive at",
+                preset.name,
+                preset.firing.len()
+            );
+        }
+    }
+
+    #[test]
+    fn the_chug_speeds_up_as_the_oil_thins() {
+        // The test that says the chug is emergent rather than drawn. Nothing
+        // about the starter changes between these two runs and nothing about
+        // the compression does either — only the oil the bearings are shearing,
+        // which is the friction the same motor is working against. A shaped
+        // envelope could not do this without being told to.
+        let preset = EnginePreset::inline_four();
+
+        let crank_at = |soaked: bool| -> f64 {
+            let mut block = preset.block(Environment::default());
+            if !soaked {
+                block.cold_start();
+            }
+            let mut driveline = Driveline::cranking(&preset, &mut block);
+            block.ecu.limiter_mode = LimiterMode::HardCut;
+            block.ecu.limiter_cut_type = LimiterCut::Fuel;
+            block.ecu.redline = 1.0;
+            let dt = 1.0 / 480.0;
+            let mut trace = Vec::new();
+            for _ in 0..(480 * 3) {
+                driveline.update(&mut block, dt);
+                block.update(dt, driveline.rpm);
+                trace.push(driveline.rpm);
+            }
+            let tail = &trace[480..];
+            tail.iter().sum::<f64>() / tail.len() as f64
+        };
+
+        let stone_cold = crank_at(false);
+        let warm = crank_at(true);
+        assert!(
+            warm > stone_cold * 1.02,
+            "the same starter cranked a warm engine at {warm:.0} rpm and a cold one \
+             at {stone_cold:.0}, so the oil is not reaching the crank"
+        );
+    }
+
     #[test]
     fn a_cold_start_puts_unburnt_fuel_in_the_exhaust_and_a_warm_idle_does_not() {
         // The cold engine's pops, arriving at the exhaust the way the backfire
