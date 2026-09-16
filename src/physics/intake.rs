@@ -34,8 +34,11 @@
 use std::f64::consts::{FRAC_PI_2, PI};
 
 use crate::environment::Environment;
+use crate::physics::compressor::{self, CompressorMap};
 use crate::physics::cylinder::GasProperties;
+use crate::physics::engine_block::Plenum;
 use crate::physics::thermodynamics::{flow_function, PortConditions, PortState};
+use crate::physics::turbine::{BearingType, TurbineMap, TurboShaft};
 
 /// Smallest mass the plenum is allowed to hold [kg].
 ///
@@ -636,6 +639,179 @@ impl IntakePlenum {
             self.mass = mass.max(MASS_FLOOR);
             self.temperature = temperature.clamp(TEMPERATURE_BOUNDS.0, TEMPERATURE_BOUNDS.1);
         }
+    }
+}
+
+/// A charge-air intercooler: a heat exchanger and a pressure drop between the
+/// compressor discharge and the throttle.
+///
+/// Its core volume is not modelled as a plenum of its own — see
+/// [`ForcedInduction::new`] — it is added straight into the shared charge pipe
+/// capacitance, which is why a bigger core changes throttle response as well
+/// as temperature.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Intercooler {
+    /// Core volume, added to the charge pipe's own [m^3].
+    pub core_volume: f64,
+    /// Fraction of the temperature rise above ambient removed, `0.0..=1.0` [-].
+    pub effectiveness: f64,
+    /// Pressure drop coefficient across the core, `dP = k m_dot^2` [Pa / (kg/s)^2].
+    pub loss_coefficient: f64,
+}
+
+impl Intercooler {
+    /// Discharge temperature after the core, cooled a fraction of the way
+    /// back to ambient.
+    pub fn cooled_temperature(&self, inlet_temperature: f64, ambient_temperature: f64) -> f64 {
+        inlet_temperature - self.effectiveness.clamp(0.0, 1.0) * (inlet_temperature - ambient_temperature)
+    }
+
+    /// Pressure lost crossing the core at a given mass flow [Pa].
+    pub fn pressure_drop(&self, mass_flow: f64) -> f64 {
+        self.loss_coefficient.max(0.0) * mass_flow * mass_flow
+    }
+}
+
+/// Real turbocharger hardware: the compressor and turbine maps and the shaft
+/// they share, plus the charge pipe capacitance between the compressor and
+/// the throttle.
+///
+/// This is what closes the loop TB1 and TB2 leave open — see
+/// `docs/TURBO_PLAN.md`'s TB3. Before this, [`crate::physics::compressor`] and
+/// [`crate::physics::turbine`] describe a compressor and a turbine that
+/// nothing in the running engine ever calls.
+#[derive(Debug, Clone)]
+pub struct ForcedInduction {
+    pub compressor_map: CompressorMap,
+    pub turbine_map: TurbineMap,
+    pub shaft: TurboShaft,
+    /// Capacitance between the compressor discharge and the throttle plate,
+    /// its volume already including any intercooler core.
+    pub charge_pipe: Plenum,
+    pub intercooler: Option<Intercooler>,
+    /// Shaft power the compressor drew on the most recent
+    /// [`Self::advance_intake`] [W], held here so [`Self::advance_exhaust`]
+    /// can load the shaft with it without recomputing the compressor's
+    /// operating point a second time.
+    compressor_power: f64,
+}
+
+impl ForcedInduction {
+    /// Builds the hardware at rest, with the charge pipe filled to ambient.
+    pub fn new(
+        compressor_map: CompressorMap,
+        turbine_map: TurbineMap,
+        inertia: f64,
+        mechanical_efficiency: f64,
+        bearing: BearingType,
+        charge_pipe_volume: f64,
+        intercooler: Option<Intercooler>,
+        env: &Environment,
+        gas: &GasProperties,
+    ) -> Self {
+        let volume = charge_pipe_volume + intercooler.map(|ic| ic.core_volume).unwrap_or(0.0);
+        Self {
+            compressor_map,
+            turbine_map,
+            shaft: TurboShaft::new(inertia, mechanical_efficiency, bearing),
+            charge_pipe: Plenum::new(volume, env.pressure, env.temperature, gas.r_unburned, gas.gamma_unburned),
+            intercooler,
+            compressor_power: 0.0,
+        }
+    }
+
+    /// Advances the compressor and charge pipe by `dt`, given the mass flow
+    /// currently leaving the pipe through the throttle, and returns the
+    /// [`PortState`] the throttle should read as its upstream this frame.
+    ///
+    /// The compressor's own flow is read off the map at the pipe's *current*
+    /// pressure ratio via [`CompressorMap::flow_for_pressure_ratio`] — flow is
+    /// the map's dependent axis, but pressure is the quantity the plenum
+    /// actually holds, so the inverse read is the one this boundary needs.
+    /// That flow need not match what the throttle is drawing this same
+    /// instant, and the mismatch is exactly what gives the pipe real
+    /// capacitance: shut the throttle and the compressor, still turning,
+    /// keeps supplying its surge-line flow while the throttle's leak area
+    /// draws far less, so the pipe pressure moves — the rate set by
+    /// [`Plenum::volume`].
+    pub fn advance_intake(
+        &mut self,
+        dt: f64,
+        throttle_flow: f64,
+        env: &Environment,
+        gas: &GasProperties,
+    ) -> PortState {
+        let ambient = IntakePlenum::ambient_upstream(env, gas);
+        let pressure_ratio = (self.charge_pipe.pressure() / ambient.pressure.max(1.0)).max(1.0);
+        let corrected_speed = compressor::corrected_speed(self.shaft.shaft_rpm(), ambient.temperature);
+        let (corrected_flow, reading) = self
+            .compressor_map
+            .flow_for_pressure_ratio(corrected_speed, pressure_ratio);
+        let mass_flow = (corrected_flow * (ambient.pressure / compressor::P_REF)
+            / (ambient.temperature / compressor::T_REF).sqrt())
+        .max(0.0);
+
+        let discharge_temperature = compressor::discharge_temperature(
+            ambient.temperature,
+            reading.pressure_ratio,
+            reading.efficiency.max(0.05),
+            ambient.gamma,
+        );
+        let inflow_temperature = match &self.intercooler {
+            Some(ic) => ic.cooled_temperature(discharge_temperature, ambient.temperature),
+            None => discharge_temperature,
+        };
+
+        self.compressor_power = compressor::compressor_power(
+            mass_flow,
+            ambient.temperature,
+            reading.pressure_ratio,
+            reading.efficiency.max(0.05),
+            ambient.gas_constant,
+            ambient.gamma,
+        );
+
+        self.charge_pipe
+            .integrate(dt, mass_flow, inflow_temperature, throttle_flow.max(0.0));
+
+        let mut pressure = self.charge_pipe.pressure();
+        if let Some(ic) = &self.intercooler {
+            pressure -= ic.pressure_drop(throttle_flow.max(0.0));
+        }
+        PortState {
+            pressure: pressure.max(1e3),
+            temperature: self.charge_pipe.temperature,
+            gas_constant: self.charge_pipe.gas_constant,
+            gamma: self.charge_pipe.gamma,
+            burned_fraction: 0.0,
+        }
+    }
+
+    /// Advances the shaft from the actual exhaust manifold state, and returns
+    /// the mass flow through the turbine [kg/s] — the flow that should leave
+    /// the exhaust collector this frame, in place of a plain vent to
+    /// atmosphere, now that a wheel sits in the way of it.
+    ///
+    /// Must be called after [`Self::advance_intake`] on the same frame: the
+    /// shaft's power balance needs that call's compressor power draw.
+    pub fn advance_exhaust(
+        &mut self,
+        dt: f64,
+        turbine_upstream: &PortState,
+        downstream_pressure: f64,
+    ) -> f64 {
+        let corrected_speed =
+            compressor::corrected_speed(self.shaft.shaft_rpm(), turbine_upstream.temperature);
+        self.shaft
+            .advance(dt, turbine_upstream, downstream_pressure, &self.turbine_map, self.compressor_power);
+        let (speed_lo, speed_hi) = self.turbine_map.speed_range();
+        let (mass_flow, _, _) = crate::physics::turbine::turbine_operating_point(
+            turbine_upstream,
+            downstream_pressure,
+            &self.turbine_map,
+            corrected_speed.clamp(speed_lo, speed_hi),
+        );
+        mass_flow
     }
 }
 
@@ -1276,5 +1452,151 @@ mod tests {
         // the entire point of feeding it to the cylinders.
         assert!(port.pressure < up.pressure * 0.9);
         approx(port.cp(), p.cp(), 1e-9);
+    }
+
+    fn turbine_map() -> TurbineMap {
+        use crate::physics::turbine::{TurbineMapPoint, TurbineSpeedLine};
+        let point = |expansion_ratio: f64, reduced_flow: f64, efficiency: f64| TurbineMapPoint {
+            expansion_ratio,
+            reduced_flow,
+            efficiency,
+        };
+        TurbineMap::new(vec![
+            TurbineSpeedLine::new(
+                40_000.0,
+                vec![point(1.0, 0.015, 0.45), point(1.5, 0.045, 0.66), point(2.5, 0.075, 0.58)],
+            ),
+            TurbineSpeedLine::new(
+                140_000.0,
+                vec![point(1.0, 0.025, 0.50), point(1.8, 0.085, 0.72), point(3.0, 0.135, 0.60)],
+            ),
+        ])
+    }
+
+    fn forced_induction() -> ForcedInduction {
+        ForcedInduction::new(
+            crate::physics::compressor::CompressorMap::stock(crate::physics::compressor::FrameSize::Small),
+            turbine_map(),
+            6.0e-5,
+            0.98,
+            BearingType::Journal,
+            1.5e-3,
+            None,
+            &env(),
+            &gas(),
+        )
+    }
+
+    /// Spins the shaft up over `seconds` under a hot, high pressure-ratio
+    /// exhaust and a low downstream pressure, the way a boosted engine would.
+    fn spool_up(fi: &mut ForcedInduction, seconds: f64) {
+        let hot_upstream = PortState {
+            pressure: 250_000.0,
+            temperature: 1000.0,
+            gas_constant: gas().r_burned,
+            gamma: gas().gamma_burned,
+            burned_fraction: 1.0,
+        };
+        let dt = 1.0e-3;
+        let mut t = 0.0;
+        while t < seconds {
+            fi.advance_exhaust(dt, &hot_upstream, env().pressure);
+            t += dt;
+        }
+    }
+
+    /// Runs `advance_intake` at a fixed throttle draw until the charge pipe's
+    /// capacitance has settled, and returns the resulting pressure.
+    fn settled_charge_pipe_pressure(fi: &mut ForcedInduction, throttle_flow: f64) -> f64 {
+        let mut pressure = fi.charge_pipe.pressure();
+        for _ in 0..2_000 {
+            pressure = fi.advance_intake(1.0e-3, throttle_flow, &env(), &gas()).pressure;
+        }
+        pressure
+    }
+
+    #[test]
+    fn a_spun_up_shaft_raises_the_charge_pipe_further_above_ambient() {
+        // Even a stalled shaft reads as the map's slowest cataloged speed
+        // line — the same nearest-neighbour convention
+        // `turbine::turbine_operating_point` documents — so "at rest" already
+        // carries a small pressure ratio. What must still hold is that a
+        // genuinely spun-up shaft settles well past that floor.
+        let mut fi = forced_induction();
+        let at_rest = settled_charge_pipe_pressure(&mut fi, 0.02);
+
+        let mut spun = forced_induction();
+        spool_up(&mut spun, 2.0);
+        assert!(spun.shaft.shaft_rpm() > 1_000.0, "shaft failed to spool: {}", spun.shaft.shaft_rpm());
+
+        let boosted = settled_charge_pipe_pressure(&mut spun, 0.02);
+        assert!(
+            boosted > at_rest * 1.1,
+            "spinning the shaft must settle the charge pipe well past its stalled reading: \
+             at rest {at_rest}, boosted {boosted}"
+        );
+    }
+
+    #[test]
+    fn an_intercooler_lowers_the_charge_temperature_at_the_same_operating_point() {
+        let mut hot = forced_induction();
+        let mut cooled = ForcedInduction {
+            intercooler: Some(Intercooler {
+                core_volume: 1.0e-3,
+                effectiveness: 0.7,
+                loss_coefficient: 0.0,
+            }),
+            ..forced_induction()
+        };
+
+        spool_up(&mut hot, 2.0);
+        spool_up(&mut cooled, 2.0);
+        // Match the shafts exactly so the comparison isolates the intercooler.
+        cooled.shaft = hot.shaft;
+
+        let hot_state = hot.advance_intake(1.0e-3, 0.03, &env(), &gas());
+        let cooled_state = cooled.advance_intake(1.0e-3, 0.03, &env(), &gas());
+        assert!(
+            cooled_state.temperature < hot_state.temperature,
+            "intercooled charge ({}) must be cooler than bare ({})",
+            cooled_state.temperature,
+            hot_state.temperature
+        );
+    }
+
+    #[test]
+    fn compressor_power_rises_with_shaft_speed() {
+        let mut idle = forced_induction();
+        idle.advance_intake(1.0e-3, 0.02, &env(), &gas());
+        let idle_power = idle.compressor_power;
+
+        let mut spun = forced_induction();
+        spool_up(&mut spun, 2.0);
+        spun.advance_intake(1.0e-3, 0.02, &env(), &gas());
+        assert!(
+            spun.compressor_power > idle_power,
+            "spinning the shaft must draw more compressor power: idle {idle_power}, spun {}",
+            spun.compressor_power
+        );
+    }
+
+    #[test]
+    fn a_real_expansion_ratio_spools_the_shaft_and_a_flat_one_does_not() {
+        let mut spooling = forced_induction();
+        spool_up(&mut spooling, 1.0);
+        assert!(spooling.shaft.shaft_rpm() > 100.0);
+
+        let mut idle = forced_induction();
+        let flat = PortState {
+            pressure: env().pressure,
+            temperature: env().temperature,
+            gas_constant: gas().r_burned,
+            gamma: gas().gamma_burned,
+            burned_fraction: 1.0,
+        };
+        for _ in 0..1_000 {
+            idle.advance_exhaust(1.0e-3, &flat, env().pressure);
+        }
+        assert!(idle.shaft.shaft_rpm() < 1.0);
     }
 }
