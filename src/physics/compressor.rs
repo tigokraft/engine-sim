@@ -256,6 +256,70 @@ pub fn discharge_temperature(
     inlet_temperature * (1.0 + (pressure_ratio.powf(exponent) - 1.0) / efficiency)
 }
 
+/// Turbocharger frame size, used to pick one of the stock maps below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameSize {
+    Small,
+    Medium,
+    Large,
+}
+
+impl CompressorMap {
+    /// A stock map for the given frame size.
+    ///
+    /// These are representative small/medium/large single-turbo maps, sized
+    /// so a preset can say "small single" or "large single" without typing
+    /// its own speed lines.
+    pub fn stock(frame: FrameSize) -> Self {
+        match frame {
+            FrameSize::Small => small_frame_map(),
+            FrameSize::Medium => medium_frame_map(),
+            FrameSize::Large => large_frame_map(),
+        }
+    }
+}
+
+fn line(corrected_speed: f64, points: &[(f64, f64, f64)]) -> SpeedLine {
+    SpeedLine::new(
+        corrected_speed,
+        points
+            .iter()
+            .map(|&(flow, pressure_ratio, efficiency)| MapPoint {
+                flow,
+                pressure_ratio,
+                efficiency,
+            })
+            .collect(),
+    )
+}
+
+fn small_frame_map() -> CompressorMap {
+    CompressorMap::new(vec![
+        line(60_000.0, &[(0.020, 1.45, 0.62), (0.045, 1.35, 0.74), (0.065, 1.05, 0.58)]),
+        line(90_000.0, &[(0.035, 1.95, 0.66), (0.065, 1.80, 0.77), (0.090, 1.30, 0.60)]),
+        line(120_000.0, &[(0.050, 2.55, 0.65), (0.085, 2.35, 0.76), (0.115, 1.55, 0.58)]),
+        line(150_000.0, &[(0.060, 3.05, 0.60), (0.100, 2.75, 0.72), (0.135, 1.70, 0.54)]),
+    ])
+}
+
+fn medium_frame_map() -> CompressorMap {
+    CompressorMap::new(vec![
+        line(50_000.0, &[(0.045, 1.40, 0.63), (0.090, 1.30, 0.75), (0.130, 1.05, 0.59)]),
+        line(75_000.0, &[(0.070, 1.90, 0.67), (0.130, 1.75, 0.78), (0.180, 1.30, 0.61)]),
+        line(100_000.0, &[(0.095, 2.50, 0.66), (0.170, 2.30, 0.77), (0.230, 1.55, 0.59)]),
+        line(125_000.0, &[(0.115, 3.00, 0.61), (0.200, 2.70, 0.73), (0.270, 1.70, 0.55)]),
+    ])
+}
+
+fn large_frame_map() -> CompressorMap {
+    CompressorMap::new(vec![
+        line(40_000.0, &[(0.090, 1.35, 0.64), (0.180, 1.25, 0.76), (0.260, 1.05, 0.60)]),
+        line(60_000.0, &[(0.140, 1.85, 0.68), (0.260, 1.70, 0.79), (0.360, 1.30, 0.62)]),
+        line(80_000.0, &[(0.190, 2.45, 0.67), (0.340, 2.25, 0.78), (0.460, 1.55, 0.60)]),
+        line(100_000.0, &[(0.230, 2.95, 0.62), (0.400, 2.65, 0.74), (0.540, 1.70, 0.56)]),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +429,26 @@ mod tests {
         let efficient = discharge_temperature(300.0, 2.2, 0.78, 1.4);
         let inefficient = discharge_temperature(300.0, 2.2, 0.55, 1.4);
         assert!(inefficient > efficient);
+    }
+
+    #[test]
+    fn stock_maps_span_a_wider_flow_range_as_frame_grows() {
+        let small = CompressorMap::stock(FrameSize::Small);
+        let medium = CompressorMap::stock(FrameSize::Medium);
+        let large = CompressorMap::stock(FrameSize::Large);
+        let choke = |map: &CompressorMap| map.lines.last().unwrap().choke_flow();
+        assert!(choke(&medium) > choke(&small));
+        assert!(choke(&large) > choke(&medium));
+    }
+
+    #[test]
+    fn a_stock_map_reports_an_operating_point_at_its_own_mid_speed_line() {
+        for frame in [FrameSize::Small, FrameSize::Medium, FrameSize::Large] {
+            let map = CompressorMap::stock(frame);
+            let mid_line = &map.lines[map.lines.len() / 2];
+            let mid_flow = (mid_line.surge_flow() + mid_line.choke_flow()) / 2.0;
+            let reading = map.evaluate(mid_line.corrected_speed(), mid_flow);
+            assert_eq!(reading.region, MapRegion::Operating);
+        }
     }
 }
