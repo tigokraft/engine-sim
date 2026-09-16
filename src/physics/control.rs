@@ -1044,6 +1044,7 @@ mod tests {
                 spark_cut: false,
                 exhaust_cutout: false,
                 anti_lag: false,
+                starter_hz: 0.0,
             },
         );
         assert!(

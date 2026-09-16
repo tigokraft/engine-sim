@@ -2084,6 +2084,10 @@ impl Driveline {
             spark_cut: self.cutting() || matches!(self.dyno_mode, DynoMode::Motoring { .. }),
             exhaust_cutout: self.exhaust_cutout,
             anti_lag: self.anti_lag,
+            // Zero once the pinion is out, which is what stops the whine: the
+            // starter is not faded down when the engine catches, it is thrown
+            // out of the gear it was singing with.
+            starter_hz: self.starter.whine_hz(self.rpm),
         }
     }
 }

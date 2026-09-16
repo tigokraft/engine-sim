@@ -98,6 +98,17 @@ pub struct EngineControls {
     pub exhaust_cutout: bool,
     /// Whether anti-lag is active.
     pub anti_lag: bool,
+    /// Tooth-mesh frequency of the starter pinion against the ring gear [Hz].
+    ///
+    /// Zero whenever the pinion is out, which is every frame of every engine
+    /// that is running — so this is the only field here that is normally zero
+    /// and occasionally not, rather than the other way round. It carries both
+    /// the pitch and the fact that there is anything to hear:
+    /// [`Starter::whine_hz`](crate::physics::control::Starter::whine_hz)
+    /// returns zero for a pinion out of mesh rather than a frequency nobody is
+    /// listening to, because a starter is not faded out when the engine
+    /// catches. It is physically thrown out of the gear it was singing with.
+    pub starter_hz: f64,
 }
 
 impl Default for EngineControls {
@@ -108,6 +119,7 @@ impl Default for EngineControls {
             spark_cut: false,
             exhaust_cutout: false,
             anti_lag: false,
+            starter_hz: 0.0,
         }
     }
 }
@@ -120,6 +132,7 @@ impl EngineControls {
             spark_cut: false,
             exhaust_cutout: false,
             anti_lag: false,
+            starter_hz: 0.0,
         }
     }
 
@@ -130,6 +143,7 @@ impl EngineControls {
             spark_cut: true,
             exhaust_cutout: false,
             anti_lag: false,
+            starter_hz: 0.0,
         }
     }
 
@@ -835,6 +849,7 @@ impl SnapshotSource {
             unburnt_fuel_mass: unburnt_fuel_mass as f32,
             friction_mep: friction_mep as f32,
             cold_fraction: block.thermal.cold_fraction() as f32,
+            starter_hz: controls.starter_hz as f32,
             spark_cut,
             knock_intensity,
             bore,
@@ -1494,6 +1509,7 @@ mod tests {
                 spark_cut: false,
                 exhaust_cutout: false,
                 anti_lag: false,
+                starter_hz: 0.0,
             };
             block.update(dt, rpm);
             synth.set_snapshot(&source.sample(&block, rpm, dt, controls));

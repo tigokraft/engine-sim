@@ -249,6 +249,14 @@ pub struct EngineSnapshot {
     /// fingerprints were measured on — so everything keyed on this is exactly
     /// neutral there, by construction rather than by calibration.
     pub cold_fraction: f32,
+    /// Tooth-mesh frequency of the starter pinion against the ring gear [Hz].
+    ///
+    /// Zero whenever the pinion is out of mesh, which is every frame of an
+    /// engine that is running. One field carries both the pitch and whether
+    /// there is anything to hear, because those are the same fact: a starter
+    /// stops because it is thrown out of the gear it was singing with, not
+    /// because something faded it down.
+    pub starter_hz: f32,
     /// Whether ignition is currently cut (shift cut, launch control, overrun).
     pub spark_cut: bool,
     /// How far past 1.0 the Livengood-Wu knock integral went, `(I - 1).max(0)` [-].
@@ -358,6 +366,7 @@ impl Default for EngineSnapshot {
             unburnt_fuel_mass: 0.0,
             friction_mep: 0.0,
             cold_fraction: 0.0,
+            starter_hz: 0.0,
             spark_cut: false,
             knock_intensity: 0.0,
             bore: 0.084,
@@ -439,6 +448,7 @@ impl EngineSnapshot {
         guard!(unburnt_fuel_mass, 0.0, 1.0);
         guard!(friction_mep, 0.0, 2.0e6);
         guard!(cold_fraction, 0.0, 1.0);
+        guard!(starter_hz, 0.0, 20_000.0);
         guard!(knock_intensity, 0.0, 50.0);
         guard!(bore, 0.010, 0.500);
         guard!(peak_cylinder_pressure, 0.0, 50.0e6);
@@ -906,6 +916,15 @@ pub struct SynthConfig {
     /// mechanical force against the combustion force the same structure is
     /// carrying, and it is not comparable to [`Self::intake_level`].
     pub mechanical_level: f64,
+    /// Level of the starter motor in the mechanical mix [-].
+    ///
+    /// Its own level rather than a share of
+    /// [`Self::mechanical_level`], because the two are not the same kind of
+    /// thing: the mechanical floor is the engine's own racket and scales with
+    /// how hard it is working, while the starter is a separate machine bolted
+    /// to the bellhousing that is either meshed or not. It radiates through the
+    /// same casting, though, which is why it is summed into the same drive.
+    pub starter_level: f64,
     /// Level of the structural path in the final mix [-].
     ///
     /// Scales what the block radiates against what the pipes do. The balance
@@ -999,6 +1018,7 @@ impl SynthConfig {
             // unity RMS, so this is the force it puts into the block relative to
             // the combustion drive alongside it.
             mechanical_level: 0.37,
+            starter_level: 0.22,
             // Set by measurement against the catalogue: the largest value at
             // which the block is clearly present in the bottom octave at idle
             // without becoming the thing the engine sounds like.
@@ -2279,6 +2299,135 @@ impl MechanicalVoice {
     }
 }
 
+/// Level of the second mesh harmonic relative to the first [-].
+///
+/// A straight-cut pinion driving a straight-cut ring gear has a contact ratio
+/// barely over one, so the tooth-to-tooth handover is nearly a discontinuity
+/// and the mesh tone is anything but a sine. The second harmonic carries most
+/// of what makes it read as gear rather than as tone.
+const STARTER_MESH_SECOND: f32 = 0.55;
+
+/// Level of the third mesh harmonic relative to the first [-].
+const STARTER_MESH_THIRD: f32 = 0.25;
+
+/// Brush and commutator hash, relative to the mesh tone [-].
+///
+/// The other half of the sound, and the half that says it is a motor rather
+/// than a gearbox: a series-wound armature with a segmented commutator is an
+/// arc being made and broken tens of times a revolution. Broadband, bandpassed
+/// where the motor casing radiates.
+const STARTER_BRUSH_LEVEL: f32 = 0.45;
+
+/// Where the motor casing puts the brush hash [Hz].
+const STARTER_BRUSH_HZ: f32 = 2_200.0;
+
+/// Glide on the whine's amplitude [s].
+///
+/// Short, because the pinion coming out of mesh is a mechanical event and not a
+/// fade — but not zero, because a gain that steps mid-cycle is a click, and the
+/// one thing a release must not sound like is an edit.
+const STARTER_GATE_SECONDS: f32 = 0.012;
+
+/// Level the release is declared finished at [-].
+///
+/// An exponential glide approaches zero and never arrives, and "never arrives"
+/// means a voice that is inaudible but still summing a sine into the block for
+/// the rest of the session. Eighty decibels down is over, so it is snapped
+/// there and the voice stops being asked for samples at all.
+const STARTER_GATE_FLOOR: f32 = 1.0e-4;
+
+/// The starter motor, heard rather than felt.
+///
+/// Two sources, both of them driven by the one number the physics sends across:
+/// the pinion's tooth-mesh frequency, which is zero when the pinion is out.
+///
+/// - **Mesh whine.** Three harmonics of the tooth-mesh rate. It is a gear tone
+///   and it tracks the crank exactly, because while the pinion is in mesh the
+///   armature is geared to the crankshaft and has no speed of its own — which
+///   is why the whine rises and falls with every compression stroke the engine
+///   drags itself over, without anything modulating it.
+/// - **Brush hash.** Bandpassed noise at the casing's own frequency, gated the
+///   same way.
+///
+/// Nothing here knows what a starting sequence is. The voice sings while it is
+/// handed a frequency and stops when it is handed a zero, and the physics
+/// decides which.
+#[derive(Debug, Clone)]
+pub struct StarterVoice {
+    phase: f32,
+    hz: Smoothed,
+    gain: Smoothed,
+    brush: Biquad,
+    sample_rate: f32,
+}
+
+impl StarterVoice {
+    pub fn new(sample_rate: f32) -> Self {
+        Self {
+            phase: 0.0,
+            hz: Smoothed::new(0.0, sample_rate, 0.010),
+            gain: Smoothed::new(0.0, sample_rate, STARTER_GATE_SECONDS),
+            brush: Biquad::new(BiquadCoeffs::bandpass(
+                sample_rate,
+                STARTER_BRUSH_HZ,
+                1.2,
+            )),
+            sample_rate,
+        }
+    }
+
+    /// Points the voice at this frame's mesh frequency [Hz].
+    ///
+    /// A zero is a pinion out of mesh, and it silences the voice rather than
+    /// running it at nought hertz.
+    pub fn tune(&mut self, mesh_hz: f32) {
+        let meshed = mesh_hz > 1.0 && mesh_hz < self.sample_rate * 0.45;
+        self.hz.set_target(if meshed { mesh_hz } else { self.hz.value() });
+        self.gain.set_target(if meshed { 1.0 } else { 0.0 });
+    }
+
+    /// Whether the voice is currently making any sound at all.
+    pub fn is_singing(&self) -> bool {
+        self.gain.value() > STARTER_GATE_FLOOR || self.gain.target() > STARTER_GATE_FLOOR
+    }
+
+    #[inline(always)]
+    pub fn process(&mut self, noise: &mut Noise) -> f32 {
+        let gain = self.gain.next_value();
+        let hz = self.hz.next_value();
+        if gain <= STARTER_GATE_FLOOR {
+            if self.gain.target() <= 0.0 {
+                self.gain.snap(0.0);
+            }
+            // Still advance the filter's own state so a re-engagement does not
+            // start from whatever was left in it a minute ago.
+            self.brush.process(0.0);
+            return 0.0;
+        }
+
+        let increment = hz / self.sample_rate;
+        if (1e-9..0.5).contains(&increment) {
+            self.phase += increment;
+            if self.phase >= 1.0 {
+                self.phase -= 1.0;
+            }
+        }
+        let turn = TAU * self.phase;
+        let mesh = turn.sin()
+            + STARTER_MESH_SECOND * (2.0 * turn).sin()
+            + STARTER_MESH_THIRD * (3.0 * turn).sin();
+        let brush = self.brush.process(noise.next_bipolar()) * STARTER_BRUSH_LEVEL;
+        (mesh + brush) * gain
+    }
+
+    pub fn reset(&mut self) {
+        self.phase = 0.0;
+        self.gain.snap(0.0);
+        self.hz.snap(0.0);
+        self.brush.reset();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Turbocharger
 // ---------------------------------------------------------------------------
@@ -3175,6 +3324,7 @@ pub struct EngineSynth {
     wastegate: WastegateVoice,
     backfire: BackfireVoice,
     mechanical: MechanicalVoice,
+    starter: StarterVoice,
     knock: KnockVoice,
     propagation: PropagationModel,
     tailpipe_pressures: Vec<f32>,
@@ -3416,6 +3566,7 @@ impl EngineSynth {
             wastegate: WastegateVoice::new(fs),
             backfire: BackfireVoice::new(fs),
             mechanical: MechanicalVoice::from_spec(&config.mechanical, fs),
+            starter: StarterVoice::new(fs),
             knock: KnockVoice::new(fs),
             propagation,
             tailpipe_pressures: vec![0.0; config.bank_count],
@@ -3590,6 +3741,7 @@ impl EngineSynth {
         self.blow_off.reset();
         self.wastegate.reset();
         self.mechanical.reset();
+        self.starter.reset();
         self.knock.reset();
         self.propagation.reset();
         self.tailpipe_pressures.fill(0.0);
@@ -3692,6 +3844,10 @@ impl EngineSynth {
         self.variation_depth = self.variation_depth_at(rpm);
         self.mechanical
             .tune(&self.snapshot, cycle_hz, self.config.cylinders.len());
+        // Straight off the physics, with no state of its own: a zero here is a
+        // pinion out of mesh, and the voice goes quiet because there is nothing
+        // left turning it.
+        self.starter.tune(self.snapshot.starter_hz);
         self.intake_network.set_throttle(throttle);
         self.knock
             .tune(self.snapshot.bore, gamma, gas_constant, temperature);
@@ -4229,6 +4385,7 @@ impl EngineSynth {
         let drive = rise * self.combustion_scale
             + shaking_drive(shake)
             + self.mechanical.process(&mut self.noise) * self.config.mechanical_level as f32
+            + self.starter.process(&mut self.noise) * self.config.starter_level as f32
             + self.knock.process(&mut self.noise) * self.knock_scale;
         let block_rad = turbo
             + roots
@@ -4407,6 +4564,7 @@ mod tests {
             // Chen-Flynn on the shipped V8 at 3000 rpm under load.
             friction_mep: 1.5e5,
             cold_fraction: 0.0,
+            starter_hz: 0.0,
             spark_cut: false,
             knock_intensity: 0.0,
             bore: 0.084,
@@ -5134,9 +5292,9 @@ mod tests {
 
         // Five cycle tables — pressure, the two port flows and the two valve
         // areas — the per-cylinder blowdown, intake flow and primary
-        // temperature arrays, nineteen scalars and one padded bool. Every byte
+        // temperature arrays, twenty scalars and one padded bool. Every byte
         // accounted for is a byte that is not a pointer.
-        let expected = 6 * CYCLE_TABLE * 4 + 3 * MAX_CYLINDERS * 4 + 19 * 4 + 4;
+        let expected = 6 * CYCLE_TABLE * 4 + 3 * MAX_CYLINDERS * 4 + 20 * 4 + 4;
         assert_eq!(std::mem::size_of::<EngineSnapshot>(), expected);
     }
 
@@ -5160,6 +5318,7 @@ mod tests {
             unburnt_fuel_mass: f32::NAN,
             friction_mep: f32::NAN,
             cold_fraction: f32::NAN,
+            starter_hz: f32::NAN,
             spark_cut: true,
             knock_intensity: f32::NAN,
             bore: f32::NAN,
@@ -6816,6 +6975,104 @@ mod tests {
                 "{name} rose by {ratio:.3} cold, not {factor:.3}"
             );
         }
+    }
+
+    #[test]
+    fn the_starter_whine_sings_while_it_is_meshed_and_stops_when_it_is_not() {
+        // The release, heard. There is no fade and no envelope: the voice is
+        // handed a mesh frequency while the pinion is in and a zero when it is
+        // out, and a zero is silence rather than a tone nobody can hear.
+        let mut voice = StarterVoice::new(FS);
+        let mut noise = Noise::new(0x57A2);
+
+        voice.tune(430.0);
+        let cranking: Vec<f32> = (0..4_800).map(|_| voice.process(&mut noise)).collect();
+        let meshed_rms = rms(&cranking);
+        assert!(meshed_rms > 0.05, "a meshed starter was silent: {meshed_rms:.5}");
+        assert!(voice.is_singing());
+
+        // Pinion out. The gate is short but not instant, so the first block
+        // still carries the tail of it; the second must be nothing at all.
+        voice.tune(0.0);
+        let _release: Vec<f32> = (0..24_000).map(|_| voice.process(&mut noise)).collect();
+        let after: Vec<f32> = (0..24_000).map(|_| voice.process(&mut noise)).collect();
+        assert_eq!(
+            rms(&after),
+            0.0,
+            "the starter was still singing a tenth of a second after it let go"
+        );
+        assert!(!voice.is_singing());
+
+        // And the pitch it sings at is the one it was given, not one of its own.
+        // The whine follows the crank because the pinion is geared to it, so a
+        // starter dragging a slow engine sings low and the same starter on a
+        // faster one sings high, with nothing scheduling either.
+        let sung_at = |mesh_hz: f32| {
+            let mut voice = StarterVoice::new(FS);
+            let mut noise = Noise::new(0x51A7);
+            voice.tune(mesh_hz);
+            (0..4_800).for_each(|_| {
+                voice.process(&mut noise);
+            });
+            (0..48_000)
+                .map(|_| voice.process(&mut noise))
+                .collect::<Vec<f32>>()
+        };
+        // `magnitude_at` de-interleaves a stereo bus; this voice is one channel.
+        let tone = |x: &[f32], hz: f32| {
+            let w = TAU * hz / FS;
+            let (mut re, mut im) = (0.0f32, 0.0f32);
+            for (n, &v) in x.iter().enumerate() {
+                let phase = w * n as f32;
+                re += v * phase.cos();
+                im += v * phase.sin();
+            }
+            2.0 * (re * re + im * im).sqrt() / x.len() as f32
+        };
+        let slow = sung_at(200.0);
+        let fast = sung_at(400.0);
+        assert!(
+            tone(&slow, 200.0) > 5.0 * tone(&fast, 200.0),
+            "a starter turning half as fast did not sing an octave down"
+        );
+        // 1200 Hz is the fast one's third mesh harmonic and nothing at all of
+        // the slow one's, which only reaches 600.
+        assert!(
+            tone(&fast, 1_200.0) > 5.0 * tone(&slow, 1_200.0),
+            "the whine's harmonics did not move with its fundamental"
+        );
+    }
+
+    #[test]
+    fn a_running_engine_carries_no_starter_at_all() {
+        // The neutrality half: every recorded fingerprint is an engine that is
+        // already running, and a running engine has its pinion out. Asserted
+        // sample for sample against a synth with the voice's level at zero —
+        // if a snapshot carrying `starter_hz` of zero differed from one with no
+        // starter in the mix at all, the whole catalogue would have moved.
+        let render_with = |starter_hz: f32, level: f64| {
+            let mut config = SynthConfig::cross_plane_v8(FS);
+            config.starter_level = level;
+            let mut synth = EngineSynth::new(config);
+            let mut snapshot = loaded_snapshot();
+            snapshot.starter_hz = starter_hz;
+            synth.set_snapshot(&snapshot);
+            render(&mut synth, 4_800);
+            render(&mut synth, 24_000)
+        };
+
+        let running = render_with(0.0, SynthConfig::default().starter_level);
+        let without = render_with(0.0, 0.0);
+        assert_eq!(
+            running, without,
+            "a pinion out of mesh still changed what came out"
+        );
+
+        let meshed = render_with(430.0, SynthConfig::default().starter_level);
+        assert!(
+            meshed != without,
+            "a meshed starter never reached the output, so nothing is proved"
+        );
     }
 
     #[test]

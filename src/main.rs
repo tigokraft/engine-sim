@@ -398,6 +398,7 @@ fn simulation_thread(
             spark_cut: is_spark_cut,
             exhaust_cutout: rig.driveline.exhaust_cutout,
             anti_lag: false,
+            starter_hz: rig.driveline.starter.whine_hz(rig.driveline.rpm),
         };
         let snapshot = rig
             .source
