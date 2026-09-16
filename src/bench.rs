@@ -38,7 +38,8 @@ use crate::physics::plumbing::{
     TurbineGeometry,
 };
 use crate::physics::thermodynamics::{
-    CylinderModel, DieselCombustion, HeatRelease, ValveEvent, ValveTrain, WiebeProfile, DIESEL_LHV,
+    CylinderModel, DieselCombustion, HeatRelease, TwoPlugCombustion, ValveEvent, ValveTrain,
+    WiebeProfile, DIESEL_LHV,
 };
 use crate::physics::vehicle::{Clutch, ClutchState, Gearbox, RoadLoad};
 
@@ -675,12 +676,17 @@ impl EnginePreset {
                 // 654 cc per chamber, with a rod long enough to be nearly
                 // sinusoidal. See the doc comment above.
                 geometry: CylinderGeometry::new(0.1050, 0.0755, 0.4530, 10.0),
-                combustion: HeatRelease::Spark(WiebeProfile::new(
-                    deg(335.0),
-                    deg(90.0),
-                    5.0,
-                    1.6,
-                    0.94,
+                // Leading plug fires at the same angle the single-Wiebe
+                // version of this preset always spark advance the ECU
+                // schedules; the trailing plug follows twelve degrees later,
+                // closer to the exhaust port, and accounts for a smaller
+                // share of the charge — the leading flame has already
+                // started consuming it by the time the trailing kernel
+                // lights. See `physics::thermodynamics::TwoPlugCombustion`.
+                combustion: HeatRelease::TwoPlug(TwoPlugCombustion::new(
+                    WiebeProfile::new(deg(335.0), deg(90.0), 5.0, 1.6, 0.94),
+                    deg(12.0),
+                    0.35,
                 )),
                 valves: crate::physics::rotor::peripheral_port(),
                 ..CylinderModel::default()
