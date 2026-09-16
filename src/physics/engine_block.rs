@@ -2514,6 +2514,24 @@ mod tests {
         }
     }
 
+    /// Stage M5 changes the two-rotor's ports and its mechanical voices, not
+    /// its firing order: four events across 720 degrees of eccentric shaft,
+    /// evenly spaced, is the correct order 2 and must stay exactly that.
+    #[test]
+    fn two_rotor_wankel_still_fires_four_times_across_the_shaft() {
+        let order = FiringOrder::two_rotor_wankel();
+        assert_eq!(order.cylinders.len(), 4);
+        let mut offsets: Vec<f64> = order
+            .cylinders
+            .iter()
+            .map(|c| c.firing_offset.to_degrees())
+            .collect();
+        offsets.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for (i, off) in offsets.iter().enumerate() {
+            approx(*off, i as f64 * 180.0, 1e-9);
+        }
+    }
+
     #[test]
     fn block_exposes_per_cylinder_evo_pressure() {
         let env = Environment::default();
