@@ -1207,7 +1207,13 @@ impl Pop {
 const BACKFIRE_LOWPASS_FRACTION: f32 = 0.20;
 
 /// Butterworth Q values for the pulse's tenth-order (five-biquad) lowpass [-].
-const BACKFIRE_LOWPASS_Q: [f32; 5] = [0.5062, 0.5612, 0.7071, 1.1013, 3.1962];
+const BACKFIRE_LOWPASS_Q: [f32; 5] = [
+    0.5062,
+    0.5612,
+    std::f32::consts::FRAC_1_SQRT_2,
+    1.1013,
+    3.1962,
+];
 
 /// Fixed pool of overlapping pops.
 ///
