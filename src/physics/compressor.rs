@@ -324,6 +324,29 @@ fn large_frame_map() -> CompressorMap {
 mod tests {
     use super::*;
 
+    fn approx_eq(a: f64, b: f64, tol: f64) {
+        assert!((a - b).abs() <= tol, "expected {b}, got {a} (tol {tol})");
+    }
+
+    #[test]
+    fn corrected_speed_is_inlet_invariant() {
+        // The same physical shaft speed scaled to a hotter inlet must land
+        // back on the same corrected speed once the scaling is undone.
+        let reference = corrected_speed(80_000.0, T_REF);
+        let hotter_shaft_rpm = 80_000.0 * (310.0 / T_REF).sqrt();
+        let scaled = corrected_speed(hotter_shaft_rpm, 310.0);
+        approx_eq(scaled, reference, 1e-6);
+    }
+
+    #[test]
+    fn corrected_flow_is_inlet_invariant() {
+        let reference = corrected_flow(0.05, T_REF, P_REF);
+        // Solve corrected_flow(m, 310, 110_000) == reference for m.
+        let scaled_mass = reference * (110_000.0 / P_REF) / (310.0 / T_REF).sqrt();
+        let scaled = corrected_flow(scaled_mass, 310.0, 110_000.0);
+        approx_eq(scaled, reference, 1e-6);
+    }
+
     fn point(flow: f64, pressure_ratio: f64, efficiency: f64) -> MapPoint {
         MapPoint {
             flow,
