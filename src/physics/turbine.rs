@@ -562,6 +562,16 @@ mod tests {
     }
 
     #[test]
+    fn a_larger_wheel_inertia_lags_a_given_step_longer() {
+        let small = time_to_reach(60_000.0, 1e-5, BearingType::Journal);
+        let large = time_to_reach(60_000.0, 8e-5, BearingType::Journal);
+        assert!(
+            large > small,
+            "larger inertia ({large}s) did not lag longer than smaller inertia ({small}s)"
+        );
+    }
+
+    #[test]
     fn steady_state_matches_a_hand_computed_power_balance() {
         let turbine_power = 7000.0;
         let compressor_power = 3000.0;
