@@ -4624,8 +4624,8 @@ mod tests {
 
         // 1. Back pressure must be strictly lower with cutout open than closed
         let mass_flow = 0.20; // 200 g/s exhaust flow
-        let bp_closed = exhaust.back_pressure(mass_flow, false);
-        let bp_open = exhaust.back_pressure(mass_flow, true);
+        let bp_closed = exhaust.back_pressure(mass_flow, false, None);
+        let bp_open = exhaust.back_pressure(mass_flow, true, None);
         assert!(
             bp_open < bp_closed * 0.70,
             "opening cutout must significantly lower back pressure: open={bp_open}, closed={bp_closed}"

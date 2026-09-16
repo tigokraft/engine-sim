@@ -235,6 +235,25 @@ impl TurbineGeometry {
     pub fn throat_area_ratio(&self) -> f64 {
         (0.5 * self.housing_ar.max(0.05) / 0.7).clamp(0.15, 0.95)
     }
+
+    /// A representative reduced flow this housing is calibrated at [kg/s],
+    /// used to scale [`Self::throat_area_ratio`] against a real turbine map's
+    /// reduced flow axis in [`Self::operating_area_ratio`].
+    pub const REFERENCE_REDUCED_FLOW: f64 = 0.15;
+
+    /// Effective throat area ratio at the turbine's actual operating point.
+    ///
+    /// [`Self::throat_area_ratio`] is a fixed nominal figure calibrated at
+    /// [`Self::REFERENCE_REDUCED_FLOW`]; TB3 closes the loop with a real
+    /// [`crate::physics::turbine::TurbineMap`], so the wheel's actual reduced
+    /// flow — proportional to its effective flow area at fixed inlet
+    /// conditions, the same way corrected flow is portable across them — can
+    /// scale that nominal area up or down from the map reading instead of
+    /// leaving it fixed regardless of how hard the wheel is being asked to work.
+    pub fn operating_area_ratio(&self, reduced_flow: f64) -> f64 {
+        (self.throat_area_ratio() * reduced_flow.max(1e-4) / Self::REFERENCE_REDUCED_FLOW)
+            .clamp(0.05, 1.5)
+    }
 }
 
 /// Complete geometric description of an engine's exhaust system [SI].
@@ -513,7 +532,15 @@ impl ExhaustSystem {
     /// silencer chain, lowering the back pressure. `cutout_open` is the live
     /// state, not [`Self::cutout_fitted`] — a fitted-but-closed cutout leaves
     /// back pressure exactly as if none were fitted at all.
-    pub fn back_pressure(&self, mass_flow: f64, cutout_open: bool) -> f64 {
+    ///
+    /// `turbine_reduced_flow`, when a turbine is fitted, is its actual reduced
+    /// flow off a real [`crate::physics::turbine::TurbineMap`] reading —
+    /// see `docs/TURBO_PLAN.md`'s TB3 — and scales the fixed nominal
+    /// restriction from [`TurbineGeometry::throat_area_ratio`] to the
+    /// housing's actual operating point via
+    /// [`TurbineGeometry::operating_area_ratio`]. `None` keeps TB0's fixed
+    /// figure, for callers with no live turbine state to feed it.
+    pub fn back_pressure(&self, mass_flow: f64, cutout_open: bool, turbine_reduced_flow: Option<f64>) -> f64 {
         if mass_flow <= 0.0 {
             return 0.0;
         }
@@ -556,7 +583,11 @@ impl ExhaustSystem {
         // muffler stage, so it pays regardless of the cutout: engine breathes
         // through the wheel whether or not the tailpipe silencer is skipped.
         if let Some(turbine) = &self.turbine {
-            let throat_ratio = turbine.throat_area_ratio().max(0.05);
+            let throat_ratio = match turbine_reduced_flow {
+                Some(reduced_flow) => turbine.operating_area_ratio(reduced_flow),
+                None => turbine.throat_area_ratio(),
+            }
+            .max(0.05);
             let a_throat = (a_coll * throat_ratio).max(1e-6);
             // Contraction into the nozzle plus real dissipation in the wheel:
             // unlike the venturi algebra above for a silencer's reversible
@@ -833,12 +864,12 @@ mod tests {
     #[test]
     fn back_pressure_rises_with_a_turbine_fitted() {
         let mass_flow = 0.08;
-        let bare = exhaust_with_turbine(None).back_pressure(mass_flow, false);
+        let bare = exhaust_with_turbine(None).back_pressure(mass_flow, false, None);
         let fitted = exhaust_with_turbine(Some(TurbineGeometry {
             housing_ar: 0.7,
             blade_count: 9,
         }))
-        .back_pressure(mass_flow, false);
+        .back_pressure(mass_flow, false, None);
         assert!(
             fitted > bare,
             "fitting a turbine should raise back pressure: bare={bare:.1}, fitted={fitted:.1}"
@@ -852,12 +883,12 @@ mod tests {
             housing_ar: 0.4,
             blade_count: 9,
         }))
-        .back_pressure(mass_flow, false);
+        .back_pressure(mass_flow, false, None);
         let open = exhaust_with_turbine(Some(TurbineGeometry {
             housing_ar: 1.2,
             blade_count: 9,
         }))
-        .back_pressure(mass_flow, false);
+        .back_pressure(mass_flow, false, None);
         assert!(
             open < tight,
             "a larger A/R should lower back pressure: tight={tight:.1}, open={open:.1}"
@@ -874,19 +905,52 @@ mod tests {
             housing_ar: 0.7,
             blade_count: 9,
         });
-        let with_turbine_closed = exhaust_with_turbine(turbine).back_pressure(mass_flow, false);
-        let with_turbine_open = exhaust_with_turbine(turbine).back_pressure(mass_flow, true);
+        let with_turbine_closed = exhaust_with_turbine(turbine).back_pressure(mass_flow, false, None);
+        let with_turbine_open = exhaust_with_turbine(turbine).back_pressure(mass_flow, true, None);
         assert!(
             (with_turbine_closed - with_turbine_open).abs() < 1e-9,
             "the turbine's own term must not move with the cutout: \
              closed={with_turbine_closed:.3}, open={with_turbine_open:.3}"
         );
 
-        let no_turbine_open_cutout = exhaust_with_turbine(None).back_pressure(mass_flow, true);
+        let no_turbine_open_cutout = exhaust_with_turbine(None).back_pressure(mass_flow, true, None);
         assert!(
             with_turbine_open > no_turbine_open_cutout,
             "the turbine's own term should still raise back pressure with the \
              cutout open: with={with_turbine_open:.1}, without={no_turbine_open_cutout:.1}"
+        );
+    }
+
+    #[test]
+    fn a_real_operating_point_scales_the_fixed_nominal_restriction() {
+        let turbine = TurbineGeometry {
+            housing_ar: 0.7,
+            blade_count: 9,
+        };
+        // More reduced flow than the reference is the wheel passing more air
+        // than its nominal calibration point, which should read as a wider
+        // effective throat, not a narrower one.
+        let wide_open = turbine.operating_area_ratio(TurbineGeometry::REFERENCE_REDUCED_FLOW * 3.0);
+        let choked_down = turbine.operating_area_ratio(TurbineGeometry::REFERENCE_REDUCED_FLOW * 0.3);
+        assert!(
+            wide_open > turbine.throat_area_ratio(),
+            "more reduced flow than the reference must open the effective throat"
+        );
+        assert!(
+            choked_down < turbine.throat_area_ratio(),
+            "less reduced flow than the reference must tighten the effective throat"
+        );
+
+        let mass_flow = 0.08;
+        let exhaust = exhaust_with_turbine(Some(turbine));
+        let nominal = exhaust.back_pressure(mass_flow, false, None);
+        let at_high_flow =
+            exhaust.back_pressure(mass_flow, false, Some(TurbineGeometry::REFERENCE_REDUCED_FLOW * 3.0));
+        assert!(
+            at_high_flow < nominal,
+            "a wheel actually flowing more than its reference point must show \
+             less back pressure than the fixed nominal figure: nominal={nominal:.1}, \
+             at_high_flow={at_high_flow:.1}"
         );
     }
 }
