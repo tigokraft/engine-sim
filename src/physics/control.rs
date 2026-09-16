@@ -232,6 +232,103 @@ impl IdleGovernor {
     }
 }
 
+/// Time constant of the mean the hunt is measured against [s].
+///
+/// Slower than any lope worth the name and faster than a warm-up, so the mean
+/// follows the idle the engine is settling towards without following the
+/// swing about it.
+pub const IDLE_HUNT_MEAN_TAU: f64 = 4.0;
+
+/// Longest gap between crossings still counted as a hunt [s].
+///
+/// Past this the engine is not oscillating, it is drifting, and reporting a
+/// six second "period" would be worse than reporting none.
+pub const IDLE_HUNT_TIMEOUT: f64 = 6.0;
+
+/// Measures the period and depth of an idle that will not settle.
+///
+/// A lope is a limit cycle, so it has a period, and a period is a number — the
+/// point of this is that the chop can be measured rather than argued about.
+/// It watches engine speed cross its own slow mean going upwards and reports
+/// the time between crossings and the peak-to-peak swing between them.
+///
+/// Both come back zero on an engine that has converged, which is the honest
+/// answer for one: there is no period, not a very long one.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct IdleHunt {
+    /// Slow mean of engine speed, the line the swing is measured about [rev/min].
+    pub mean: f64,
+    /// Time since the speed last crossed that mean going upwards [s].
+    seconds_since_crossing: f64,
+    /// Whether the speed was above the mean at the previous observation.
+    was_above: bool,
+    /// Extremes seen since that crossing [rev/min].
+    peak: f64,
+    trough: f64,
+    /// Whether a first crossing has happened, so an interval can be timed.
+    started: bool,
+    /// Period of the limit cycle, or `0` when the idle has settled [s].
+    pub period: f64,
+    /// Peak-to-peak speed swing over that period [rev/min].
+    pub amplitude: f64,
+}
+
+impl IdleHunt {
+    /// Feeds one frame of engine speed to the detector.
+    pub fn observe(&mut self, rpm: f64, dt: f64) {
+        if !(dt.is_finite() && dt > 0.0) || !rpm.is_finite() {
+            return;
+        }
+        if self.mean <= 0.0 {
+            self.mean = rpm;
+            self.peak = rpm;
+            self.trough = rpm;
+            self.was_above = false;
+            return;
+        }
+        self.mean += (rpm - self.mean) * (1.0 - (-dt / IDLE_HUNT_MEAN_TAU).exp());
+        self.peak = self.peak.max(rpm);
+        self.trough = self.trough.min(rpm);
+        self.seconds_since_crossing += dt;
+
+        let above = rpm > self.mean;
+        if above && !self.was_above {
+            if self.started {
+                self.period = self.seconds_since_crossing;
+                self.amplitude = self.peak - self.trough;
+            }
+            self.started = true;
+            self.seconds_since_crossing = 0.0;
+            self.peak = rpm;
+            self.trough = rpm;
+        } else if self.seconds_since_crossing > IDLE_HUNT_TIMEOUT {
+            // Nothing has crossed in long enough that whatever it is, it is
+            // not a limit cycle.
+            self.period = 0.0;
+            self.amplitude = 0.0;
+            self.started = false;
+            self.seconds_since_crossing = 0.0;
+            self.peak = rpm;
+            self.trough = rpm;
+        }
+        self.was_above = above;
+    }
+
+    /// Forgets everything, for a driveline leaving idle.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Rate of the limit cycle, or `0` when the idle has settled [Hz].
+    pub fn hunt_hz(&self) -> f64 {
+        if self.period > 0.0 {
+            1.0 / self.period
+        } else {
+            0.0
+        }
+    }
+}
+
 /// Complete engine control unit managing fuelling, timing, knock, and limiters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineControlUnit {
