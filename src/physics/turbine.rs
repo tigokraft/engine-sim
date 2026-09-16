@@ -10,6 +10,11 @@
 //!
 //! See `docs/TURBO_PLAN.md`'s TB2.
 
+use std::f64::consts::PI;
+
+use crate::physics::compressor;
+use crate::physics::thermodynamics::PortState;
+
 /// One measured point on a turbine speed line: expansion ratio against
 /// reduced flow and efficiency at that ratio.
 #[derive(Debug, Clone, Copy)]
@@ -177,6 +182,60 @@ impl TurbineMap {
     }
 }
 
+/// Converts a reduced flow back to an actual mass flow at real inlet
+/// conditions — the inverse of [`compressor::corrected_flow`].
+fn reduced_flow_to_mass_flow(reduced_flow: f64, inlet_temperature: f64, inlet_pressure: f64) -> f64 {
+    reduced_flow * (inlet_pressure / compressor::P_REF) / (inlet_temperature / compressor::T_REF).sqrt()
+}
+
+/// Isentropic specific work extracted per unit mass, as a fraction of the
+/// ideal enthalpy drop across `expansion_ratio` [-].
+fn specific_extraction(expansion_ratio: f64, gamma: f64, efficiency: f64) -> f64 {
+    let exponent = (gamma - 1.0) / gamma;
+    let ideal = 1.0 - (1.0 / expansion_ratio.max(1.0)).powf(exponent);
+    efficiency * ideal.max(0.0)
+}
+
+/// Mass flow, efficiency and expansion ratio the turbine map reads at a
+/// given exhaust manifold state.
+///
+/// `corrected_speed` is clamped to the map's own range before the lookup: a
+/// stalled or just-spooling shaft sits below every line the map has, and
+/// reading the slowest line's data for it is an honest nearest-neighbour
+/// read, not an extrapolation past measured data the way exceeding the map
+/// on the high side would be.
+pub fn turbine_operating_point(
+    upstream: &PortState,
+    downstream_pressure: f64,
+    map: &TurbineMap,
+    corrected_speed: f64,
+) -> (f64, f64, f64) {
+    let expansion_ratio = (upstream.pressure / downstream_pressure.max(1.0)).max(1.0);
+    let (speed_lo, speed_hi) = map.speed_range();
+    let reading = map.evaluate(corrected_speed.clamp(speed_lo, speed_hi), expansion_ratio);
+    let mass_flow = reduced_flow_to_mass_flow(reading.reduced_flow, upstream.temperature, upstream.pressure);
+    (mass_flow, reading.efficiency, expansion_ratio)
+}
+
+/// Instantaneous turbine shaft power extracted from the exhaust enthalpy
+/// drop [W].
+///
+/// Takes the manifold's *instantaneous* state, not a cycle-averaged one —
+/// see [`turbine_operating_point`]. Feeding this the mean of a pulse train
+/// instead of the pulse itself throws away real energy: mass flow and
+/// pressure ratio both rise together on a blowdown pulse, so their product
+/// integrated over the pulse exceeds the product of their means.
+pub fn turbine_power(
+    upstream: &PortState,
+    downstream_pressure: f64,
+    map: &TurbineMap,
+    corrected_speed: f64,
+) -> f64 {
+    let (mass_flow, efficiency, expansion_ratio) =
+        turbine_operating_point(upstream, downstream_pressure, map, corrected_speed);
+    mass_flow * upstream.cp() * upstream.temperature * specific_extraction(expansion_ratio, upstream.gamma, efficiency)
+}
+
 /// Turbocharger bearing cartridge, which sets how much shaft power the
 /// bearing itself loses to drag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +269,8 @@ pub struct TurboShaft {
     pub bearing: BearingType,
     /// Shaft angular speed [rad/s].
     omega: f64,
+    /// Set once the shaft has been clamped at the map's overspeed limit.
+    overspeed: bool,
 }
 
 impl TurboShaft {
@@ -220,12 +281,19 @@ impl TurboShaft {
             mechanical_efficiency,
             bearing,
             omega: 0.0,
+            overspeed: false,
         }
     }
 
     /// Shaft speed [rpm].
     pub fn shaft_rpm(&self) -> f64 {
-        self.omega * 60.0 / (2.0 * std::f64::consts::PI)
+        self.omega * 60.0 / (2.0 * PI)
+    }
+
+    /// Whether the shaft was clamped at the turbine map's overspeed limit on
+    /// the most recent [`Self::advance`].
+    pub fn is_overspeed(&self) -> bool {
+        self.overspeed
     }
 
     /// Advances the shaft by `dt` under a turbine power, a compressor power
@@ -244,6 +312,33 @@ impl TurboShaft {
         let energy = 0.5 * self.inertia * self.omega * self.omega;
         let next_energy = (energy + net_power * dt).max(0.0);
         self.omega = (2.0 * next_energy / self.inertia).sqrt();
+        self.shaft_rpm()
+    }
+
+    /// Advances the shaft from the instantaneous exhaust manifold state,
+    /// reading turbine power off `turbine_map` rather than taking it as a
+    /// precomputed input — see [`turbine_power`].
+    pub fn advance(
+        &mut self,
+        dt: f64,
+        turbine_upstream: &PortState,
+        turbine_downstream_pressure: f64,
+        turbine_map: &TurbineMap,
+        compressor_power: f64,
+    ) -> f64 {
+        let corrected_speed = compressor::corrected_speed(self.shaft_rpm(), turbine_upstream.temperature);
+        let power = turbine_power(turbine_upstream, turbine_downstream_pressure, turbine_map, corrected_speed);
+        self.integrate(dt, power, compressor_power);
+
+        let (_, max_corrected) = turbine_map.speed_range();
+        let max_shaft_rpm = max_corrected * (turbine_upstream.temperature / compressor::T_REF).sqrt();
+        if self.shaft_rpm() > max_shaft_rpm {
+            self.omega = max_shaft_rpm * 2.0 * PI / 60.0;
+            self.overspeed = true;
+        } else {
+            self.overspeed = false;
+        }
+
         self.shaft_rpm()
     }
 }
@@ -331,6 +426,67 @@ mod tests {
         sample_map().evaluate(200_000.0, 2.0);
     }
 
+    fn port(pressure: f64, temperature: f64) -> PortState {
+        PortState {
+            pressure,
+            temperature,
+            gas_constant: 287.0,
+            gamma: 1.33,
+            burned_fraction: 1.0,
+        }
+    }
+
+    #[test]
+    fn pulse_fed_power_exceeds_mean_flow_fed_power_at_the_same_average_mass_flow() {
+        let map = sample_map();
+        let corrected_speed = 100_000.0;
+        let downstream_pressure = 100_000.0;
+
+        let high = port(260_000.0, 1100.0);
+        let low = port(100_000.0, 1100.0);
+        let mean = port(180_000.0, 1100.0);
+
+        let (m_high, _, _) = turbine_operating_point(&high, downstream_pressure, &map, corrected_speed);
+        let (m_low, _, _) = turbine_operating_point(&low, downstream_pressure, &map, corrected_speed);
+        let power_high = turbine_power(&high, downstream_pressure, &map, corrected_speed);
+        let power_low = turbine_power(&low, downstream_pressure, &map, corrected_speed);
+        let pulse_average_power = (power_high + power_low) / 2.0;
+
+        let average_mass_flow = (m_high + m_low) / 2.0;
+        let (_, eff_mean, pr_mean) = turbine_operating_point(&mean, downstream_pressure, &map, corrected_speed);
+        let mean_flow_power =
+            average_mass_flow * mean.cp() * mean.temperature * specific_extraction(pr_mean, mean.gamma, eff_mean);
+
+        assert!(
+            pulse_average_power > mean_flow_power,
+            "pulse-average power {pulse_average_power} did not exceed mean-flow power \
+             {mean_flow_power} at the same average mass flow {average_mass_flow}"
+        );
+    }
+
+    #[test]
+    fn shaft_speed_is_bounded_by_the_maps_overspeed_limit_and_it_is_reported() {
+        let map = sample_map();
+        let mut shaft = TurboShaft::new(1e-5, 0.97, BearingType::BallBearing);
+        let upstream = port(400_000.0, 1100.0);
+        let dt = 1.0 / 480.0;
+
+        let (_, max_corrected) = map.speed_range();
+        let max_shaft_rpm = max_corrected * (upstream.temperature / compressor::T_REF).sqrt();
+
+        for _ in 0..50_000 {
+            shaft.advance(dt, &upstream, 100_000.0, &map, 1000.0);
+        }
+
+        assert!(
+            shaft.shaft_rpm() <= max_shaft_rpm + 1e-6,
+            "shaft speed {} exceeded the map's overspeed limit {}",
+            shaft.shaft_rpm(),
+            max_shaft_rpm
+        );
+        assert!(shaft.is_overspeed(), "shaft at its clamp did not report overspeed");
+    }
+
     #[test]
     fn shaft_accelerates_when_turbine_power_exceeds_the_load_and_not_otherwise() {
         let mut shaft = TurboShaft::new(3e-5, 0.97, BearingType::Journal);
@@ -383,7 +539,7 @@ mod tests {
 
         let net_power = turbine_power * mechanical_efficiency - compressor_power;
         let expected_omega = (net_power / bearing.viscous_loss_coefficient()).sqrt();
-        let expected_rpm = expected_omega * 60.0 / (2.0 * std::f64::consts::PI);
+        let expected_rpm = expected_omega * 60.0 / (2.0 * PI);
 
         let relative_error = (shaft.shaft_rpm() - expected_rpm).abs() / expected_rpm;
         assert!(
