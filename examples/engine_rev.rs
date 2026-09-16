@@ -149,6 +149,7 @@ impl Driveline {
             spark_cut: self.cutting(),
             exhaust_cutout: false,
             anti_lag: false,
+            starter_hz: 0.0,
         }
     }
 }
