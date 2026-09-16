@@ -33,6 +33,9 @@
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
+use crate::audio::{
+    BlowOffVoicing, CentrifugalVoicing, RootsVoicing, TurboModel, TurboVoicing, WastegateVoicing,
+};
 use crate::environment::Environment;
 use crate::physics::compressor::{self, CompressorMap};
 use crate::physics::cylinder::GasProperties;
@@ -828,6 +831,296 @@ impl ForcedInduction {
             corrected_speed.clamp(speed_lo, speed_hi),
         );
         mass_flow
+    }
+}
+
+/// How an engine breathes.
+///
+/// A naturally aspirated engine has nothing here; a forced-induction one now
+/// carries real physics — see [`ForcedInduction`] — as well as the voicing
+/// that says what the hardware sounds like. Moved here from `crate::audio`
+/// by `docs/TURBO_PLAN.md`'s TB3, once boost stopped being purely a sound:
+/// the shaft and voicing fields below are still TB0-era audio proxies
+/// (`TurboModel`, `TurboVoicing`, ...), and stay that way until TB6 rewires
+/// them onto the real [`ForcedInduction::shaft`] this module now runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Induction {
+    /// No compressor: no whistle, no surge, nothing between the firings.
+    NaturallyAspirated,
+    /// A turbocharger, with the shaft that drives the sound and its voicing.
+    Turbocharged {
+        /// The shaft, spooling with throttle and speed.
+        shaft: TurboModel,
+        /// What that shaft is heard as.
+        voice: TurboVoicing,
+        /// Optional blow-off / dump valve fitted to the charge pipe.
+        blow_off: Option<BlowOffVoicing>,
+        /// Optional wastegate chatter voicing under high boost.
+        wastegate: Option<WastegateVoicing>,
+    },
+    /// A Roots or twin-screw positive displacement supercharger, crank-order locked.
+    RootsSupercharged {
+        /// What the supercharger sounds like.
+        voice: RootsVoicing,
+    },
+    /// A centrifugal supercharger, shaft-order whistled but belt-locked to the crank.
+    CentrifugalSupercharged {
+        /// What the supercharger sounds like.
+        voice: CentrifugalVoicing,
+        /// Optional blow-off / dump valve fitted to the charge pipe.
+        blow_off: Option<BlowOffVoicing>,
+    },
+}
+
+impl Induction {
+    /// A small, fast-spooling single on a four-cylinder.
+    ///
+    /// Low wheel inertia is the whole character: it is up before the driver has
+    /// finished asking, and its small wheel turns fast enough to whistle higher
+    /// than anything else here. This is what people mean when they say "turbo".
+    pub const fn small_single() -> Self {
+        Self::Turbocharged {
+            shaft: TurboModel {
+                max_shaft_rpm: 190_000.0,
+                reference_engine_rpm: 6_900.0,
+                spool_up: 0.42,
+                spool_down: 0.28,
+                shaft_rpm: 0.0,
+            },
+            voice: TurboVoicing {
+                order: 2.3,
+                reference_rpm: 160_000.0,
+                level: 0.028,
+            },
+            blow_off: None,
+            wastegate: None,
+        }
+    }
+
+    /// A pair of mid-sized turbos, one per bank or one per three cylinders.
+    ///
+    /// Splitting the flow across two wheels halves what each has to swallow, so
+    /// twins spool nearly as readily as a small single while carrying an engine
+    /// twice the size — heard as a whistle that arrives early but never quite
+    /// dominates the note underneath it.
+    pub const fn twin() -> Self {
+        Self::Turbocharged {
+            shaft: TurboModel {
+                max_shaft_rpm: 172_000.0,
+                reference_engine_rpm: 7_100.0,
+                spool_up: 0.50,
+                spool_down: 0.32,
+                shaft_rpm: 0.0,
+            },
+            voice: TurboVoicing {
+                order: 1.9,
+                reference_rpm: 145_000.0,
+                level: 0.020,
+            },
+            blow_off: None,
+            wastegate: None,
+        }
+    }
+
+    /// One large turbo sized for top end rather than response.
+    ///
+    /// A big wheel has real rotational inertia, so it is slow to answer the
+    /// throttle and slow to give the speed back; it also turns more slowly for
+    /// the same air, which drops the tone. The result is the laggy, low, heavy
+    /// whistle of a single-turbo conversion. It is mixed the loudest of the
+    /// three, which is a voicing choice rather than anything the shaft model
+    /// derives: a wheel this size is the loudest thing on the engine, and its
+    /// lower tone can carry that level without becoming shrill.
+    pub const fn large_single() -> Self {
+        Self::Turbocharged {
+            shaft: TurboModel {
+                max_shaft_rpm: 138_000.0,
+                reference_engine_rpm: 7_200.0,
+                spool_up: 0.95,
+                spool_down: 0.55,
+                shaft_rpm: 0.0,
+            },
+            voice: TurboVoicing {
+                order: 1.5,
+                reference_rpm: 116_000.0,
+                level: 0.031,
+            },
+            blow_off: None,
+            wastegate: None,
+        }
+    }
+
+    /// The variable-geometry turbine a diesel wears.
+    ///
+    /// Vanes that swivel shut at low speed keep the turbine's effective area
+    /// small exactly where a fixed wheel would still be waiting for gas, so a
+    /// VGT is on boost from just above idle and has no wastegate at all — the
+    /// vanes are the wastegate. It also has no blow-off valve, because there is
+    /// no throttle plate for the charge to slam into on a lift: a diesel's
+    /// inlet tract is open from the filter to the valve at every load it ever
+    /// sees. The engine under it turns to five thousand rather than seven, so
+    /// the shaft reference is lower and the whistle sits lower with it.
+    pub const fn variable_geometry() -> Self {
+        Self::Turbocharged {
+            shaft: TurboModel {
+                max_shaft_rpm: 165_000.0,
+                reference_engine_rpm: 4_600.0,
+                spool_up: 0.30,
+                spool_down: 0.42,
+                shaft_rpm: 0.0,
+            },
+            voice: TurboVoicing {
+                order: 2.0,
+                reference_rpm: 132_000.0,
+                level: 0.026,
+            },
+            blow_off: None,
+            wastegate: None,
+        }
+    }
+
+    /// A twin-screw / Roots-type positive displacement supercharger.
+    ///
+    /// Driven directly by belt from the crankshaft, its whine frequency is
+    /// locked to crank speed times pulley ratio times rotor lobe count with zero
+    /// spool lag.
+    pub const fn roots() -> Self {
+        Self::RootsSupercharged {
+            voice: RootsVoicing {
+                belt_ratio: 2.1,
+                lobes: 4,
+                level: 0.030,
+            },
+        }
+    }
+
+    /// A centrifugal supercharger.
+    ///
+    /// Driven by internal step-up planetary gear transmission and belt from the
+    /// crankshaft, its impeller speed is belt-locked to crank speed with zero
+    /// spool lag, producing high-frequency shaft-order compressor whistle.
+    pub const fn centrifugal() -> Self {
+        Self::CentrifugalSupercharged {
+            voice: CentrifugalVoicing {
+                gear_ratio: 9.2,
+                order: 1.8,
+                level: 0.024,
+            },
+            blow_off: None,
+        }
+    }
+
+    /// Equips a blow-off / dump valve to this forced-induction configuration.
+    pub const fn with_blow_off(self, bov: BlowOffVoicing) -> Self {
+        match self {
+            Self::Turbocharged {
+                shaft,
+                voice,
+                blow_off: _,
+                wastegate,
+            } => Self::Turbocharged {
+                shaft,
+                voice,
+                blow_off: Some(bov),
+                wastegate,
+            },
+            Self::CentrifugalSupercharged { voice, blow_off: _ } => Self::CentrifugalSupercharged {
+                voice,
+                blow_off: Some(bov),
+            },
+            other => other,
+        }
+    }
+
+    /// Equips wastegate chatter to this turbocharged configuration.
+    pub const fn with_wastegate(self, wg: WastegateVoicing) -> Self {
+        match self {
+            Self::Turbocharged {
+                shaft,
+                voice,
+                blow_off,
+                wastegate: _,
+            } => Self::Turbocharged {
+                shaft,
+                voice,
+                blow_off,
+                wastegate: Some(wg),
+            },
+            other => other,
+        }
+    }
+
+    /// Whether a compressor is fitted at all.
+    pub fn is_forced(&self) -> bool {
+        matches!(
+            self,
+            Self::Turbocharged { .. }
+                | Self::RootsSupercharged { .. }
+                | Self::CentrifugalSupercharged { .. }
+        )
+    }
+
+    /// The shaft to run, if there is one.
+    pub fn shaft(&self) -> Option<TurboModel> {
+        match *self {
+            Self::NaturallyAspirated
+            | Self::RootsSupercharged { .. }
+            | Self::CentrifugalSupercharged { .. } => None,
+            Self::Turbocharged { shaft, .. } => Some(shaft),
+        }
+    }
+
+    /// The voicing to mix, if there is one.
+    pub fn voice(&self) -> Option<TurboVoicing> {
+        match *self {
+            Self::NaturallyAspirated
+            | Self::RootsSupercharged { .. }
+            | Self::CentrifugalSupercharged { .. } => None,
+            Self::Turbocharged { voice, .. } => Some(voice),
+        }
+    }
+
+    /// The Roots supercharger voicing, if one is fitted.
+    pub fn roots_voice(&self) -> Option<RootsVoicing> {
+        match *self {
+            Self::RootsSupercharged { voice } => Some(voice),
+            _ => None,
+        }
+    }
+
+    /// The centrifugal supercharger voicing, if one is fitted.
+    pub fn centrifugal_voice(&self) -> Option<CentrifugalVoicing> {
+        match *self {
+            Self::CentrifugalSupercharged { voice, .. } => Some(voice),
+            _ => None,
+        }
+    }
+
+    /// The blow-off valve voicing, if one is fitted.
+    pub fn blow_off_voice(&self) -> Option<BlowOffVoicing> {
+        match *self {
+            Self::Turbocharged { blow_off, .. } => blow_off,
+            Self::CentrifugalSupercharged { blow_off, .. } => blow_off,
+            _ => None,
+        }
+    }
+
+    /// The wastegate chatter voicing, if one is fitted.
+    pub fn wastegate_voice(&self) -> Option<WastegateVoicing> {
+        match *self {
+            Self::Turbocharged { wastegate, .. } => wastegate,
+            _ => None,
+        }
+    }
+
+    /// A two-word label for a dashboard.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::NaturallyAspirated => "naturally aspirated",
+            Self::Turbocharged { .. } => "turbocharged",
+            Self::RootsSupercharged { .. } => "roots supercharged",
+            Self::CentrifugalSupercharged { .. } => "centrifugal supercharged",
+        }
     }
 }
 
