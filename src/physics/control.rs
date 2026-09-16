@@ -245,12 +245,29 @@ pub const IDLE_HUNT_MEAN_TAU: f64 = 4.0;
 /// six second "period" would be worse than reporting none.
 pub const IDLE_HUNT_TIMEOUT: f64 = 6.0;
 
+/// Smallest speed swing counted as a hunt rather than as combustion roughness
+/// [rev/min].
+///
+/// Every engine's speed ripples at firing rate; a lope is something a listener
+/// hears as a *rate*, and under a few rev either side of the mean there is no
+/// rate to hear.
+pub const IDLE_HUNT_FLOOR_RPM: f64 = 3.0;
+
+/// Fraction of the last swing a crossing has to clear to count [-].
+///
+/// The trigger is a Schmitt, not a comparator. Speed crosses its own mean
+/// several times per cycle on the firing ripple alone, and timing between
+/// those gives the ripple's period rather than the lope's — which is how a
+/// hundred-rev hunt comes back reported as a seven-rev one.
+pub const IDLE_HUNT_HYSTERESIS: f64 = 0.25;
+
 /// Measures the period and depth of an idle that will not settle.
 ///
 /// A lope is a limit cycle, so it has a period, and a period is a number — the
 /// point of this is that the chop can be measured rather than argued about.
-/// It watches engine speed cross its own slow mean going upwards and reports
-/// the time between crossings and the peak-to-peak swing between them.
+/// Engine speed is compared against its own slow mean through a Schmitt
+/// trigger, and the time from one rise through the upper threshold to the next
+/// is the period; the extremes between them are the depth.
 ///
 /// Both come back zero on an engine that has converged, which is the honest
 /// answer for one: there is no period, not a very long one.
@@ -258,10 +275,10 @@ pub const IDLE_HUNT_TIMEOUT: f64 = 6.0;
 pub struct IdleHunt {
     /// Slow mean of engine speed, the line the swing is measured about [rev/min].
     pub mean: f64,
-    /// Time since the speed last crossed that mean going upwards [s].
+    /// Time since the speed last rose through the upper threshold [s].
     seconds_since_crossing: f64,
-    /// Whether the speed was above the mean at the previous observation.
-    was_above: bool,
+    /// Whether the trigger is currently latched high.
+    latched_high: bool,
     /// Extremes seen since that crossing [rev/min].
     peak: f64,
     trough: f64,
@@ -283,7 +300,6 @@ impl IdleHunt {
             self.mean = rpm;
             self.peak = rpm;
             self.trough = rpm;
-            self.was_above = false;
             return;
         }
         self.mean += (rpm - self.mean) * (1.0 - (-dt / IDLE_HUNT_MEAN_TAU).exp());
@@ -291,27 +307,48 @@ impl IdleHunt {
         self.trough = self.trough.min(rpm);
         self.seconds_since_crossing += dt;
 
-        let above = rpm > self.mean;
-        if above && !self.was_above {
+        // Sized from the swing already measured, so the trigger widens with
+        // the lope it is following and stays narrow on an engine that is only
+        // rippling.
+        let band = (IDLE_HUNT_HYSTERESIS * self.amplitude).max(IDLE_HUNT_FLOOR_RPM);
+        if self.latched_high {
+            if rpm < self.mean - band {
+                self.latched_high = false;
+            }
+        } else if rpm > self.mean + band {
+            self.latched_high = true;
             if self.started {
+                // One-pole over successive cycles: a limit cycle in a system
+                // this nonlinear is periodic on average rather than exactly,
+                // and a figure that jumps every cycle is not a measurement.
+                let blend = 0.35;
+                self.period += (self.seconds_since_crossing - self.period) * blend;
+                self.amplitude += (self.peak - self.trough - self.amplitude) * blend;
+            } else {
                 self.period = self.seconds_since_crossing;
                 self.amplitude = self.peak - self.trough;
+                self.started = true;
             }
-            self.started = true;
             self.seconds_since_crossing = 0.0;
             self.peak = rpm;
             self.trough = rpm;
-        } else if self.seconds_since_crossing > IDLE_HUNT_TIMEOUT {
+        }
+
+        // Checked outside the trigger, not inside its idle arm: a latch that
+        // is stuck high because the band grew wider than the swing still has
+        // to time out, and that is exactly the state an engine lands in when
+        // it stops hunting.
+        if self.seconds_since_crossing > IDLE_HUNT_TIMEOUT {
             // Nothing has crossed in long enough that whatever it is, it is
             // not a limit cycle.
             self.period = 0.0;
             self.amplitude = 0.0;
             self.started = false;
+            self.latched_high = false;
             self.seconds_since_crossing = 0.0;
             self.peak = rpm;
             self.trough = rpm;
         }
-        self.was_above = above;
     }
 
     /// Forgets everything, for a driveline leaving idle.
