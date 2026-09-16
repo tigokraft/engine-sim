@@ -642,17 +642,28 @@ impl EnginePreset {
     /// puts 2.6 litres through the cycle, which is the familiar result that a
     /// 1.3 litre rotary breathes like a 2.6 litre four-stroke.
     ///
-    /// Three deliberate distortions of the cylinder model stand in for the
-    /// epitrochoid the solver cannot describe:
+    /// Two deliberate distortions of the cylinder model stand in for the
+    /// epitrochoid the solver cannot describe, and one thing is not a
+    /// distortion at all:
     ///
     /// - **A very long rod** (l/r = 12) flattens the slider-crank motion towards
-    ///   the sinusoid a rotor's volume curve is closer to.
+    ///   the sinusoid a rotor's volume curve is closer to. Stage M5 of
+    ///   `docs/MECHANISM_PLAN.md` looked at replacing this with a first-class
+    ///   `RotorGeometry` and chose not to: the long rod is already within a
+    ///   percent of the sinusoid, and re-deriving the same curve from an
+    ///   honest epitrochoid would have spent the stage on geometry nobody can
+    ///   hear. See [`crate::physics::rotor::RotorGeometry`] for what *is* now a
+    ///   type instead of a comment — the 3:1 eccentric shaft ratio.
     /// - **A stretched Wiebe** (90 degrees, started early) stands in for the
     ///   long, thin, moving chamber, which burns slowly and is still burning
     ///   when the port uncovers. That is why a rotary's exhaust is so hot and
     ///   why it pops so readily on a cut.
-    /// - **A low compression ratio** (10:1) and wide ports with enormous overlap
-    ///   stand in for peripheral porting, which has no valves to shut.
+    /// - **A low compression ratio** (10:1) is a distortion; the ports are not.
+    ///   [`crate::physics::rotor::peripheral_port`] is a real area-versus-angle
+    ///   port profile — uncovered by an apex seal in a handful of degrees
+    ///   rather than lifted by a cam — and its enormous overlap is *why* this
+    ///   engine idles the way it does, not a number asserted to make it sound
+    ///   right.
     pub fn two_rotor_wankel() -> Self {
         Self {
             name: "2-Rotor Wankel",
@@ -668,10 +679,7 @@ impl EnginePreset {
                     1.6,
                     0.94,
                 )),
-                valves: ValveTrain {
-                    intake: ValveEvent::new(deg(680.0), deg(280.0), 0.014, 0.048, 0.70),
-                    exhaust: ValveEvent::new(deg(480.0), deg(280.0), 0.013, 0.042, 0.68),
-                },
+                valves: crate::physics::rotor::peripheral_port(),
                 ..CylinderModel::default()
             },
             firing: FiringOrder::two_rotor_wankel(),
