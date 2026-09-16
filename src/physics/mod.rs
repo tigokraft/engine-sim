@@ -11,6 +11,7 @@
 //! - [`vehicle`] — the gearbox, road load, and clutch that give the flywheel
 //!   something to pull against besides its own drag curve.
 
+pub mod compressor;
 pub mod control;
 pub mod cylinder;
 pub mod engine_block;
