@@ -2525,6 +2525,114 @@ mod tests {
     }
 
     #[test]
+    fn a_big_overlap_cam_fails_to_settle_at_idle() {
+        // The stage's claim, and it is a claim about a *limit cycle*, not
+        // about roughness. Same engine, same idle target, same governor with
+        // the same gains — a governor is calibrated on the engine it ships
+        // with and is not retuned for a cam it was never given. Only the
+        // lobes are re-ground, and they are re-ground with the vocabulary
+        // this stage added: eighty degrees more duration a side at the stock
+        // lobe separation, which lands as overlap and nothing else.
+        let dt = 1.0 / 480.0;
+        let idle = |extra_duration: f64, seconds: f64| -> (Vec<f64>, IdleHunt, f64) {
+            let mut preset = EnginePreset::cross_plane_v8();
+            let stock = preset.model.valves;
+            let mut wider = stock;
+            wider.intake.duration += extra_duration;
+            wider.exhaust.duration += extra_duration;
+            preset.model.valves = wider.with_cam_timing(stock.lobe_separation(), stock.advance());
+            let mut block = preset.block(Environment::default());
+            let mut driveline = Driveline::new(&preset);
+            // Long enough for the governor to find the engine before anything
+            // is measured; a start-up transient is not a limit cycle.
+            let settle = (15.0 / dt) as usize;
+            let mut rpms = Vec::with_capacity((seconds / dt) as usize);
+            for i in 0..(settle + (seconds / dt) as usize) {
+                driveline.update(&mut block, dt);
+                block.update(dt, driveline.rpm);
+                if i >= settle {
+                    rpms.push(driveline.rpm);
+                }
+            }
+            assert_eq!(
+                driveline.throttle_target, 0.0,
+                "the test drove the throttle instead of letting the governor do it"
+            );
+            let overlap = preset.model.valves.overlap().to_degrees();
+            (rpms, driveline.idle_hunt, overlap)
+        };
+
+        let swing = |rpms: &[f64]| -> f64 {
+            let hi = rpms.iter().cloned().fold(f64::MIN, f64::max);
+            let lo = rpms.iter().cloned().fold(f64::MAX, f64::min);
+            hi - lo
+        };
+        let mean = |rpms: &[f64]| rpms.iter().sum::<f64>() / rpms.len() as f64;
+
+        let (stock_rpms, stock_hunt, stock_overlap) = idle(0.0, 40.0);
+        let (lopey_rpms, lopey_hunt, lopey_overlap) = idle(deg(80.0), 40.0);
+        assert!(
+            lopey_overlap > stock_overlap + 70.0,
+            "the re-ground cam must actually have the overlap: {stock_overlap:.0} to \
+             {lopey_overlap:.0} deg"
+        );
+
+        // The stock cam settles: the governor finds the speed and holds it.
+        assert_eq!(
+            stock_hunt.period, 0.0,
+            "a stock cam must settle, not hunt: {:.2} s at {:.0} rpm peak to peak",
+            stock_hunt.period, stock_hunt.amplitude
+        );
+        assert!(
+            swing(&stock_rpms) < 15.0,
+            "a settled idle must hold its speed: {:.1} rpm peak to peak",
+            swing(&stock_rpms)
+        );
+
+        // The big cam does not. Same target, same gains, and it hunts instead.
+        assert!(
+            lopey_hunt.period > 0.0,
+            "a big overlap cam must enter a limit cycle at the same idle target"
+        );
+        assert!(
+            swing(&lopey_rpms) > 4.0 * swing(&stock_rpms),
+            "the lope must be a different thing from the stock idle's ripple, not a \
+             louder one: {:.1} rpm against {:.1}",
+            swing(&lopey_rpms),
+            swing(&stock_rpms)
+        );
+
+        // And it is a lope rather than roughness: the period is far below the
+        // firing frequency, which is what a listener hears as a rate at all.
+        let firing_hz =
+            mean(&lopey_rpms) / 120.0 * EnginePreset::cross_plane_v8().firing.len() as f64;
+        assert!(
+            lopey_hunt.hunt_hz() < firing_hz / 20.0,
+            "the limit cycle must be well under the firing frequency: {:.2} Hz against \
+             {firing_hz:.0} Hz firing",
+            lopey_hunt.hunt_hz()
+        );
+
+        // Stable across the render: the second half of the trace swings as
+        // much as the first. A transient decays; a limit cycle does not.
+        let half = lopey_rpms.len() / 2;
+        let (first, second) = (swing(&lopey_rpms[..half]), swing(&lopey_rpms[half..]));
+        assert!(
+            second > 0.5 * first,
+            "the limit cycle must not be a decaying transient: {first:.1} rpm in the \
+             first half against {second:.1} in the second"
+        );
+
+        // It is still an idle, not a stall and not a flare.
+        assert!(
+            mean(&lopey_rpms) > STALL_RPM
+                && mean(&lopey_rpms) < 2.0 * EnginePreset::cross_plane_v8().idle,
+            "a lopey engine still idles: {:.0} rpm",
+            mean(&lopey_rpms)
+        );
+    }
+
+    #[test]
     fn a_cold_engine_idles_above_a_warm_one_and_converges() {
         let preset = EnginePreset::cross_plane_v8();
         let dt = 1.0 / 120.0;
