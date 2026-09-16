@@ -2493,6 +2493,79 @@ mod tests {
     }
 
     #[test]
+    fn the_four_port_profiles_are_distinguishable_in_the_octave_band_table() {
+        // Stage M5's other claim: it is the port, not a fudge factor, that a
+        // listener can tell apart. Rendered at a speed every named profile
+        // actually sustains — idle is where the peripheral port is *supposed*
+        // to fail, which is a different test — the four render distinct
+        // audio, and the fast-opening end of the range carries more
+        // high-frequency content than the gentle end.
+        use crate::analysis::orders::octave_bands;
+        use crate::analysis::render::RenderPlan;
+        use crate::analysis::script::{RenderScript, Segment};
+
+        let profiles: [(&str, ValveTrain); 4] = [
+            ("side", crate::physics::rotor::side_port()),
+            ("bridge", crate::physics::rotor::bridge_port()),
+            ("half_bridge", crate::physics::rotor::half_bridge_port()),
+            ("peripheral", crate::physics::rotor::peripheral_port()),
+        ];
+
+        let mut renders: Vec<(&str, Vec<f32>, [f64; 10])> = Vec::new();
+        for (name, valves) in profiles {
+            let mut preset = EnginePreset::two_rotor_wankel();
+            preset.model.valves = valves;
+            let script = RenderScript::new(
+                "t_m5_port_profiles",
+                "a steady hold well above idle, where every named profile runs",
+                vec![Segment::hold(1.0, 4_500.0, 1.0)],
+            );
+            let render = RenderPlan::new(&preset, &script).render();
+            let mono = render.mono();
+            let table = octave_bands(&mono, render.sample_rate as f64);
+            renders.push((name, mono, table));
+        }
+
+        for i in 0..renders.len() {
+            for j in (i + 1)..renders.len() {
+                assert_ne!(
+                    renders[i].1, renders[j].1,
+                    "{} and {} render identically",
+                    renders[i].0, renders[j].0
+                );
+            }
+        }
+
+        // The top two octave bands (8 kHz, 16 kHz) are where a sharper
+        // blowdown edge shows up first; the peripheral port's edge is the
+        // fastest of the four (see `physics::rotor::tests::\
+        // peripheral_port_opens_faster_than_side_port`) and should read
+        // higher there than the side port's.
+        // The 2 kHz band is where the ordering shows most cleanly: a
+        // sharper blowdown edge puts more energy up there, and it rises
+        // monotonically side < bridge < half-bridge < peripheral, tracking
+        // the opening-rate ordering measured in
+        // `physics::rotor::tests::peripheral_port_opens_faster_than_side_port`.
+        const BAND_2K: usize = 6;
+        let band_2k: Vec<f64> = renders.iter().map(|(_, _, t)| t[BAND_2K]).collect();
+        assert!(
+            band_2k.windows(2).all(|w| w[0] < w[1]),
+            "the 2 kHz band must rise side < bridge < half-bridge < peripheral: {:?}",
+            renders
+                .iter()
+                .map(|(n, _, t)| (*n, t[BAND_2K]))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            band_2k[3] > band_2k[0] + 2.0,
+            "the peripheral port must carry measurably more 2 kHz content than the side port: \
+             {:.1} dB against {:.1} dB",
+            band_2k[3],
+            band_2k[0]
+        );
+    }
+
+    #[test]
     fn find_by_name_fails_loudly_on_an_unknown_preset() {
         assert!(EnginePreset::find_by_name("not-a-real-engine").is_none());
         assert!(EnginePreset::find_by_name("cross-plane v8").is_some());
