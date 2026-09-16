@@ -131,6 +131,28 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
 }
 
+/// Where a queried point falls relative to the map's surge and choke
+/// boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapRegion {
+    /// Left of the surge line: the wheel is unloaded and flow will reverse.
+    Surge,
+    /// Between surge and choke: the map's honest operating range.
+    Operating,
+    /// Right of the choke line: flow has gone sonic and pressure ratio has
+    /// collapsed.
+    Choke,
+}
+
+/// A pressure ratio and efficiency read off the map, with the region they
+/// were read from.
+#[derive(Debug, Clone, Copy)]
+pub struct MapReading {
+    pub region: MapRegion,
+    pub pressure_ratio: f64,
+    pub efficiency: f64,
+}
+
 /// A compressor map: pressure ratio and efficiency against corrected speed
 /// and corrected flow, with surge and choke boundaries read off the data
 /// rather than typed as constants.
@@ -161,27 +183,42 @@ impl CompressorMap {
         )
     }
 
-    /// Reads pressure ratio and efficiency at a corrected operating point.
+    /// Reads pressure ratio, efficiency, and surge/choke region at a
+    /// corrected operating point.
     ///
     /// Interpolates in speed between the two bracketing lines at the same
     /// normalized position between each line's own surge and choke flow, so
-    /// two lines with different flow ranges do not overshoot each other.
+    /// two lines with different flow ranges do not overshoot each other. The
+    /// surge and choke boundaries are themselves interpolated from the map's
+    /// own speed lines, not read from a constant.
     ///
     /// Panics if `corrected_speed` falls outside the map's speed lines: a map
     /// is a measured device, and extrapolating past its fastest or slowest
     /// speed line invents data nobody measured.
-    pub fn evaluate(&self, corrected_speed: f64, corrected_flow: f64) -> (f64, f64) {
+    pub fn evaluate(&self, corrected_speed: f64, corrected_flow: f64) -> MapReading {
         let (lo, hi) = self.bracket(corrected_speed);
         let t = (corrected_speed - lo.corrected_speed) / (hi.corrected_speed - lo.corrected_speed);
 
         let surge_bound = lerp(lo.surge_flow(), hi.surge_flow(), t);
         let choke_bound = lerp(lo.choke_flow(), hi.choke_flow(), t);
+        let region = if corrected_flow < surge_bound {
+            MapRegion::Surge
+        } else if corrected_flow > choke_bound {
+            MapRegion::Choke
+        } else {
+            MapRegion::Operating
+        };
+
         let fraction =
             ((corrected_flow - surge_bound) / (choke_bound - surge_bound)).clamp(0.0, 1.0);
-
         let (pr_lo, eff_lo) = lo.interpolate_at_fraction(fraction);
         let (pr_hi, eff_hi) = hi.interpolate_at_fraction(fraction);
-        (lerp(pr_lo, pr_hi, t), lerp(eff_lo, eff_hi, t))
+
+        MapReading {
+            region,
+            pressure_ratio: lerp(pr_lo, pr_hi, t),
+            efficiency: lerp(eff_lo, eff_hi, t),
+        }
     }
 
     fn bracket(&self, corrected_speed: f64) -> (&SpeedLine, &SpeedLine) {
@@ -235,12 +272,13 @@ mod tests {
         let mut previous = f64::INFINITY;
         let mut flow = 0.021;
         while flow < 0.059 {
-            let (pressure_ratio, _) = map.evaluate(60_000.0, flow);
+            let reading = map.evaluate(60_000.0, flow);
             assert!(
-                pressure_ratio <= previous + 1e-9,
-                "pressure ratio rose from {previous} to {pressure_ratio} at flow {flow}"
+                reading.pressure_ratio <= previous + 1e-9,
+                "pressure ratio rose from {previous} to {} at flow {flow}",
+                reading.pressure_ratio
             );
-            previous = pressure_ratio;
+            previous = reading.pressure_ratio;
             flow += 0.001;
         }
     }
@@ -248,9 +286,9 @@ mod tests {
     #[test]
     fn interpolation_does_not_overshoot_between_speed_lines() {
         let map = sample_map();
-        let (lo, _) = map.evaluate(60_000.0, 0.03);
-        let (hi, _) = map.evaluate(90_000.0, 0.03);
-        let (mid, _) = map.evaluate(75_000.0, 0.03);
+        let lo = map.evaluate(60_000.0, 0.03).pressure_ratio;
+        let hi = map.evaluate(90_000.0, 0.03).pressure_ratio;
+        let mid = map.evaluate(75_000.0, 0.03).pressure_ratio;
         let (low, high) = if lo < hi { (lo, hi) } else { (hi, lo) };
         assert!(
             mid >= low - 1e-9 && mid <= high + 1e-9,
@@ -262,5 +300,33 @@ mod tests {
     #[should_panic(expected = "outside map range")]
     fn a_speed_outside_the_map_panics_rather_than_extrapolating() {
         sample_map().evaluate(200_000.0, 0.04);
+    }
+
+    #[test]
+    fn a_point_left_of_surge_reports_surging() {
+        let reading = sample_map().evaluate(90_000.0, 0.01);
+        assert_eq!(reading.region, MapRegion::Surge);
+    }
+
+    #[test]
+    fn a_point_right_of_choke_reports_choked() {
+        let reading = sample_map().evaluate(90_000.0, 0.5);
+        assert_eq!(reading.region, MapRegion::Choke);
+    }
+
+    #[test]
+    fn boundaries_come_from_the_map_not_a_constant() {
+        // Two maps that disagree only about where surge starts must disagree
+        // about whether the same point is surging.
+        let narrow = CompressorMap::new(vec![
+            SpeedLine::new(60_000.0, vec![point(0.02, 1.5, 0.6), point(0.06, 1.1, 0.55)]),
+            SpeedLine::new(90_000.0, vec![point(0.03, 2.0, 0.62), point(0.09, 1.35, 0.58)]),
+        ]);
+        let wide = CompressorMap::new(vec![
+            SpeedLine::new(60_000.0, vec![point(0.005, 1.5, 0.6), point(0.06, 1.1, 0.55)]),
+            SpeedLine::new(90_000.0, vec![point(0.010, 2.0, 0.62), point(0.09, 1.35, 0.58)]),
+        ]);
+        assert_eq!(narrow.evaluate(75_000.0, 0.012).region, MapRegion::Surge);
+        assert_eq!(wide.evaluate(75_000.0, 0.012).region, MapRegion::Operating);
     }
 }
