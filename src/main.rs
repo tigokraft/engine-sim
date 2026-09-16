@@ -601,6 +601,8 @@ fn publish(
     shared.gear = driveline.gearbox.gear;
     shared.vehicle_speed_mps = driveline.vehicle_speed_mps();
     shared.clutch_state = driveline.clutch_state;
+    shared.idle_hunt_period_s = driveline.idle_hunt.period;
+    shared.idle_hunt_rpm = driveline.idle_hunt.amplitude;
 
     // --- Combustion diagnostics & efficiency ------------------------------
     shared.lpp_deg_atdc = block.lpp_deg_atdc();
