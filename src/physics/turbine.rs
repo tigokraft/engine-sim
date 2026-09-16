@@ -13,7 +13,7 @@
 use std::f64::consts::PI;
 
 use crate::physics::compressor;
-use crate::physics::thermodynamics::PortState;
+use crate::physics::thermodynamics::{flow_function, PortState};
 
 /// One measured point on a turbine speed line: expansion ratio against
 /// reduced flow and efficiency at that ratio.
@@ -416,6 +416,115 @@ impl TurboShaft {
     }
 }
 
+/// Where a wastegate's bypassed flow ends up.
+///
+/// See `docs/TURBO_PLAN.md`'s TB4: the two fitments sound entirely
+/// different, because they are entirely different acoustic paths, not a
+/// voicing choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WastegateFitment {
+    /// Dumps into the downpipe after the turbine, silenced with the rest of
+    /// the exhaust.
+    Internal,
+    /// Dumps to atmosphere through its own screamer pipe — a second,
+    /// unsilenced radiating aperture upstream of everything else.
+    External,
+}
+
+/// A wastegate: a real bypass around the turbine, with a flow area, a spring
+/// preload, and whatever bias a [`BoostController`] adds on top of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Wastegate {
+    pub fitment: WastegateFitment,
+    /// Fully open bypass flow area [m^2].
+    pub max_flow_area: f64,
+    /// Manifold gauge pressure at which the spring alone starts to lift the
+    /// valve, with no actuator bias applied [Pa].
+    pub spring_preload: f64,
+    /// Gauge pressure span from just-cracked to fully open [Pa].
+    pub opening_span: f64,
+}
+
+impl Wastegate {
+    /// Open fraction, `0..=1`, at a manifold gauge pressure once any
+    /// actuator bias has already been subtracted from the spring's own
+    /// threshold — see [`BoostController::update`].
+    pub fn open_fraction(&self, gauge_pressure: f64, effective_threshold: f64) -> f64 {
+        ((gauge_pressure - effective_threshold) / self.opening_span.max(1.0)).clamp(0.0, 1.0)
+    }
+
+    /// Mass flow bypassed around the turbine wheel [kg/s].
+    pub fn mass_flow(&self, upstream: &PortState, downstream_pressure: f64, effective_threshold: f64) -> f64 {
+        let gauge_pressure = upstream.pressure - downstream_pressure;
+        let area = self.max_flow_area * self.open_fraction(gauge_pressure, effective_threshold);
+        if area <= 0.0 {
+            return 0.0;
+        }
+        let p_up = upstream.pressure.max(1.0);
+        let p_down = downstream_pressure.max(1.0);
+        if p_down >= p_up {
+            return 0.0;
+        }
+        area * p_up / (upstream.gas_constant * upstream.temperature.max(1.0)).sqrt()
+            * flow_function(p_down / p_up, upstream.gamma)
+    }
+}
+
+/// Closed-loop boost control: a target pressure ratio and a controller with
+/// real authority limits, biasing a [`Wastegate`]'s effective spring
+/// threshold rather than commanding its position directly — an actuator
+/// pushes on the same diaphragm the spring does, it does not replace it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoostController {
+    /// Pressure ratio this loop tries to hold [-].
+    pub target_pressure_ratio: f64,
+    /// Proportional gain, pressure bias per unit of pressure-ratio error
+    /// [Pa].
+    pub gain: f64,
+    /// Largest threshold reduction the actuator can command [Pa].
+    pub authority: f64,
+    /// First-order response time of the actuator itself [s]. Real actuators
+    /// do not move instantly, and this lag is what lets a fast tip-in
+    /// overshoot the target before the loop catches up — the overshoot is a
+    /// property of the loop, not something added on top of it.
+    pub actuator_lag: f64,
+    /// Current threshold reduction the actuator is holding [Pa].
+    bias: f64,
+}
+
+impl BoostController {
+    /// A controller at rest, with no actuator bias yet applied.
+    pub fn new(target_pressure_ratio: f64, gain: f64, authority: f64, actuator_lag: f64) -> Self {
+        Self {
+            target_pressure_ratio,
+            gain,
+            authority,
+            actuator_lag,
+            bias: 0.0,
+        }
+    }
+
+    /// Current actuator bias [Pa]: the amount subtracted from the
+    /// wastegate's spring threshold.
+    pub fn bias(&self) -> f64 {
+        self.bias
+    }
+
+    /// Advances the actuator by `dt` toward the bias this frame's measured
+    /// pressure ratio calls for, and returns the new bias.
+    pub fn update(&mut self, dt: f64, measured_pressure_ratio: f64) -> f64 {
+        let error = measured_pressure_ratio - self.target_pressure_ratio;
+        let desired = (self.gain * error).clamp(-self.authority, self.authority);
+        let alpha = if self.actuator_lag > 1e-6 {
+            1.0 - (-dt.max(0.0) / self.actuator_lag).exp()
+        } else {
+            1.0
+        };
+        self.bias += (desired - self.bias) * alpha;
+        self.bias
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,5 +769,96 @@ mod tests {
         };
         assert!(max_flow(&medium) > max_flow(&small));
         assert!(max_flow(&large) > max_flow(&medium));
+    }
+
+    fn wastegate() -> Wastegate {
+        Wastegate {
+            fitment: WastegateFitment::Internal,
+            max_flow_area: 8.0e-4,
+            spring_preload: 0.7e5,
+            opening_span: 0.3e5,
+        }
+    }
+
+    fn hot_exhaust(pressure: f64) -> PortState {
+        PortState {
+            pressure,
+            temperature: 950.0,
+            gas_constant: 290.0,
+            gamma: 1.32,
+            burned_fraction: 1.0,
+        }
+    }
+
+    #[test]
+    fn a_wastegate_stays_shut_below_its_spring_preload() {
+        let wg = wastegate();
+        assert_eq!(wg.open_fraction(0.0, wg.spring_preload), 0.0);
+        assert_eq!(wg.open_fraction(wg.spring_preload * 0.5, wg.spring_preload), 0.0);
+    }
+
+    #[test]
+    fn a_wastegate_opens_across_its_spring_span_and_flows_more_open() {
+        let wg = wastegate();
+        let mid = wg.spring_preload + wg.opening_span * 0.5;
+        let full = wg.spring_preload + wg.opening_span * 2.0;
+        assert!((wg.open_fraction(mid, wg.spring_preload) - 0.5).abs() < 1e-9);
+        assert_eq!(wg.open_fraction(full, wg.spring_preload), 1.0);
+
+        let upstream = hot_exhaust(2.0e5);
+        let downstream = 1.0e5;
+        let half_open = wg.mass_flow(&upstream, downstream, wg.spring_preload + wg.opening_span * 1.5);
+        let fully_open = wg.mass_flow(&upstream, downstream, wg.spring_preload);
+        assert!(fully_open > half_open);
+    }
+
+    #[test]
+    fn an_actuator_bias_lowers_the_effective_opening_threshold() {
+        let wg = wastegate();
+        let gauge = wg.spring_preload - 0.1e5;
+        // Below the bare spring threshold, shut...
+        assert_eq!(wg.open_fraction(gauge, wg.spring_preload), 0.0);
+        // ...but a controller bias lowering the threshold opens it early.
+        let biased_threshold = wg.spring_preload - 0.2e5;
+        assert!(wg.open_fraction(gauge, biased_threshold) > 0.0);
+    }
+
+    #[test]
+    fn boost_controller_reduces_the_threshold_once_over_target() {
+        let mut ctl = BoostController::new(1.8, 2.0e5, 0.5e5, 0.05);
+        for _ in 0..2_000 {
+            ctl.update(1.0 / 480.0, 2.0);
+        }
+        assert!(ctl.bias() > 0.0, "over target must produce a positive (threshold-lowering) bias");
+
+        let mut relieved = BoostController::new(1.8, 2.0e5, 0.5e5, 0.05);
+        for _ in 0..2_000 {
+            relieved.update(1.0 / 480.0, 1.8);
+        }
+        assert!(
+            relieved.bias().abs() < 1.0,
+            "on target, the bias must settle back near zero: {}",
+            relieved.bias()
+        );
+    }
+
+    #[test]
+    fn boost_controller_bias_is_authority_limited() {
+        let mut ctl = BoostController::new(1.0, 10.0e5, 0.3e5, 0.02);
+        for _ in 0..2_000 {
+            ctl.update(1.0 / 480.0, 5.0);
+        }
+        assert!((ctl.bias() - ctl.authority).abs() < 1.0);
+    }
+
+    #[test]
+    fn boost_controller_actuator_lags_a_step_change() {
+        let mut ctl = BoostController::new(1.0, 5.0e5, 1.0e5, 0.2);
+        ctl.update(1.0 / 480.0, 2.0);
+        assert!(
+            ctl.bias() < ctl.authority * 0.5,
+            "a real actuator cannot jump straight to full bias in one small step: {}",
+            ctl.bias()
+        );
     }
 }

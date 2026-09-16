@@ -221,6 +221,19 @@ impl CompressorMap {
         }
     }
 
+    /// The corrected flow at the surge boundary for a corrected speed [kg/s],
+    /// interpolated the same way [`Self::evaluate`] interpolates the boundary
+    /// itself. A scale for how much the wheel can pass at all at this speed —
+    /// used, alongside a [`MapRegion::Surge`] reading, to size a reversed flow
+    /// when the system demands a pressure ratio the wheel cannot make even at
+    /// its own surge line.
+    pub fn surge_flow_at(&self, corrected_speed: f64) -> f64 {
+        let speed = corrected_speed.clamp(self.speed_range().0, self.speed_range().1);
+        let (lo, hi) = self.bracket(speed);
+        let t = (speed - lo.corrected_speed) / (hi.corrected_speed - lo.corrected_speed);
+        lerp(lo.surge_flow(), hi.surge_flow(), t)
+    }
+
     /// The corrected flow that would produce a given pressure ratio at a
     /// corrected speed, found by bisection against [`Self::evaluate`].
     ///
