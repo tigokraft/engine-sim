@@ -193,6 +193,23 @@ pub enum CombustionConfig {
         #[serde(default = "default_diesel_afr")]
         air_fuel_ratio: f64,
     },
+    TwoPlug {
+        leading_spark_angle_deg: f64,
+        leading_duration_deg: f64,
+        leading_efficiency_parameter: f64,
+        leading_form_factor: f64,
+        leading_combustion_efficiency: f64,
+        trailing_delay_deg: f64,
+        trailing_duration_deg: f64,
+        trailing_efficiency_parameter: f64,
+        trailing_form_factor: f64,
+        trailing_combustion_efficiency: f64,
+        trailing_share: f64,
+        #[serde(default = "default_fuel_lhv")]
+        fuel_lhv: f64,
+        #[serde(default = "default_gasoline_afr")]
+        air_fuel_ratio: f64,
+    },
 }
 
 fn default_fuel_lhv() -> f64 {
@@ -525,6 +542,21 @@ impl EngineConfig {
                 fuel_lhv: preset.model.fuel_lhv,
                 air_fuel_ratio: preset.model.air_fuel_ratio,
             },
+            HeatRelease::TwoPlug(t) => CombustionConfig::TwoPlug {
+                leading_spark_angle_deg: t.leading.spark_angle.to_degrees(),
+                leading_duration_deg: t.leading.duration.to_degrees(),
+                leading_efficiency_parameter: t.leading.efficiency_parameter,
+                leading_form_factor: t.leading.form_factor,
+                leading_combustion_efficiency: t.leading.combustion_efficiency,
+                trailing_delay_deg: t.trailing_delay().to_degrees(),
+                trailing_duration_deg: t.trailing.duration.to_degrees(),
+                trailing_efficiency_parameter: t.trailing.efficiency_parameter,
+                trailing_form_factor: t.trailing.form_factor,
+                trailing_combustion_efficiency: t.trailing.combustion_efficiency,
+                trailing_share: t.trailing_share,
+                fuel_lhv: preset.model.fuel_lhv,
+                air_fuel_ratio: preset.model.air_fuel_ratio,
+            },
         };
 
         let firing = FiringConfig {
@@ -853,6 +885,40 @@ impl EngineConfig {
                 *fuel_lhv,
                 *air_fuel_ratio,
             ),
+            CombustionConfig::TwoPlug {
+                leading_spark_angle_deg,
+                leading_duration_deg,
+                leading_efficiency_parameter,
+                leading_form_factor,
+                leading_combustion_efficiency,
+                trailing_delay_deg,
+                trailing_duration_deg,
+                trailing_efficiency_parameter,
+                trailing_form_factor,
+                trailing_combustion_efficiency,
+                trailing_share,
+                fuel_lhv,
+                air_fuel_ratio,
+            } => {
+                let leading = WiebeProfile::new(
+                    deg(*leading_spark_angle_deg),
+                    deg(*leading_duration_deg),
+                    *leading_efficiency_parameter,
+                    *leading_form_factor,
+                    *leading_combustion_efficiency,
+                );
+                let mut two_plug =
+                    crate::physics::thermodynamics::TwoPlugCombustion::new(
+                        leading,
+                        deg(*trailing_delay_deg),
+                        *trailing_share,
+                    );
+                two_plug.trailing.duration = deg(*trailing_duration_deg);
+                two_plug.trailing.efficiency_parameter = *trailing_efficiency_parameter;
+                two_plug.trailing.form_factor = *trailing_form_factor;
+                two_plug.trailing.combustion_efficiency = *trailing_combustion_efficiency;
+                (HeatRelease::TwoPlug(two_plug), *fuel_lhv, *air_fuel_ratio)
+            }
         };
 
         let model = CylinderModel {

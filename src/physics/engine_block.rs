@@ -1304,7 +1304,7 @@ impl EngineBlock {
             // limiter simply goes quiet instead of banging: a cylinder that got
             // no fuel has none to send out of the exhaust unburnt.
             limiter_cut_type: match model.combustion {
-                HeatRelease::Spark(_) => LimiterCut::Spark,
+                HeatRelease::Spark(_) | HeatRelease::TwoPlug(_) => LimiterCut::Spark,
                 HeatRelease::Compression(_) => LimiterCut::Fuel,
             },
             ..EngineControlUnit::default()
@@ -1480,13 +1480,12 @@ impl EngineBlock {
         // anything else — and the AFR schedule, which is a spark engine's map
         // of how rich to run and when, has nothing to say about it. Its mixture
         // is its own.
-        let afr = match self.model.combustion {
-            HeatRelease::Spark(_) => {
-                let scheduled = self.ecu.schedule_afr(load, rpm, self.throttle, frame_dt);
-                self.model.air_fuel_ratio = scheduled;
-                scheduled
-            }
-            HeatRelease::Compression(_) => self.model.air_fuel_ratio,
+        let afr = if self.model.combustion.is_spark_ignited() {
+            let scheduled = self.ecu.schedule_afr(load, rpm, self.throttle, frame_dt);
+            self.model.air_fuel_ratio = scheduled;
+            scheduled
+        } else {
+            self.model.air_fuel_ratio
         };
         self.model.gas = GasProperties::for_afr(afr);
         let limiter = self.ecu.evaluate_limiter(rpm);
@@ -1497,10 +1496,9 @@ impl EngineBlock {
         // the latch solves that per cycle. See [`HeatRelease`].
         let spark_angle = self.ecu.spark_angle_with_throttle(load, rpm, self.throttle);
         let wiebe_duration = self.ecu.wiebe_duration(afr);
-        if let Some(wiebe) = self.model.combustion.spark_mut() {
-            wiebe.spark_angle = spark_angle;
-            wiebe.duration = wiebe_duration;
-        }
+        self.model
+            .combustion
+            .set_spark_timing(spark_angle, wiebe_duration);
         for bank in &mut self.exhaust_banks {
             bank.plenum.gamma = self.model.gas.gamma_burned;
             bank.plenum.gas_constant = self.model.gas.r_burned;
@@ -1852,9 +1850,10 @@ impl EngineBlock {
         if brake_power_kw <= 0.1 || rpm <= 100.0 {
             return 0.0;
         }
-        let afr = match self.model.combustion {
-            HeatRelease::Spark(_) => self.ecu.target_afr(0.8, rpm, 1.0),
-            HeatRelease::Compression(_) => 18.0, // lean diesel combustion
+        let afr = if self.model.combustion.is_spark_ignited() {
+            self.ecu.target_afr(0.8, rpm, 1.0)
+        } else {
+            18.0 // lean diesel combustion
         }
         .max(8.0);
         let trapped_fuel = self.master.cylinder.mass / afr;

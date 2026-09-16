@@ -643,7 +643,7 @@ impl SnapshotSource {
         // only way to stop it firing is to stop fuelling it, and a cylinder
         // that never got any fuel has none to send out unburnt. That is why a
         // diesel does not pop on a lift and does not bang off its limiter.
-        let has_spark = block.model.combustion.spark().is_some();
+        let has_spark = block.model.combustion.is_spark_ignited();
         let spark_cut = has_spark
             && (controls.spark_cut || block.ecu.dfco_tip_in || limiter_spark)
             && !limiter_fuel;

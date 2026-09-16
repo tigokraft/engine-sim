@@ -633,6 +633,9 @@ pub enum HeatRelease {
     Spark(WiebeProfile),
     /// Compression ignition: two Wiebes from a solved autoignition point.
     Compression(DieselCombustion),
+    /// Two-plug spark ignition: a leading and a trailing Wiebe, each from its
+    /// own plug.
+    TwoPlug(TwoPlugCombustion),
 }
 
 impl Default for HeatRelease {
@@ -653,8 +656,9 @@ impl HeatRelease {
             // it matters; a diesel's heat release is rate-limited by
             // injection and mixing instead, and it is unthrottled, so it
             // never sees the residual fraction a throttled idle does. Only
-            // the spark engine is diluted here, and that is why.
+            // the spark engines are diluted here, and that is why.
             Self::Spark(wiebe) => wiebe.diluted(latch.dilution).dburned_dtheta(theta),
+            Self::TwoPlug(two_plug) => two_plug.dburned_dtheta(theta, latch.dilution),
             Self::Compression(diesel) => match &latch.autoignition {
                 Some(ignition) => diesel.dburned_dtheta(theta, ignition),
                 None => 0.0,
@@ -666,6 +670,7 @@ impl HeatRelease {
     pub fn is_burning(&self, theta: f64, latch: &CycleLatch) -> bool {
         match self {
             Self::Spark(wiebe) => wiebe.diluted(latch.dilution).is_burning(theta),
+            Self::TwoPlug(two_plug) => two_plug.is_burning(theta, latch.dilution),
             Self::Compression(diesel) => match &latch.autoignition {
                 Some(ignition) => diesel.is_burning(theta, ignition),
                 None => false,
@@ -677,6 +682,7 @@ impl HeatRelease {
     pub fn combustion_efficiency(&self) -> f64 {
         match self {
             Self::Spark(wiebe) => wiebe.combustion_efficiency,
+            Self::TwoPlug(two_plug) => two_plug.combustion_efficiency(),
             Self::Compression(diesel) => diesel.combustion_efficiency,
         }
     }
@@ -685,10 +691,13 @@ impl HeatRelease {
     /// [rad, cycle coords].
     ///
     /// Not where it starts on a diesel — that is
-    /// [`Autoignition::angle`], and it is solved rather than commanded.
+    /// [`Autoignition::angle`], and it is solved rather than commanded. On a
+    /// two-plug engine this is the leading plug; the trailing plug follows it
+    /// at [`TwoPlugCombustion::trailing_delay`].
     pub fn commanded_angle(&self) -> f64 {
         match self {
             Self::Spark(wiebe) => wiebe.spark_angle,
+            Self::TwoPlug(two_plug) => two_plug.leading.spark_angle,
             Self::Compression(diesel) => diesel.injection_angle,
         }
     }
@@ -697,32 +706,165 @@ impl HeatRelease {
     pub fn duration(&self) -> f64 {
         match self {
             Self::Spark(wiebe) => wiebe.duration,
+            Self::TwoPlug(two_plug) => two_plug.leading.duration,
             Self::Compression(diesel) => diesel.diffusion_duration,
         }
     }
 
-    /// The spark profile, on an engine that has a spark plug.
-    pub fn spark(&self) -> Option<&WiebeProfile> {
+    /// Whether a coil can cut this engine's ignition.
+    ///
+    /// True for both spark topologies and false for compression ignition,
+    /// which has no coil for anything to cut — the only way to stop a diesel
+    /// firing is to stop fuelling it. See [`HeatRelease::set_spark_timing`]
+    /// for the ECU write path this mirrors.
+    pub fn is_spark_ignited(&self) -> bool {
         match self {
-            Self::Spark(wiebe) => Some(wiebe),
-            Self::Compression(_) => None,
+            Self::Spark(_) | Self::TwoPlug(_) => true,
+            Self::Compression(_) => false,
         }
     }
 
-    /// The spark profile for the ECU to retime, on an engine that has one.
+    /// Retimes the spark for the ECU, on either spark topology; a no-op on
+    /// compression ignition.
+    ///
+    /// On a two-plug engine the trailing plug follows the leading plug at
+    /// its own fixed delay, and its duration is scaled by the same ratio the
+    /// leading plug's just moved by, so retiming preserves the split between
+    /// the two plugs rather than collapsing them onto one duration.
+    pub fn set_spark_timing(&mut self, angle: f64, duration: f64) {
+        match self {
+            Self::Spark(wiebe) => {
+                wiebe.spark_angle = angle;
+                wiebe.duration = duration;
+            }
+            Self::TwoPlug(two_plug) => two_plug.set_spark_timing(angle, duration),
+            Self::Compression(_) => {}
+        }
+    }
+
+    /// The spark profile, on an engine that has exactly one spark plug.
+    pub fn spark(&self) -> Option<&WiebeProfile> {
+        match self {
+            Self::Spark(wiebe) => Some(wiebe),
+            Self::TwoPlug(_) | Self::Compression(_) => None,
+        }
+    }
+
+    /// The spark profile for the ECU to retime, on an engine that has
+    /// exactly one spark plug. A two-plug engine has two profiles to move
+    /// together, which is what [`HeatRelease::set_spark_timing`] is for.
     pub fn spark_mut(&mut self) -> Option<&mut WiebeProfile> {
         match self {
             Self::Spark(wiebe) => Some(wiebe),
-            Self::Compression(_) => None,
+            Self::TwoPlug(_) | Self::Compression(_) => None,
+        }
+    }
+
+    /// The two-plug profile, on an engine that has a leading and a trailing plug.
+    pub fn two_plug(&self) -> Option<&TwoPlugCombustion> {
+        match self {
+            Self::TwoPlug(two_plug) => Some(two_plug),
+            Self::Spark(_) | Self::Compression(_) => None,
         }
     }
 
     /// The compression-ignition profile, on an engine that has no spark plug.
     pub fn compression(&self) -> Option<&DieselCombustion> {
         match self {
-            Self::Spark(_) => None,
+            Self::Spark(_) | Self::TwoPlug(_) => None,
             Self::Compression(diesel) => Some(diesel),
         }
+    }
+}
+
+/// Two-plug spark heat release, for a rotary's long, thin chamber.
+///
+/// ```text
+/// x_b(theta) = (1 - f) * wiebe_leading(theta) + f * wiebe_trailing(theta)
+/// ```
+///
+/// A single flame front from one plug cannot cross a Wankel chamber before
+/// the chamber has moved past it, so production rotaries light a second
+/// kernel — the trailing plug — closer to the exhaust port, ten to fifteen
+/// degrees after the leading one. Heat release is two overlapping events
+/// rather than one, and the trailing plug's is the smaller of the two: it
+/// lights a charge the leading flame is already consuming, so it has less
+/// left to burn.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TwoPlugCombustion {
+    /// Leading plug's burn profile; its `spark_angle` is what the ECU moves.
+    pub leading: WiebeProfile,
+    /// Trailing plug's burn profile; its `spark_angle` trails the leading
+    /// plug's by a fixed delay that [`TwoPlugCombustion::set_spark_timing`]
+    /// preserves.
+    pub trailing: WiebeProfile,
+    /// Fraction of the charge the trailing plug's kernel accounts for [-].
+    ///
+    /// Below one half: the trailing plug lights second, into a chamber the
+    /// leading flame has already started consuming, so it never gets the
+    /// majority share.
+    pub trailing_share: f64,
+}
+
+impl TwoPlugCombustion {
+    /// Builds a two-plug profile from a leading Wiebe, a trailing delay and
+    /// the trailing plug's share of the charge.
+    pub fn new(leading: WiebeProfile, trailing_delay: f64, trailing_share: f64) -> Self {
+        let mut trailing = leading;
+        trailing.spark_angle = wrap_cycle(leading.spark_angle + trailing_delay);
+        Self {
+            leading,
+            trailing,
+            trailing_share: trailing_share.clamp(0.0, 0.5),
+        }
+    }
+
+    /// Crank angle from the leading plug's spark to the trailing plug's [rad].
+    pub fn trailing_delay(&self) -> f64 {
+        wrap_cycle(self.trailing.spark_angle - self.leading.spark_angle)
+    }
+
+    /// Burn rate of the two plugs summed [1/rad].
+    pub fn dburned_dtheta(&self, theta: f64, dilution: f64) -> f64 {
+        let leading = self.leading.diluted(dilution);
+        let trailing = self.trailing.diluted(dilution);
+        (1.0 - self.trailing_share) * leading.dburned_dtheta(theta)
+            + self.trailing_share * trailing.dburned_dtheta(theta)
+    }
+
+    /// True while either plug's flame is still releasing heat.
+    pub fn is_burning(&self, theta: f64, dilution: f64) -> bool {
+        self.leading.diluted(dilution).is_burning(theta)
+            || self.trailing.diluted(dilution).is_burning(theta)
+    }
+
+    /// Fraction of the fuel's chemical energy that shows up as heat [-],
+    /// weighted by each plug's share of the charge.
+    pub fn combustion_efficiency(&self) -> f64 {
+        (1.0 - self.trailing_share) * self.leading.combustion_efficiency
+            + self.trailing_share * self.trailing.combustion_efficiency
+    }
+
+    /// Retimes both plugs together, preserving the delay and duration ratio
+    /// between them.
+    ///
+    /// The leading plug moves to `angle` with `duration` exactly, the way a
+    /// single-plug engine's spark does; the trailing plug keeps its own
+    /// fixed delay behind the leading plug and has its duration scaled by
+    /// the same ratio the leading plug's just changed by, so a schedule that
+    /// shortens the burn shortens both kernels together rather than only one
+    /// of them.
+    pub fn set_spark_timing(&mut self, angle: f64, duration: f64) {
+        let delay = self.trailing_delay();
+        let ratio = if self.leading.duration > 1e-9 {
+            duration / self.leading.duration
+        } else {
+            1.0
+        };
+        self.leading.spark_angle = angle;
+        self.leading.duration = duration;
+        self.trailing.spark_angle = wrap_cycle(angle + delay);
+        self.trailing.duration = (self.trailing.duration * ratio).clamp(deg(0.1), CYCLE_ANGLE);
     }
 }
 
