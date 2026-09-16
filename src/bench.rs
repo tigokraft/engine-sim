@@ -1174,6 +1174,18 @@ impl EnginePreset {
             note: "Even 120 deg firing, no gaps at all, and a big lazy single over it.",
             model: CylinderModel {
                 geometry: CylinderGeometry::new(0.0840, 0.0900, 0.1450, 9.2),
+                valves: ValveTrain {
+                    intake: ValveEvent::new(deg(698.0), deg(246.0), 0.0105, 0.0350, 0.67),
+                    exhaust: ValveEvent::new(deg(496.0), deg(242.0), 0.0098, 0.0305, 0.64),
+                }
+                .with_aggressiveness(0.35),
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    deg(342.0),
+                    deg(52.0),
+                    5.0,
+                    2.1,
+                    0.98,
+                )),
                 ..CylinderModel::default()
             },
             firing: FiringOrder::inline_six(),
@@ -1195,7 +1207,10 @@ impl EnginePreset {
                 tailpipe: PipeSection::from_diameter(1.6, 0.070, 600.0),
                 tailpipe_flanged: false,
                 cutout_fitted: false,
-                turbine: None,
+                turbine: Some(TurbineGeometry {
+                    housing_ar: 0.82,
+                    blade_count: 10,
+                }),
             },
             intake: IntakeSystem {
                 runners: vec![PipeSection::from_diameter(0.30, 0.044, 310.0); 6],
