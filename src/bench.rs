@@ -191,6 +191,19 @@ impl EnginePreset {
         if mechanical.float_rpm.is_none() {
             mechanical.float_rpm = Some(self.float_rpm as f32);
         }
+        // Valvetrain noise is the valve landing, and what a valve lands with
+        // is the velocity the closing flank gave it. That is exactly
+        // [`ValveEvent::ramp_rate`], so the seating impulse scales with it and
+        // nothing else has to be said per engine: a solid roller is loud
+        // because of its lobe, not because a preset says it is. A stock cam
+        // rates 1 and leaves every level exactly where it was.
+        let valves = &block.model.valves;
+        if let Some(spec) = mechanical.intake_valve.as_mut() {
+            spec.level *= valves.intake.ramp_rate() as f32;
+        }
+        if let Some(spec) = mechanical.exhaust_valve.as_mut() {
+            spec.level *= valves.exhaust.ramp_rate() as f32;
+        }
         let mut config = SynthConfig::from_block(block, sample_rate)
             .with_induction(self.induction)
             .with_mechanical(mechanical);
@@ -2148,6 +2161,59 @@ mod tests {
                 preset.name
             );
         }
+    }
+
+    #[test]
+    fn an_aggressive_ramp_raises_the_valvetrain_impulse_at_the_same_duration() {
+        // The audible half of the profile parameter. Same cam card — same
+        // duration, same lift, same timing — and a faster flank, so the valve
+        // arrives at its seat harder and the seating impulse the mechanical
+        // rig plays is louder for it. A stock cam must be left exactly alone,
+        // because every recorded fingerprint has one.
+        let preset = EnginePreset::cross_plane_v8();
+        let stock_block = preset.block(Environment::default());
+        let stock = preset.synth_config(&stock_block, 48_000.0);
+
+        let mut roller_preset = preset.clone();
+        roller_preset.model.valves = preset.model.valves.with_aggressiveness(1.0);
+        assert_eq!(
+            roller_preset.model.valves.intake.duration, preset.model.valves.intake.duration,
+            "re-grinding the flanks must not change the duration"
+        );
+        let roller_block = roller_preset.block(Environment::default());
+        let roller = roller_preset.synth_config(&roller_block, 48_000.0);
+
+        for (name, before, after) in [
+            (
+                "intake",
+                stock.mechanical.intake_valve,
+                roller.mechanical.intake_valve,
+            ),
+            (
+                "exhaust",
+                stock.mechanical.exhaust_valve,
+                roller.mechanical.exhaust_valve,
+            ),
+        ] {
+            let before = before.expect("the V8 has valve voices").level;
+            let after = after.expect("the V8 has valve voices").level;
+            assert!(
+                after > before * 3.0,
+                "{name} valve impulse should follow the flank: {before:.3} to {after:.3}"
+            );
+        }
+
+        // And the stock cam is untouched, to the bit.
+        let reference = preset.mechanical.intake_valve.expect("V8 has valve voices");
+        assert_eq!(
+            stock
+                .mechanical
+                .intake_valve
+                .expect("V8 has valve voices")
+                .level,
+            reference.level,
+            "a raised-cosine cam must leave the mechanical levels exactly as they were"
+        );
     }
 
     #[test]
