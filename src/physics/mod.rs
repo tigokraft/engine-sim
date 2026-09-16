@@ -20,6 +20,7 @@ pub mod plumbing;
 pub mod rotor;
 pub mod thermal;
 pub mod thermodynamics;
+pub mod turbine;
 pub mod vehicle;
 
 pub use control::*;
