@@ -30,7 +30,7 @@ use crate::audio::{
     SnapshotSource, SynthConfig, WastegateVoicing,
 };
 use crate::environment::Environment;
-use crate::physics::control::{IdleGovernor, LimiterCut, LimiterMode};
+use crate::physics::control::{IdleGovernor, IdleHunt, LimiterCut, LimiterMode};
 use crate::physics::cylinder::{default_float_rpm, deg, CylinderGeometry};
 use crate::physics::engine_block::{EngineBlock, FiringOrder};
 use crate::physics::plumbing::{
@@ -78,6 +78,13 @@ pub const CLOSED_THROTTLE_PMEP: f64 = 0.55e5;
 /// the air it passes, full bypass travel is worth about three tenths of pedal,
 /// which is what the governor's clamp always was.
 pub const IDLE_BYPASS_PEDAL_AUTHORITY: f64 = 0.30;
+
+/// Pedal travel under which the engine counts as idling [-].
+///
+/// A real throttle's first percent or two is plate clearance rather than
+/// pedal, and an idle is what the engine does when the driver is asking for
+/// nothing. Above this the driver is driving and the governor is a passenger.
+pub const IDLE_PEDAL_THRESHOLD: f64 = 0.02;
 
 // ---------------------------------------------------------------------------
 // Catalogue
@@ -1581,6 +1588,8 @@ pub struct Driveline {
     pub manual_cut: bool,
     /// Holds the idle speed by opening a bypass past the throttle plate.
     pub idle_governor: IdleGovernor,
+    /// Period and depth of the idle limit cycle, when there is one.
+    pub idle_hunt: IdleHunt,
     /// Speed at which the limiter cuts [rev/min].
     pub redline: f64,
     /// Speed the governor holds once the engine is warm [rev/min].
@@ -1649,6 +1658,7 @@ impl Driveline {
             throttle_target: 0.0,
             manual_cut: false,
             idle_governor: IdleGovernor::default(),
+            idle_hunt: IdleHunt::default(),
             redline: preset.redline,
             idle: preset.idle,
             cold_idle_rise: COLD_IDLE_RISE,
@@ -1773,6 +1783,15 @@ impl Driveline {
                 let target = self.idle_target(block);
                 let bypass = self.idle_governor.update(target, self.rpm, dt);
                 block.idle_bypass = bypass;
+                // Only meaningful while the governor is the thing holding the
+                // speed. A driver on the pedal swings the engine far harder
+                // than any lope, and calling that a limit cycle would be a
+                // measurement of the driver.
+                if self.throttle < IDLE_PEDAL_THRESHOLD {
+                    self.idle_hunt.observe(self.rpm, dt);
+                } else {
+                    self.idle_hunt.reset();
+                }
                 let effective = self.throttle.max(bypass * IDLE_BYPASS_PEDAL_AUTHORITY);
 
                 match self.gearbox.overall_ratio() {
