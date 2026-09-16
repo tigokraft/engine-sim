@@ -3372,4 +3372,53 @@ mod tests {
             "more trapped mass must make more torque: na={na_torque:.1}, boosted={boosted_torque:.1}"
         );
     }
+
+    #[test]
+    fn shutting_the_throttle_at_boost_moves_the_charge_pipe_off_its_wot_pressure() {
+        // With no blow-off valve fitted (that is TB4), a lifted throttle gives
+        // the compressor nowhere to send its flow, so the charge pipe moves
+        // *toward* the compressor's surge boundary rather than venting back to
+        // ambient — this is the real reason a lift makes a stock turbo car
+        // want a blow-off valve at all. What TB3 owns is that the pipe's
+        // capacitance actually responds to the lift instead of sitting inert;
+        // making that response collapse smoothly once a real vent exists is
+        // TB4's job.
+        let mut block = settled_v8(4_000.0, 1.0, true);
+        let pressurized = block
+            .forced_induction
+            .as_ref()
+            .unwrap()
+            .charge_pipe
+            .pressure();
+        assert!(
+            pressurized > block.environment.pressure * 1.1,
+            "the rig must actually be boosted before the lift: {pressurized:.0} Pa"
+        );
+
+        block.throttle = 0.0;
+        for _ in 0..500 {
+            block.update(1.0 / 480.0, 4_000.0);
+        }
+        let after_lift = block.forced_induction.as_ref().unwrap().charge_pipe.pressure();
+        assert!(
+            (after_lift - pressurized).abs() > pressurized * 0.1,
+            "a shut throttle must move the charge pipe well off its WOT \
+             pressure, whichever direction an unvented compressor takes it: \
+             was {pressurized:.0} Pa, now {after_lift:.0} Pa"
+        );
+    }
+
+    #[test]
+    fn sustained_high_boost_produces_knock_without_any_knock_specific_change() {
+        let na = settled_v8(5_500.0, 1.0, false);
+        let boosted = settled_v8(5_500.0, 1.0, true);
+        assert!(
+            boosted.master.knock_integral > na.master.knock_integral,
+            "a boosted engine at the same load must show more knock tendency \
+             than atmospheric with no change to the knock model itself: \
+             na={:.3}, boosted={:.3}",
+            na.master.knock_integral,
+            boosted.master.knock_integral
+        );
+    }
 }
