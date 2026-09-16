@@ -257,6 +257,11 @@ impl BearingType {
     }
 }
 
+/// Turbine inlet temperature limit typical of an automotive single-scroll
+/// housing (~950 C) [K]. Not enforced here; reported so a later stage can
+/// gate anti-lag and overboost behaviour against it.
+pub const TURBINE_INLET_TEMPERATURE_LIMIT: f64 = 1223.15;
+
 /// The rotating inertia a turbine and compressor wheel share, driven by
 /// turbine power and loaded by compressor power and bearing drag.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -269,6 +274,8 @@ pub struct TurboShaft {
     pub bearing: BearingType,
     /// Shaft angular speed [rad/s].
     omega: f64,
+    /// Most recent turbine inlet temperature seen by [`Self::advance`] [K].
+    turbine_inlet_temperature: f64,
     /// Set once the shaft has been clamped at the map's overspeed limit.
     overspeed: bool,
 }
@@ -281,6 +288,7 @@ impl TurboShaft {
             mechanical_efficiency,
             bearing,
             omega: 0.0,
+            turbine_inlet_temperature: compressor::T_REF,
             overspeed: false,
         }
     }
@@ -288,6 +296,17 @@ impl TurboShaft {
     /// Shaft speed [rpm].
     pub fn shaft_rpm(&self) -> f64 {
         self.omega * 60.0 / (2.0 * PI)
+    }
+
+    /// Most recent turbine inlet temperature seen by [`Self::advance`] [K].
+    pub fn turbine_inlet_temperature(&self) -> f64 {
+        self.turbine_inlet_temperature
+    }
+
+    /// Whether the most recent inlet temperature is over
+    /// [`TURBINE_INLET_TEMPERATURE_LIMIT`].
+    pub fn is_over_temperature_limit(&self) -> bool {
+        self.turbine_inlet_temperature > TURBINE_INLET_TEMPERATURE_LIMIT
     }
 
     /// Whether the shaft was clamped at the turbine map's overspeed limit on
@@ -326,6 +345,8 @@ impl TurboShaft {
         turbine_map: &TurbineMap,
         compressor_power: f64,
     ) -> f64 {
+        self.turbine_inlet_temperature = turbine_upstream.temperature;
+
         let corrected_speed = compressor::corrected_speed(self.shaft_rpm(), turbine_upstream.temperature);
         let power = turbine_power(turbine_upstream, turbine_downstream_pressure, turbine_map, corrected_speed);
         self.integrate(dt, power, compressor_power);
@@ -485,6 +506,22 @@ mod tests {
             max_shaft_rpm
         );
         assert!(shaft.is_overspeed(), "shaft at its clamp did not report overspeed");
+    }
+
+    #[test]
+    fn turbine_inlet_temperature_is_reported_and_checked_against_its_limit() {
+        let map = sample_map();
+        let mut shaft = TurboShaft::new(3e-5, 0.97, BearingType::Journal);
+
+        let cool = port(200_000.0, 900.0);
+        shaft.advance(1.0 / 480.0, &cool, 100_000.0, &map, 1000.0);
+        assert_eq!(shaft.turbine_inlet_temperature(), 900.0);
+        assert!(!shaft.is_over_temperature_limit());
+
+        let scorching = port(200_000.0, 1400.0);
+        shaft.advance(1.0 / 480.0, &scorching, 100_000.0, &map, 1000.0);
+        assert_eq!(shaft.turbine_inlet_temperature(), 1400.0);
+        assert!(shaft.is_over_temperature_limit());
     }
 
     #[test]
