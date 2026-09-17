@@ -1,0 +1,270 @@
+[identity]
+name = "Big Cam Chopping V8"
+note = "62 deg cam overlap and solid roller ramps: rhythmic idle chop and pushrod bark."
+
+[block]
+mass = 230.0
+bore_spacing = 0.1118
+inertia = 0.42
+redline = 7000.0
+idle = 900.0
+load = [
+    5.0,
+    0.015,
+    0.00007,
+]
+anti_lag = false
+limiter_mode = "RotatingStutter"
+limiter_cut = "Spark"
+
+[cylinder]
+bore = 0.1048
+stroke = 0.1016
+rod_length = 0.154
+compression_ratio = 11.5
+intake_open_deg = 684.9999999999999
+intake_duration_deg = 272.0
+intake_lift = 0.014
+intake_diameter = 0.05
+intake_discharge_coeff = 0.68
+exhaust_open_deg = 474.99999999999994
+exhaust_duration_deg = 272.0
+exhaust_lift = 0.0135
+exhaust_diameter = 0.039
+exhaust_discharge_coeff = 0.65
+cam_aggressiveness = 0.44999999999999996
+
+[combustion]
+type = "Spark"
+spark_angle_deg = 338.0
+duration_deg = 52.0
+efficiency_parameter = 5.0
+form_factor = 2.0
+combustion_efficiency = 0.97
+fuel_lhv = 44000000.0
+air_fuel_ratio = 14.7
+
+[firing]
+sequence = [
+    1,
+    8,
+    7,
+    2,
+    6,
+    5,
+    4,
+    3,
+]
+banks = [
+    0,
+    1,
+    0,
+    1,
+    1,
+    0,
+    1,
+    0,
+]
+
+[exhaust]
+tailpipe_flanged = false
+cutout = true
+
+[[exhaust.primaries]]
+length = 0.54
+diameter = 0.048
+temperature = 880.0
+
+[[exhaust.primaries]]
+length = 0.58
+diameter = 0.048
+temperature = 880.0
+
+[[exhaust.primaries]]
+length = 0.55
+diameter = 0.048
+temperature = 880.0
+
+[[exhaust.primaries]]
+length = 0.57
+diameter = 0.048
+temperature = 880.0
+
+[[exhaust.primaries]]
+length = 0.53
+diameter = 0.048
+temperature = 880.0
+
+[[exhaust.primaries]]
+length = 0.58
+diameter = 0.048
+temperature = 880.0
+
+[[exhaust.primaries]]
+length = 0.56
+diameter = 0.048
+temperature = 880.0
+
+[[exhaust.primaries]]
+length = 0.54
+diameter = 0.048
+temperature = 880.0
+
+[exhaust.collector]
+inlets = 4
+outlet_diameter = 0.076
+taper_length = 0.2
+
+[exhaust.crossover]
+type = "HPipe"
+position = 0.9
+diameter = 0.064
+
+[[exhaust.silencers]]
+type = "ExpansionChamber"
+length = 0.5
+area_ratio = 4.5
+stages = 2
+
+[exhaust.tailpipe]
+length = 1.4
+diameter = 0.076
+temperature = 620.0
+
+[intake]
+plenum_volume = 0.0052
+trumpet_flanged = true
+
+[[intake.runners]]
+length = 0.28
+diameter = 0.048
+temperature = 310.0
+
+[[intake.runners]]
+length = 0.28
+diameter = 0.048
+temperature = 310.0
+
+[[intake.runners]]
+length = 0.28
+diameter = 0.048
+temperature = 310.0
+
+[[intake.runners]]
+length = 0.28
+diameter = 0.048
+temperature = 310.0
+
+[[intake.runners]]
+length = 0.28
+diameter = 0.048
+temperature = 310.0
+
+[[intake.runners]]
+length = 0.28
+diameter = 0.048
+temperature = 310.0
+
+[[intake.runners]]
+length = 0.28
+diameter = 0.048
+temperature = 310.0
+
+[[intake.runners]]
+length = 0.28
+diameter = 0.048
+temperature = 310.0
+
+[intake.throttle]
+type = "Single"
+bore = 0.092
+
+[intake.airbox]
+length = 0.15
+diameter = 0.11
+temperature = 300.0
+
+[induction]
+type = "NaturallyAspirated"
+
+[mechanical.intake_valve]
+timing = "per_cylinder"
+order = 0.0
+level = 0.550000011920929
+
+[mechanical.exhaust_valve]
+timing = "per_cylinder"
+order = 0.0
+level = 0.550000011920929
+
+[mechanical.piston_slap]
+timing = "per_cylinder"
+order = 0.0
+level = 0.4000000059604645
+
+[mechanical.injector]
+timing = "per_cylinder"
+order = 0.0
+level = 0.3499999940395355
+
+[mechanical.timing_chain]
+timing = "crank_order"
+order = 19.0
+level = 0.2199999988079071
+
+[mechanical.gear_whine]
+timing = "crank_order"
+order = 31.0
+level = 0.20000000298023224
+
+[mechanical.accessory]
+timing = "crank_order"
+order = 1.3700000047683716
+level = 0.20000000298023224
+
+[acoustics]
+tailpipes = [
+    [
+    -0.45,
+    -2.4,
+    0.35,
+],
+    [
+    0.45,
+    -2.4,
+    0.35,
+],
+]
+intake = [
+    0.0,
+    1.4,
+    0.65,
+]
+block = [
+    0.0,
+    0.8,
+    0.5,
+]
+
+[driveline.gearbox]
+ratios = [
+    3.36,
+    2.09,
+    1.47,
+    1.14,
+    1.0,
+    0.85,
+]
+final_drive = 3.9
+gear = "Neutral"
+
+[driveline.road_load]
+vehicle_mass = 1500.0
+rolling_resistance = 0.012
+drag_area = 0.66
+wheel_radius = 0.32
+grade = 0.0
+
+[driveline.clutch]
+torque_capacity = 450.0
+engagement = 1.0

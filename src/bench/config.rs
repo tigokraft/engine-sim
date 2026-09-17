@@ -27,8 +27,8 @@ use crate::physics::plumbing::{
     ThrottleLayout, TurbineGeometry,
 };
 use crate::physics::thermodynamics::{
-    CylinderModel, DieselCombustion, HeatRelease, ValveEvent, ValveTrain, WiebeProfile,
-    DIESEL_LHV, FASTEST_RAMP,
+    CylinderModel, DieselCombustion, HeatRelease, ValveEvent, ValveTrain, WiebeProfile, DIESEL_LHV,
+    FASTEST_RAMP,
 };
 use crate::physics::vehicle::{Clutch, Gearbox, RoadLoad};
 
@@ -907,12 +907,11 @@ impl EngineConfig {
                     *leading_form_factor,
                     *leading_combustion_efficiency,
                 );
-                let mut two_plug =
-                    crate::physics::thermodynamics::TwoPlugCombustion::new(
-                        leading,
-                        deg(*trailing_delay_deg),
-                        *trailing_share,
-                    );
+                let mut two_plug = crate::physics::thermodynamics::TwoPlugCombustion::new(
+                    leading,
+                    deg(*trailing_delay_deg),
+                    *trailing_share,
+                );
                 two_plug.trailing.duration = deg(*trailing_duration_deg);
                 two_plug.trailing.efficiency_parameter = *trailing_efficiency_parameter;
                 two_plug.trailing.form_factor = *trailing_form_factor;
@@ -1279,6 +1278,10 @@ mod tests {
             (
                 "engines/cross_plane_v8.toml",
                 EnginePreset::cross_plane_v8(),
+            ),
+            (
+                "engines/big_cam_chopping_v8.toml",
+                EnginePreset::big_cam_chopping_v8(),
             ),
             ("engines/flat_plane_v8.toml", EnginePreset::flat_plane_v8()),
             ("engines/v10.toml", EnginePreset::v10()),

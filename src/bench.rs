@@ -242,9 +242,13 @@ impl EnginePreset {
     /// hear what a compressor does to a note.
     pub fn catalogue() -> Vec<EnginePreset> {
         type PresetSource = (&'static str, fn() -> EnginePreset);
-        let engine_files: [PresetSource; 16] = [
+        let engine_files: [PresetSource; 17] = [
             ("engines/inline_4.toml", Self::inline_four),
             ("engines/cross_plane_v8.toml", Self::cross_plane_v8),
+            (
+                "engines/big_cam_chopping_v8.toml",
+                Self::big_cam_chopping_v8,
+            ),
             ("engines/flat_plane_v8.toml", Self::flat_plane_v8),
             ("engines/v10.toml", Self::v10),
             ("engines/v12.toml", Self::v12),
@@ -427,6 +431,93 @@ impl EnginePreset {
             idle: 750.0,
             inertia: 0.45,
             load: (6.0, 0.020, 1.3e-4),
+            gearbox: Gearbox::generic_six_speed(),
+            road_load: RoadLoad::generic_road_car(),
+            clutch: Clutch::generic_road_car(),
+            aperture_positions: AperturePositions::front_engine_dual(),
+            anti_lag: false,
+            limiter_mode: LimiterMode::RotatingStutter,
+            limiter_cut: LimiterCut::Spark,
+        }
+    }
+
+    /// 7.0 litre big cam cross-plane V8.
+    ///
+    /// A high-compression, naturally aspirated 427 cu in American pushrod V8
+    /// with an aggressive solid-roller camshaft: 62 degrees of overlap and
+    /// steep flanks produce the signature periodic idle chop through deep
+    /// chambered mufflers and long-tube headers.
+    pub fn big_cam_chopping_v8() -> Self {
+        Self {
+            name: "Big Cam Chopping V8",
+            note: "62 deg cam overlap and solid roller ramps: rhythmic idle chop and pushrod bark.",
+            model: CylinderModel {
+                geometry: CylinderGeometry::new(0.1048, 0.1016, 0.1540, 11.5),
+                valves: ValveTrain {
+                    intake: ValveEvent::new(deg(685.0), deg(272.0), 0.0140, 0.0500, 0.68),
+                    exhaust: ValveEvent::new(deg(475.0), deg(272.0), 0.0135, 0.0390, 0.65),
+                }
+                .with_aggressiveness(0.45),
+                combustion: HeatRelease::Spark(WiebeProfile::new(
+                    deg(338.0),
+                    deg(52.0),
+                    5.0,
+                    2.0,
+                    0.97,
+                )),
+                ..CylinderModel::default()
+            },
+            firing: FiringOrder::cross_plane_v8(),
+            induction: Induction::NaturallyAspirated,
+            mechanical: MechanicalSpec {
+                intake_valve: Some(ImpulsiveSpec::per_cylinder(0.55)),
+                exhaust_valve: Some(ImpulsiveSpec::per_cylinder(0.55)),
+                piston_slap: Some(ImpulsiveSpec::per_cylinder(0.40)),
+                timing_chain: Some(ImpulsiveSpec::order(19.0, 0.22)),
+                ..MechanicalSpec::default()
+            },
+            exhaust: ExhaustSystem {
+                primaries: vec![
+                    PipeSection::from_diameter(0.54, 0.048, 880.0),
+                    PipeSection::from_diameter(0.58, 0.048, 880.0),
+                    PipeSection::from_diameter(0.55, 0.048, 880.0),
+                    PipeSection::from_diameter(0.57, 0.048, 880.0),
+                    PipeSection::from_diameter(0.53, 0.048, 880.0),
+                    PipeSection::from_diameter(0.58, 0.048, 880.0),
+                    PipeSection::from_diameter(0.56, 0.048, 880.0),
+                    PipeSection::from_diameter(0.54, 0.048, 880.0),
+                ],
+                collector: Collector::from_diameter(4, 0.076, 0.20),
+                secondary: vec![],
+                crossover: Crossover::HPipe {
+                    position: 0.90,
+                    area: PI * 0.032 * 0.032,
+                },
+                silencers: vec![Silencer::ExpansionChamber {
+                    length: 0.50,
+                    area_ratio: 4.5,
+                    stages: 2,
+                }],
+                tailpipe: PipeSection::from_diameter(1.4, 0.076, 620.0),
+                tailpipe_flanged: false,
+                cutout_fitted: true,
+                turbine: None,
+            },
+            intake: IntakeSystem {
+                runners: vec![PipeSection::from_diameter(0.28, 0.048, 310.0); 8],
+                plenum_volume: 5.2e-3,
+                throttle: ThrottleLayout::Single { bore: 0.092 },
+                airbox: Some(PipeSection::from_diameter(0.15, 0.110, 300.0)),
+                snorkel: None,
+                trumpet_flanged: true,
+            },
+            block_mass: 230.0,
+            bore_spacing: 0.1118,
+            redline: 7_000.0,
+            float_rpm: default_float_rpm(7_000.0),
+            idle: 900.0,
+            inertia: 0.42,
+            load: (5.0, 0.015, 7.0e-5),
             gearbox: Gearbox::generic_six_speed(),
             road_load: RoadLoad::generic_road_car(),
             clutch: Clutch::generic_road_car(),
@@ -3418,6 +3509,52 @@ mod tests {
             mean(&side_rpms),
             swing(&peripheral_rpms),
             mean(&peripheral_rpms)
+        );
+    }
+
+    #[test]
+    fn big_cam_chopping_v8_chops_at_idle() {
+        let preset = EnginePreset::big_cam_chopping_v8();
+        assert_eq!(preset.firing.len(), 8);
+        assert!(preset.model.valves.overlap().to_degrees() > 60.0);
+        assert!(preset.model.valves.aggressiveness() >= 0.45 - 1e-4);
+
+        let dt = 1.0 / 480.0;
+        let mut block = preset.block(Environment::default());
+        let mut driveline = Driveline::new(&preset);
+
+        let settle = (15.0 / dt) as usize;
+        let record = (25.0 / dt) as usize;
+        let mut rpms = Vec::with_capacity(record);
+
+        for i in 0..(settle + record) {
+            driveline.update(&mut block, dt);
+            block.update(dt, driveline.rpm);
+            if i >= settle {
+                rpms.push(driveline.rpm);
+            }
+        }
+
+        let mean = rpms.iter().sum::<f64>() / rpms.len() as f64;
+        let hi = rpms.iter().cloned().fold(f64::MIN, f64::max);
+        let lo = rpms.iter().cloned().fold(f64::MAX, f64::min);
+        let swing = hi - lo;
+
+        assert!(mean > STALL_RPM, "engine stalled at idle: {mean:.0} rpm");
+        assert!(
+            swing > 30.0,
+            "the big cam must chop at idle: swing was only {swing:.1} rpm"
+        );
+        assert!(
+            driveline.idle_hunt.period > 0.0,
+            "big cam must enter an idle limit cycle"
+        );
+        let firing_hz = mean / 120.0 * 8.0;
+        assert!(
+            driveline.idle_hunt.hunt_hz() < firing_hz / 10.0,
+            "hunt frequency must be well below firing frequency: {:.2} Hz vs {:.1} Hz firing",
+            driveline.idle_hunt.hunt_hz(),
+            firing_hz
         );
     }
 
