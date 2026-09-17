@@ -405,11 +405,7 @@ impl EnginePreset {
                     position: 0.85,
                     area: PI * 0.025 * 0.025,
                 },
-                silencers: vec![Silencer::ExpansionChamber {
-                    length: 0.65,
-                    area_ratio: 6.0,
-                    stages: 2,
-                }],
+                silencers: vec![Silencer::Straight],
                 tailpipe: PipeSection::from_diameter(1.5, 0.060, 600.0),
                 tailpipe_flanged: false,
                 cutout_fitted: true,
