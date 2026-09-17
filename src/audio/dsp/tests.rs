@@ -1271,6 +1271,57 @@ fn every_backfire_node_is_bandlimited_to_the_t6_standard() {
     }
 }
 
+/// T6's re-levelling target on the reference case (cross-plane V8, 3000 rpm
+/// loaded) `docs/TIMBRE_PLAN.md` measured its 13 dB complaint against: a
+/// limiter-bounce section a few dB above the fired engine, not 13+.
+#[test]
+fn backfire_contrast_against_the_fired_engine_lands_a_few_db_up() {
+    let mono_db_and_crest = |snapshot: &EngineSnapshot| -> (f32, f64) {
+        let mut synth = EngineSynth::new(SynthConfig::cross_plane_v8(FS));
+        synth.set_snapshot(snapshot);
+        let stereo = render(&mut synth, 2 * 48_000);
+        // Skip the first 100 ms so a filter's own settle-in is not read as
+        // part of the level.
+        let mono: Vec<f32> = stereo[9_600..]
+            .chunks_exact(2)
+            .map(|c| 0.5 * (c[0] + c[1]))
+            .collect();
+        let rms = rms(&mono);
+        let db = if rms > 1e-6 {
+            20.0 * rms.log10()
+        } else {
+            -99.9
+        };
+        (db, crate::analysis::orders::crest_db(&mono))
+    };
+
+    let fired = loaded_snapshot();
+    let mut cut = loaded_snapshot();
+    cut.rpm = 6_000.0;
+    cut.spark_cut = true;
+    cut.unburnt_fuel_mass = 30.0e-6;
+    cut.exhaust_temperature = 1_150.0;
+
+    let (fired_db, _) = mono_db_and_crest(&fired);
+    let (cut_db, cut_crest) = mono_db_and_crest(&cut);
+    let contrast = cut_db - fired_db;
+
+    assert!(
+        (2.0..=10.0).contains(&contrast),
+        "expected the limiter bounce a few dB above the fired engine, not \
+         the old 13+ dB firecracker: fired {fired_db:.1} dBFS, cut {cut_db:.1} \
+         dBFS, contrast {contrast:.1} dB"
+    );
+    // Bandlimiting the pulse (T6's first three commits) must not turn the
+    // crack into a thud: it should still read as a sharp transient, not a
+    // flattened one.
+    assert!(
+        cut_crest > 12.0,
+        "limiter bounce should still be a sharp crack, not a thud: crest \
+         {cut_crest:.1} dB"
+    );
+}
+
 #[test]
 fn control_block_is_shorter_than_v12_firing_interval() {
     // A V12 at 8000 rpm fires every 1.25 ms:

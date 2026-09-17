@@ -918,9 +918,11 @@ pub struct SynthConfig {
     /// the first into the second, which is what a deflagration in a pipe
     /// actually is, cost it about half its radiated peak, and the level it was
     /// mixed at did not follow: a limiter bounce came out 1.1 times the clean
-    /// engine, which is an ignition cut nobody can hear as an event. At this
-    /// figure it comes out 2.1 times, the catalogue still renders clean, and
-    /// the pop is a crack rather than a click.
+    /// engine, which is an ignition cut nobody can hear as an event.
+    ///
+    /// This field alone no longer sets the final contrast: see
+    /// [`BACKFIRE_TRIGGER_GAIN`] for the trigger-site multiplier applied on
+    /// top of it, and its doc comment for the measured result.
     pub exhaust_level: f64,
     pub intake_level: f64,
     pub backfire_level: f64,
@@ -2909,6 +2911,17 @@ struct BackfireIgnition {
 /// same 0.00018 s every pop used before this stage told them apart.
 const BACKFIRE_BASE_ATTACK_SECONDS: f32 = 0.00018;
 
+/// Trigger-site gain applied to a backfire on top of [`SynthConfig::backfire_level`] [-].
+///
+/// Used to be an undocumented `2.0`. Measured on the cross-plane V8 at 3000
+/// rpm loaded — the same reference [`docs/TIMBRE_PLAN.md`] Stage T6 was
+/// written against — that doubled gain put a limiter-bounce section 18.3 dB
+/// louder in RMS than the fired engine either side of it, which is the
+/// "raspy" and "the pop is the only thing you hear" complaint. `0.5` lands it
+/// at 6.8 dB above the fired engine on that same reference: still a clear
+/// crack over the top, not the 13+ dB firecracker that drowns the engine out.
+const BACKFIRE_TRIGGER_GAIN: f32 = 0.5;
+
 /// How much bigger a node's own trapped volume makes the attack, relative to
 /// the port [-].
 ///
@@ -3924,7 +3937,8 @@ impl EngineSynth {
         self.backfire.tune(&self.config, &self.snapshot);
         if let Some(ignition) = self.backfire.poll(&mut self.noise, CONTROL_BLOCK) {
             let bank = (self.noise.next_u32() as usize) % self.backfire_pulses.len();
-            let amplitude = ignition.amplitude * self.config.backfire_level as f32 * 2.0;
+            let amplitude =
+                ignition.amplitude * self.config.backfire_level as f32 * BACKFIRE_TRIGGER_GAIN;
             // Backfires combine an explosive positive expansion wave with
             // turbulent flame roar; sharing the runner and muffler gives them
             // the pipe's acoustic colour without reducing to a thin metallic click.
