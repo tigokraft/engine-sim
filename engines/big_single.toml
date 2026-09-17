@@ -17,6 +17,12 @@ anti_lag = false
 limiter_mode = "HardCut"
 limiter_cut = "Spark"
 
+[block.governor]
+proportional = 0.00004
+integral = 0.00012
+actuator_lag = 0.18
+authority = 1.0
+
 [cylinder]
 bore = 0.1
 stroke = 0.084

@@ -17,7 +17,10 @@ use crate::audio::{
     MechanicalSpec, RootsVoicing, SourceRate, TurboModel, TurboVoicing, WastegateVoicing,
 };
 use crate::bench::EnginePreset;
-use crate::physics::control::{LimiterCut, LimiterMode};
+use crate::physics::control::{
+    IdleGovernor, LimiterCut, LimiterMode, IDLE_ACTUATOR_LAG, IDLE_GOVERNOR_INTEGRAL,
+    IDLE_GOVERNOR_PROPORTIONAL,
+};
 use crate::physics::cylinder::{
     default_float_rpm, default_reciprocating_mass, deg, CylinderGeometry,
 };
@@ -96,6 +99,11 @@ pub struct BlockConfig {
     /// from redline via [`default_float_rpm`].
     #[serde(default)]
     pub float_rpm: Option<f64>,
+    /// Idle governor gains, lag and travel limit; absent on every field keeps
+    /// the stock [`IdleGovernor::default`] this engine would otherwise fall
+    /// back to.
+    #[serde(default)]
+    pub governor: IdleGovernorConfig,
 }
 
 fn default_limiter_mode() -> LimiterMode {
@@ -104,6 +112,70 @@ fn default_limiter_mode() -> LimiterMode {
 
 fn default_limiter_cut() -> LimiterCut {
     LimiterCut::Spark
+}
+
+/// Serialisable [`IdleGovernor`] tuning: PI gains, actuator lag and travel
+/// limit, without the runtime state a live governor also carries.
+///
+/// Every field defaults to the stock gains an engine file written before
+/// per-preset governors already assumed, so none of them has to name one.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct IdleGovernorConfig {
+    #[serde(default = "default_governor_proportional")]
+    pub proportional: f64,
+    #[serde(default = "default_governor_integral")]
+    pub integral: f64,
+    #[serde(default = "default_governor_actuator_lag")]
+    pub actuator_lag: f64,
+    #[serde(default = "default_governor_authority")]
+    pub authority: f64,
+}
+
+impl Default for IdleGovernorConfig {
+    fn default() -> Self {
+        Self {
+            proportional: default_governor_proportional(),
+            integral: default_governor_integral(),
+            actuator_lag: default_governor_actuator_lag(),
+            authority: default_governor_authority(),
+        }
+    }
+}
+
+fn default_governor_proportional() -> f64 {
+    IDLE_GOVERNOR_PROPORTIONAL
+}
+
+fn default_governor_integral() -> f64 {
+    IDLE_GOVERNOR_INTEGRAL
+}
+
+fn default_governor_actuator_lag() -> f64 {
+    IDLE_ACTUATOR_LAG
+}
+
+fn default_governor_authority() -> f64 {
+    1.0
+}
+
+impl IdleGovernorConfig {
+    fn to_governor(self) -> IdleGovernor {
+        IdleGovernor::tuned(
+            self.proportional,
+            self.integral,
+            self.actuator_lag,
+            self.authority,
+        )
+    }
+
+    fn from_governor(governor: &IdleGovernor) -> Self {
+        Self {
+            proportional: governor.proportional,
+            integral: governor.integral,
+            actuator_lag: governor.actuator_lag,
+            authority: governor.authority,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -470,6 +542,7 @@ impl EngineConfig {
             limiter_mode: preset.limiter_mode,
             limiter_cut: preset.limiter_cut,
             float_rpm: None,
+            governor: IdleGovernorConfig::from_governor(&preset.idle_governor),
         };
 
         let cyl_geom = &preset.model.geometry;
@@ -1212,6 +1285,7 @@ impl EngineConfig {
                 .or(self.mechanical.float_rpm)
                 .unwrap_or_else(|| default_float_rpm(self.block.redline)),
             idle: self.block.idle,
+            idle_governor: self.block.governor.to_governor(),
             inertia: self.block.inertia,
             load: (self.block.load[0], self.block.load[1], self.block.load[2]),
             aperture_positions,
