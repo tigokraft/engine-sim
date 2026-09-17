@@ -1888,7 +1888,7 @@ impl Driveline {
             throttle: 0.0,
             throttle_target: 0.0,
             manual_cut: false,
-            idle_governor: IdleGovernor::default(),
+            idle_governor: preset.idle_governor,
             idle_hunt: IdleHunt::default(),
             redline: preset.redline,
             idle: preset.idle,
