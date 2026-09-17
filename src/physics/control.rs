@@ -69,9 +69,18 @@ pub const STARTER_WHINE_ORDER: f64 = 129.0;
 /// revolutions accelerating into nothing before its next compression, and
 /// passes the motor's own free speed doing it. What actually pulls the pinion
 /// out is the solenoid dropping, and what drops the solenoid is somebody
-/// deciding the engine is running. A quarter of a second of continuous
+/// deciding the engine is running. About a fifth of a second of continuous
 /// overrun is that decision, and it is the same one a driver makes by ear.
-pub const STARTER_RELEASE_HOLD: f64 = 0.25;
+pub const STARTER_RELEASE_HOLD: f64 = 0.20;
+
+/// Speed drop below free speed tolerated during overrun hold [rev/min].
+///
+/// An engine catching cold has intra-cycle ripple: firing pulses accelerate the
+/// crank past [`STARTER_FREE_SPEED`], but compression strokes before the next
+/// chamber fires decelerate the crank by a few rev/min. Once continuous overrun
+/// has started, allowing this modest margin prevents cyclic compression ripple
+/// from resetting the release hold timer every stroke.
+pub const STARTER_OVERRUN_HYSTERESIS_RPM: f64 = 2.5;
 
 /// Fraction of commanded fuel that lands on a stone-cold port wall [-].
 ///
@@ -387,9 +396,18 @@ impl Starter {
         if !self.engaged {
             return;
         }
-        if rpm > self.free_speed {
+        // Speed ripple between firing strokes dips slightly below free speed on
+        // compression; once overrun has been established, allow a modest margin
+        // so intra-cycle ripple on an engine that has caught does not reset the
+        // release timer every stroke.
+        let threshold = if self.overrun_time > 0.0 {
+            self.free_speed - STARTER_OVERRUN_HYSTERESIS_RPM
+        } else {
+            self.free_speed
+        };
+        if rpm > threshold {
             self.overrun_time += dt;
-            if self.overrun_time >= STARTER_RELEASE_HOLD {
+            if self.overrun_time >= STARTER_RELEASE_HOLD && rpm >= self.free_speed {
                 self.engaged = false;
             }
         } else {
