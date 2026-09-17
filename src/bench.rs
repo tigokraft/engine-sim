@@ -133,6 +133,13 @@ pub struct EnginePreset {
     pub float_rpm: f64,
     /// Speed the idle governor holds [rev/min].
     pub idle: f64,
+    /// The idle governor's own gains, lag and authority.
+    ///
+    /// A governor is calibrated on the engine it ships with: gains that hold
+    /// a mild cam's idle steady will overshoot into a lope, or fail to
+    /// recover from a WOT lift at all, on a plant with more cam overlap and
+    /// less flywheel to damp it. See [`IdleGovernor`].
+    pub idle_governor: IdleGovernor,
     /// Rotating inertia of crank, rods and flywheel [kg m^2].
     pub inertia: f64,
     /// Constant, linear and quadratic load coefficients for the dyno brake.
@@ -369,6 +376,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -434,6 +442,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -517,6 +526,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -593,6 +603,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -676,6 +687,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -748,6 +760,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -852,6 +865,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -930,6 +944,7 @@ impl EnginePreset {
             anti_lag: true,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -1016,6 +1031,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -1113,6 +1129,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::HardCut,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -1239,6 +1256,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::HardCut,
             limiter_cut: LimiterCut::Fuel,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -1321,6 +1339,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -1391,6 +1410,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -1461,6 +1481,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -1534,6 +1555,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -1603,6 +1625,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 
@@ -1672,6 +1695,7 @@ impl EnginePreset {
             anti_lag: false,
             limiter_mode: LimiterMode::RotatingStutter,
             limiter_cut: LimiterCut::Spark,
+            idle_governor: IdleGovernor::default(),
         }
     }
 }

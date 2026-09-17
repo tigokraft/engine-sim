@@ -256,10 +256,12 @@ impl Default for Starter {
 /// A hundred rpm low opens four thousandths of the bypass' travel, which
 /// sounds like nothing until you notice how steep the other side of the loop
 /// is: near idle a percent more bypass area is worth several hundred rpm, so
-/// this is already most of the gain the loop can carry. Tuned on the stock cam
-/// — a governor is calibrated on the engine it ships with — and deliberately
-/// not retuned for the big one, because what the big one then does is the
-/// point.
+/// this is already most of the gain the loop can carry. Tuned on the stock
+/// cam — a governor is calibrated on the engine it ships with. It is the
+/// default [`IdleGovernor`] falls back to; a preset with more cam overlap or
+/// less flywheel to damp it gets its own gains via [`IdleGovernor::tuned`]
+/// instead of inheriting this one unexamined. See
+/// [`crate::bench::EnginePreset::idle_governor`].
 pub const IDLE_GOVERNOR_PROPORTIONAL: f64 = 4.0e-5;
 
 /// Integral gain on speed error [bypass travel per rev/min per second].
@@ -333,6 +335,27 @@ impl Default for IdleGovernor {
             error_integral: 0.0,
             command: 0.0,
             position: 0.0,
+        }
+    }
+}
+
+impl IdleGovernor {
+    /// Builds a governor from its own gains rather than the stock ones.
+    ///
+    /// A real idle loop is calibrated on the engine it ships with, not
+    /// borrowed from another one: more cam overlap or less flywheel changes
+    /// how much a given bypass command is worth in rpm and how fast that
+    /// shows up, so the gains that hold a mild engine's idle steady can
+    /// overshoot into a lope, or fail to catch a WOT lift at all, on a
+    /// different plant. This is that calibration, with a freshly reset
+    /// actuator and no accumulated error.
+    pub fn tuned(proportional: f64, integral: f64, actuator_lag: f64, authority: f64) -> Self {
+        Self {
+            proportional,
+            integral,
+            actuator_lag,
+            authority,
+            ..Self::default()
         }
     }
 }
