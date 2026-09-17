@@ -1,6 +1,6 @@
 [identity]
 name = "Big Cam Chopping V8"
-note = "62 deg cam overlap and solid roller ramps: rhythmic idle chop and pushrod bark."
+note = "82 deg cam overlap, aggressive solid roller ramps and open headers: violent idle chop and raw bark."
 
 [block]
 mass = 230.0
@@ -28,17 +28,17 @@ bore = 0.1048
 stroke = 0.1016
 rod_length = 0.154
 compression_ratio = 11.5
-intake_open_deg = 684.9999999999999
-intake_duration_deg = 272.0
+intake_open_deg = 675.0
+intake_duration_deg = 292.0
 intake_lift = 0.014
 intake_diameter = 0.05
 intake_discharge_coeff = 0.68
-exhaust_open_deg = 474.99999999999994
-exhaust_duration_deg = 272.0
+exhaust_open_deg = 465.0
+exhaust_duration_deg = 292.0
 exhaust_lift = 0.0135
 exhaust_diameter = 0.039
 exhaust_discharge_coeff = 0.65
-cam_aggressiveness = 0.44999999999999996
+cam_aggressiveness = 0.7499999999999999
 
 [combustion]
 type = "Spark"
@@ -73,8 +73,10 @@ banks = [
 ]
 
 [exhaust]
+silencers = []
 tailpipe_flanged = false
 cutout = true
+mode = "open_headers"
 
 [[exhaust.primaries]]
 length = 0.54
@@ -122,17 +124,12 @@ outlet_diameter = 0.076
 taper_length = 0.2
 
 [exhaust.crossover]
-type = "HPipe"
-position = 0.9
-diameter = 0.064
-
-[[exhaust.silencers]]
-type = "Straight"
+type = "None"
 
 [exhaust.tailpipe]
-length = 1.4
+length = 0.06
 diameter = 0.076
-temperature = 620.0
+temperature = 800.0
 
 [intake]
 plenum_volume = 0.0052

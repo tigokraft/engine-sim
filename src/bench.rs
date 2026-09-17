@@ -449,20 +449,21 @@ impl EnginePreset {
     /// 7.0 litre big cam cross-plane V8.
     ///
     /// A high-compression, naturally aspirated 427 cu in American pushrod V8
-    /// with an aggressive solid-roller camshaft: 62 degrees of overlap and
-    /// steep flanks produce the signature periodic idle chop through straight
-    /// pipes and long-tube headers.
+    /// with a radical solid-roller camshaft: 82 degrees of overlap at the
+    /// same lobe separation and near-maximal flank speed drive the idle
+    /// governor deep into its limit cycle (docs/measurements/mechanism-m4.md),
+    /// vented through open, unsilenced 4-into-1 headers for the raw bark.
     pub fn big_cam_chopping_v8() -> Self {
         Self {
             name: "Big Cam Chopping V8",
-            note: "62 deg cam overlap and solid roller ramps: rhythmic idle chop and pushrod bark.",
+            note: "82 deg cam overlap, aggressive solid roller ramps and open headers: violent idle chop and raw bark.",
             model: CylinderModel {
                 geometry: CylinderGeometry::new(0.1048, 0.1016, 0.1540, 11.5),
                 valves: ValveTrain {
-                    intake: ValveEvent::new(deg(685.0), deg(272.0), 0.0140, 0.0500, 0.68),
-                    exhaust: ValveEvent::new(deg(475.0), deg(272.0), 0.0135, 0.0390, 0.65),
+                    intake: ValveEvent::new(deg(675.0), deg(292.0), 0.0140, 0.0500, 0.68),
+                    exhaust: ValveEvent::new(deg(465.0), deg(292.0), 0.0135, 0.0390, 0.65),
                 }
-                .with_aggressiveness(0.45),
+                .with_aggressiveness(0.75),
                 combustion: HeatRelease::Spark(WiebeProfile::new(
                     deg(338.0),
                     deg(52.0),
@@ -494,12 +495,12 @@ impl EnginePreset {
                 ],
                 collector: Collector::from_diameter(4, 0.076, 0.20),
                 secondary: vec![],
-                crossover: Crossover::HPipe {
-                    position: 0.90,
-                    area: PI * 0.032 * 0.032,
-                },
-                silencers: vec![Silencer::Straight],
-                tailpipe: PipeSection::from_diameter(1.4, 0.076, 620.0),
+                // No crossover and no silencer: bare 4-into-1 open headers, a
+                // short stub off the collector outlet standing in for the
+                // exhaust flange rather than any muffled tailpipe run.
+                crossover: Crossover::None,
+                silencers: vec![],
+                tailpipe: PipeSection::from_diameter(0.06, 0.076, 800.0),
                 tailpipe_flanged: false,
                 cutout_fitted: true,
                 turbine: None,
