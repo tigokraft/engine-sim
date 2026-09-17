@@ -1034,10 +1034,16 @@ impl SynthConfig {
             // the combustion drive alongside it.
             mechanical_level: 0.37,
             starter_level: 0.22,
-            // Set by measurement against the catalogue: the largest value at
-            // which the block is clearly present in the bottom octave at idle
-            // without becoming the thing the engine sounds like.
-            structure_level: 0.07,
+            // Set by measurement against the catalogue, T1: the largest value
+            // at which the block is clearly present in the bottom octave at
+            // idle without dominating a loaded exhaust. It was 0.07, set
+            // before the exhaust's wall loss was calibrated against a
+            // measured pipe, before the network was rebuilt to lose what a
+            // real one loses, and before T5 gave the silenced presets a real
+            // loss term — each of which made the exhaust louder without this
+            // constant moving. By 3000 rpm under load a block driven at 0.07
+            // matched the exhaust in isolation, which no running V8 does.
+            structure_level: 0.05,
             mechanical: MechanicalSpec::default(),
             master_gain: 0.20,
             aperture_positions: if banks > 1 {
@@ -7285,13 +7291,15 @@ mod tests {
 
         let bare = gap_floor(0.0);
         let filled = gap_floor(SynthConfig::default().mechanical_level);
-        // The margin was a factor of 1.5 and is now nearer 1.25, because the
-        // gaps are no longer as empty as they were. The Transit-Time Decision
-        // Rule used to knock the valve-end reflection down hardest at exactly
-        // this speed, which emptied them; with the rule gone the pipe rings
-        // down between firings on its own wall loss, the way a pipe does.
+        // The margin was a factor of 1.5, then 1.25 once the pipe started
+        // ringing down between firings on its own wall loss instead of on a
+        // schedule, and is now 1.1: `mechanical` reaches the mix only through
+        // `structure_level`, and T1 turned that constant down because it had
+        // been calibrated against an exhaust several stages quieter than the
+        // one it now shares a mix with. The floor still fills the gaps — it
+        // does so by less.
         assert!(
-            filled > 1.25 * bare,
+            filled > 1.1 * bare,
             "the floor did not fill the gaps: {filled:.6} vs {bare:.6}"
         );
     }
