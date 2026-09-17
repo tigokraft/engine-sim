@@ -445,8 +445,8 @@ impl EnginePreset {
     ///
     /// A high-compression, naturally aspirated 427 cu in American pushrod V8
     /// with an aggressive solid-roller camshaft: 62 degrees of overlap and
-    /// steep flanks produce the signature periodic idle chop through deep
-    /// chambered mufflers and long-tube headers.
+    /// steep flanks produce the signature periodic idle chop through straight
+    /// pipes and long-tube headers.
     pub fn big_cam_chopping_v8() -> Self {
         Self {
             name: "Big Cam Chopping V8",
@@ -493,11 +493,7 @@ impl EnginePreset {
                     position: 0.90,
                     area: PI * 0.032 * 0.032,
                 },
-                silencers: vec![Silencer::ExpansionChamber {
-                    length: 0.50,
-                    area_ratio: 4.5,
-                    stages: 2,
-                }],
+                silencers: vec![Silencer::Straight],
                 tailpipe: PipeSection::from_diameter(1.4, 0.076, 620.0),
                 tailpipe_flanged: false,
                 cutout_fitted: true,
