@@ -37,6 +37,7 @@ use crate::physics::plumbing::{ExhaustSystem, IntakeSystem, ThrottleLayout};
 use crate::physics::thermal::{EngineThermal, OilViscosity};
 use crate::physics::thermodynamics::{
     CylinderModel, HeatRelease, PortConditions, PortState, Rk4Solver, StepReport, ThermoState,
+    STOICH_AFR,
 };
 
 /// One cell per crank degree over the full four-stroke cycle.
@@ -1895,6 +1896,19 @@ impl EngineBlock {
             open_fraction: f64,
             interval: f64,
         }
+        // Anti-lag's overrun fuelling and retard are already real in the
+        // ECU — see `is_anti_lag_active` — but until now nothing downstream
+        // of it noticed: the extra unburned mixture that reaches the
+        // manifold at a shut throttle is exactly what afterburns there in a
+        // real anti-lag system, and that afterburn is a genuine heat source
+        // this bank's own combustion never produced. Richer fuelling and
+        // more retard both mean more unburned mixture surviving to the
+        // manifold, so both raise how hot that afterburn can plausibly run.
+        // A floor rather than a blend, because once it lights, afterburn
+        // combustion burns to roughly its own characteristic temperature
+        // rather than diluting down with whatever the baseline flow's own
+        // enthalpy happens to be.
+        let anti_lag_active = self.ecu.is_anti_lag_active(self.throttle, rpm);
         let bank_flux: Vec<BankFlux> = (0..self.exhaust_banks.len() as u8)
             .map(|bank| {
                 let mut flux = 0.0;
@@ -1919,6 +1933,14 @@ impl EngineBlock {
                     enthalpy_flux / flux
                 } else {
                     self.exhaust_banks[bank as usize].plenum.temperature
+                };
+                let temperature = if anti_lag_active {
+                    let richness = (STOICH_AFR / self.ecu.anti_lag_afr.max(1.0)).max(1.0);
+                    let retard_fraction = (self.ecu.anti_lag_retard / 40.0).clamp(0.0, 1.0);
+                    let afterburn_temperature = 1_000.0 + 300.0 * retard_fraction * richness;
+                    temperature.max(afterburn_temperature)
+                } else {
+                    temperature
                 };
                 let reference_area = PI * self.model.valves.exhaust.diameter.powi(2) / 4.0;
                 let open_fraction = (open_area / reference_area.max(1e-12)).clamp(0.0, 1.0);

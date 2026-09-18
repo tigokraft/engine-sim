@@ -1671,3 +1671,62 @@ fn closing_vgt_vanes_spools_sooner_and_raises_back_pressure() {
         open.exhaust_banks[0].port_pressure()
     );
 }
+
+#[test]
+fn anti_lag_holds_shaft_speed_and_raises_turbine_inlet_temperature_at_a_shut_throttle() {
+    use crate::physics::turbine::TURBINE_INLET_TEMPERATURE_LIMIT;
+
+    fn spooled_then_lifted(anti_lag: bool) -> EngineBlock {
+        let env = Environment::default();
+        let mut block = EngineBlock::cross_plane_v8(env);
+        block.throttle = 1.0;
+        block.fit_forced_induction(test_turbo_hardware(&env), vec![0, 1], false);
+        block.ecu.anti_lag = anti_lag;
+        let dt = 1.0 / 480.0;
+        for _ in 0..3_000 {
+            block.update(dt, 4_000.0);
+        }
+        // Shut throttle, foot off — the overrun condition anti-lag exists for.
+        block.throttle = 0.0;
+        for _ in 0..2_000 {
+            block.update(dt, 3_000.0);
+        }
+        block
+    }
+
+    let without = spooled_then_lifted(false);
+    let with = spooled_then_lifted(true);
+
+    assert!(
+        with.forced_induction[0].hardware.shaft.shaft_rpm()
+            > without.forced_induction[0].hardware.shaft.shaft_rpm(),
+        "anti-lag should hold shaft speed better at a shut throttle than \
+         letting it decay: with={:.0} rpm, without={:.0} rpm",
+        with.forced_induction[0].hardware.shaft.shaft_rpm(),
+        without.forced_induction[0].hardware.shaft.shaft_rpm()
+    );
+    assert!(
+        with.forced_induction[0]
+            .hardware
+            .shaft
+            .turbine_inlet_temperature()
+            > without.forced_induction[0]
+                .hardware
+                .shaft
+                .turbine_inlet_temperature(),
+        "anti-lag should raise turbine inlet temperature at a shut throttle"
+    );
+    assert!(
+        with.forced_induction[0]
+            .hardware
+            .shaft
+            .turbine_inlet_temperature()
+            > TURBINE_INLET_TEMPERATURE_LIMIT,
+        "sustained anti-lag should be able to reach the TB2 turbine inlet \
+         temperature limit: {}",
+        with.forced_induction[0]
+            .hardware
+            .shaft
+            .turbine_inlet_temperature()
+    );
+}
