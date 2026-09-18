@@ -1641,7 +1641,12 @@ fn closing_vgt_vanes_spools_sooner_and_raises_back_pressure() {
         block.throttle = 1.0;
         let hardware = test_turbo_hardware(&env).with_vgt(VgtActuator::new(0.1));
         block.fit_forced_induction(hardware, vec![0, 1], false);
-        block.forced_induction[0].hardware.vgt.as_mut().unwrap().target_area_fraction = vane_target;
+        block.forced_induction[0]
+            .hardware
+            .vgt
+            .as_mut()
+            .unwrap()
+            .target_area_fraction = vane_target;
         for _ in 0..2_500 {
             block.update(1.0 / 480.0, 4_000.0);
         }
@@ -1652,7 +1657,12 @@ fn closing_vgt_vanes_spools_sooner_and_raises_back_pressure() {
     let open = run(1.0);
 
     assert!(
-        closed.forced_induction[0].hardware.vgt.unwrap().area_fraction() < 0.41,
+        closed.forced_induction[0]
+            .hardware
+            .vgt
+            .unwrap()
+            .area_fraction()
+            < 0.41,
         "vanes did not actually settle toward their commanded closed position"
     );
     assert!(

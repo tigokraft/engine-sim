@@ -2032,8 +2032,7 @@ impl EngineBlock {
         let mut intake_states: Vec<(PortState, f64)> = Vec::new();
         for unit in self.forced_induction.iter_mut() {
             let previous = unit.hardware.upstream_port_state();
-            let total_throttle_flow_estimate =
-                self.intake.throttle_flow(self.throttle, &previous);
+            let total_throttle_flow_estimate = self.intake.throttle_flow(self.throttle, &previous);
             let share = if total_previous_flow > 1e-9 {
                 unit.hardware.last_mass_flow() / total_previous_flow
             } else {
