@@ -319,11 +319,7 @@ fn second_harmonic_amplitude(f: impl Fn(f64) -> f64) -> f64 {
 
 /// Second-harmonic magnitude of a firing order's shaking-force resultant,
 /// combining both in-plane axes.
-fn resultant_second_harmonic(
-    order: &FiringOrder,
-    geometry: &CylinderGeometry,
-    omega: f64,
-) -> f64 {
+fn resultant_second_harmonic(order: &FiringOrder, geometry: &CylinderGeometry, omega: f64) -> f64 {
     let x = second_harmonic_amplitude(|theta| order.shaking_force(geometry, theta, omega).0);
     let y = second_harmonic_amplitude(|theta| order.shaking_force(geometry, theta, omega).1);
     (x * x + y * y).sqrt()
@@ -341,8 +337,7 @@ fn inline_four_secondary_does_not_cancel_and_v8_layouts_differ() {
     let omega = 500.0; // rad/s, shared so only layout differs
 
     let inline_four = resultant_second_harmonic(&FiringOrder::inline_four(), &geometry, omega);
-    let cross_plane =
-        resultant_second_harmonic(&FiringOrder::cross_plane_v8(), &geometry, omega);
+    let cross_plane = resultant_second_harmonic(&FiringOrder::cross_plane_v8(), &geometry, omega);
     let flat_plane = resultant_second_harmonic(&FiringOrder::flat_plane_v8(), &geometry, omega);
 
     assert!(
@@ -1154,7 +1149,7 @@ fn settled_v8(rpm: f64, throttle: f64, forced: bool) -> EngineBlock {
     let mut block = EngineBlock::cross_plane_v8(env);
     block.throttle = throttle;
     if forced {
-        block.forced_induction = Some(test_turbo_hardware(&env));
+        block.fit_forced_induction(test_turbo_hardware(&env), vec![0, 1], false);
     }
     for _ in 0..3_000 {
         block.update(1.0 / 480.0, rpm);
@@ -1175,7 +1170,7 @@ fn an_atmospheric_preset_is_unchanged_by_the_forced_induction_field() {
         with_none.update(1.0 / 480.0, 4_000.0);
         untouched.update(1.0 / 480.0, 4_000.0);
     }
-    assert_eq!(with_none.forced_induction.is_none(), true);
+    assert_eq!(with_none.forced_induction.is_empty(), true);
     approx(
         with_none.intake.pressure(),
         untouched.intake.pressure(),
@@ -1195,8 +1190,9 @@ fn boost_raises_trapped_mass_and_exhaust_back_pressure() {
 
     let shaft_rpm = boosted
         .forced_induction
-        .as_ref()
+        .first()
         .expect("forced induction fitted")
+        .hardware
         .shaft
         .shaft_rpm();
     assert!(
@@ -1238,12 +1234,7 @@ fn shutting_the_throttle_at_boost_moves_the_charge_pipe_off_its_wot_pressure() {
     // making that response collapse smoothly once a real vent exists is
     // TB4's job.
     let mut block = settled_v8(4_000.0, 1.0, true);
-    let pressurized = block
-        .forced_induction
-        .as_ref()
-        .unwrap()
-        .charge_pipe
-        .pressure();
+    let pressurized = block.forced_induction[0].hardware.charge_pipe.pressure();
     assert!(
         pressurized > block.environment.pressure * 1.1,
         "the rig must actually be boosted before the lift: {pressurized:.0} Pa"
@@ -1253,12 +1244,7 @@ fn shutting_the_throttle_at_boost_moves_the_charge_pipe_off_its_wot_pressure() {
     for _ in 0..500 {
         block.update(1.0 / 480.0, 4_000.0);
     }
-    let after_lift = block
-        .forced_induction
-        .as_ref()
-        .unwrap()
-        .charge_pipe
-        .pressure();
+    let after_lift = block.forced_induction[0].hardware.charge_pipe.pressure();
     assert!(
         (after_lift - pressurized).abs() > pressurized * 0.1,
         "a shut throttle must move the charge pipe well off its WOT \
@@ -1306,8 +1292,9 @@ fn test_turbo_hardware_with_wastegate(
 fn charge_pipe_pressure_ratio(block: &EngineBlock, env: &Environment) -> f64 {
     block
         .forced_induction
-        .as_ref()
+        .first()
         .expect("forced induction fitted")
+        .hardware
         .charge_pipe
         .pressure()
         / env.pressure
@@ -1343,9 +1330,11 @@ fn a_boost_controller_holds_its_target_pressure_ratio() {
     let target = 1.6;
     let mut block = EngineBlock::cross_plane_v8(env);
     block.throttle = 1.0;
-    block.forced_induction = Some(test_turbo_hardware_with_wastegate(
-        &env, target, 3.0e5, 8.0e-4,
-    ));
+    block.fit_forced_induction(
+        test_turbo_hardware_with_wastegate(&env, target, 3.0e5, 8.0e-4),
+        vec![0, 1],
+        false,
+    );
     for _ in 0..4_000 {
         block.update(1.0 / 480.0, 5_000.0);
     }
@@ -1363,15 +1352,19 @@ fn an_undersized_gate_creeps_past_target_at_high_rpm() {
     let target = 1.6;
     let mut adequate = EngineBlock::cross_plane_v8(env);
     adequate.throttle = 1.0;
-    adequate.forced_induction = Some(test_turbo_hardware_with_wastegate(
-        &env, target, 3.0e5, 8.0e-4,
-    ));
+    adequate.fit_forced_induction(
+        test_turbo_hardware_with_wastegate(&env, target, 3.0e5, 8.0e-4),
+        vec![0, 1],
+        false,
+    );
 
     let mut undersized = EngineBlock::cross_plane_v8(env);
     undersized.throttle = 1.0;
-    undersized.forced_induction = Some(test_turbo_hardware_with_wastegate(
-        &env, target, 3.0e5, 0.01e-4,
-    ));
+    undersized.fit_forced_induction(
+        test_turbo_hardware_with_wastegate(&env, target, 3.0e5, 0.01e-4),
+        vec![0, 1],
+        false,
+    );
 
     for _ in 0..4_000 {
         adequate.update(1.0 / 480.0, 6_500.0);
@@ -1404,9 +1397,11 @@ fn a_fast_tip_in_transient_is_sensitive_to_controller_gain() {
     let run = |gain: f64| -> f64 {
         let mut block = EngineBlock::cross_plane_v8(env);
         block.throttle = 0.2;
-        block.forced_induction = Some(test_turbo_hardware_with_wastegate(
-            &env, target, gain, 10.0e-4,
-        ));
+        block.fit_forced_induction(
+            test_turbo_hardware_with_wastegate(&env, target, gain, 10.0e-4),
+            vec![0, 1],
+            false,
+        );
         for _ in 0..1_500 {
             block.update(1.0 / 480.0, rpm);
         }
@@ -1441,14 +1436,7 @@ fn no_blow_off_drives_the_compressor_into_a_surge_oscillation() {
     let mut trace = Vec::with_capacity(3_000);
     for _ in 0..3_000 {
         block.update(1.0 / 480.0, 4_000.0);
-        trace.push(
-            block
-                .forced_induction
-                .as_ref()
-                .unwrap()
-                .charge_pipe
-                .pressure(),
-        );
+        trace.push(block.forced_induction[0].hardware.charge_pipe.pressure());
     }
     let changes = direction_changes(&trace, 2_000.0);
     assert!(
@@ -1471,7 +1459,11 @@ fn a_recirculating_blow_off_valve_prevents_surge() {
         spring_preload: 0.3e5,
         opening_span: 0.2e5,
     };
-    block.forced_induction = Some(test_turbo_hardware(&env).with_blow_off(bov));
+    block.fit_forced_induction(
+        test_turbo_hardware(&env).with_blow_off(bov),
+        vec![0, 1],
+        false,
+    );
     for _ in 0..3_000 {
         block.update(1.0 / 480.0, 4_000.0);
     }
@@ -1480,14 +1472,7 @@ fn a_recirculating_blow_off_valve_prevents_surge() {
     let mut trace = Vec::with_capacity(3_000);
     for _ in 0..3_000 {
         block.update(1.0 / 480.0, 4_000.0);
-        trace.push(
-            block
-                .forced_induction
-                .as_ref()
-                .unwrap()
-                .charge_pipe
-                .pressure(),
-        );
+        trace.push(block.forced_induction[0].hardware.charge_pipe.pressure());
     }
     let changes = direction_changes(&trace, 2_000.0);
     assert!(
@@ -1495,4 +1480,28 @@ fn a_recirculating_blow_off_valve_prevents_surge() {
         "a recirculating blow-off valve should settle the charge pipe \
          rather than let it surge: {changes} direction changes"
     );
+}
+
+// -- TB5: transients and architectures -----------------------------------
+
+#[test]
+fn twin_scroll_shrinks_the_bank_collector_to_the_divided_volume() {
+    let env = Environment::default();
+    let mut block = EngineBlock::new(CylinderModel::default(), FiringOrder::inline_four(), env);
+    let full_volume = block.exhaust_banks[0].plenum.volume;
+
+    let groups = block.firing.twin_scroll_groups(0);
+    let scroll_cylinders = groups[0].len() as f64;
+    let bank_cylinders = block.firing.cylinders_on_bank(0).len() as f64;
+    let expected_divided_volume = full_volume * scroll_cylinders / bank_cylinders;
+
+    block.fit_forced_induction(test_turbo_hardware(&env), vec![0], true);
+
+    let divided_volume = block.exhaust_banks[0].plenum.volume;
+    assert!(
+        divided_volume < full_volume,
+        "a twin-scroll collector must be smaller than the whole bank's own \
+         collector: full={full_volume:.6} m^3, divided={divided_volume:.6} m^3"
+    );
+    approx(divided_volume, expected_divided_volume, 1e-9);
 }

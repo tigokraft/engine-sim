@@ -27,7 +27,7 @@ use crate::physics::cylinder::{
 use crate::physics::engine_block::{CylinderIndex, FiringOrder};
 use crate::physics::plumbing::{
     Collector, Crossover, ExhaustSystem, IntakeSystem, MufflerGeometry, PipeSection, Silencer,
-    ThrottleLayout, TurbineGeometry,
+    ThrottleLayout, TurbineGeometry, TurbineScrolls,
 };
 use crate::physics::thermodynamics::{
     CylinderModel, DieselCombustion, HeatRelease, ValveEvent, ValveTrain, WiebeProfile, DIESEL_LHV,
@@ -397,6 +397,10 @@ pub struct ExhaustConfig {
 pub struct TurbineConfig {
     pub housing_ar: f64,
     pub blade_count: u32,
+    /// Whether the housing casts two volutes instead of one — see
+    /// `docs/TURBO_PLAN.md`'s TB5. Absent on every preset predating it.
+    #[serde(default)]
+    pub twin_scroll: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -722,6 +726,7 @@ impl EngineConfig {
         let turbine = preset.exhaust.turbine.map(|t| TurbineConfig {
             housing_ar: t.housing_ar,
             blade_count: t.blade_count,
+            twin_scroll: t.scrolls == TurbineScrolls::Twin,
         });
 
         let exhaust = ExhaustConfig {
@@ -1108,6 +1113,11 @@ impl EngineConfig {
         let turbine = self.exhaust.turbine.as_ref().map(|t| TurbineGeometry {
             housing_ar: t.housing_ar,
             blade_count: t.blade_count,
+            scrolls: if t.twin_scroll {
+                TurbineScrolls::Twin
+            } else {
+                TurbineScrolls::Single
+            },
         });
 
         let mut exhaust = ExhaustSystem {

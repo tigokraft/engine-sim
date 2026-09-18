@@ -36,7 +36,7 @@ use crate::physics::intake::{ForcedInduction, IntakePlenum, ThrottleBody, ValveD
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem, ThrottleLayout};
 use crate::physics::thermal::{EngineThermal, OilViscosity};
 use crate::physics::thermodynamics::{
-    CylinderModel, HeatRelease, PortConditions, Rk4Solver, StepReport, ThermoState,
+    CylinderModel, HeatRelease, PortConditions, PortState, Rk4Solver, StepReport, ThermoState,
 };
 
 /// One cell per crank degree over the full four-stroke cycle.
@@ -508,6 +508,37 @@ impl FiringOrder {
                 }
             })
             .collect()
+    }
+
+    /// Splits one bank's own cylinders into the two scroll groups a
+    /// twin-scroll turbine housing would feed, alternating through firing
+    /// order rather than by cylinder number.
+    ///
+    /// Two cylinders that fire back to back are exactly the pair a divided
+    /// manifold exists to keep apart — one's blowdown pulse would otherwise
+    /// rob the other's scavenging window. Walking the bank's own firing
+    /// order and dealing cylinders alternately into the two groups puts
+    /// every adjacent pair on opposite scrolls, whatever the physical
+    /// cylinder numbering happens to be. See `docs/TURBO_PLAN.md`'s TB5.
+    pub fn twin_scroll_groups(&self, bank: u8) -> [Vec<usize>; 2] {
+        let mut on_bank: Vec<usize> = self
+            .cylinders
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.bank == bank)
+            .map(|(i, _)| i)
+            .collect();
+        on_bank.sort_by(|&a, &b| {
+            self.cylinders[a]
+                .firing_offset
+                .partial_cmp(&self.cylinders[b].firing_offset)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut groups = [Vec::new(), Vec::new()];
+        for (slot, index) in on_bank.into_iter().enumerate() {
+            groups[slot % 2].push(index);
+        }
+        groups
     }
 
     /// Reciprocating shaking-force resultant the whole block feels this
@@ -1191,6 +1222,29 @@ impl ExhaustManifold {
     }
 }
 
+/// One turbocharger and the exhaust banks whose flux drives it.
+///
+/// Most boosted engines carry exactly one of these, its `banks` covering
+/// every bank in the block — the single shared shaft TB3 and TB4 built and
+/// tested against. Giving a V-engine one turbo per bank
+/// (`docs/TURBO_PLAN.md`'s TB5) is a second, independent unit with its own
+/// single-bank `banks` instead of a change to this one's shape.
+#[derive(Debug, Clone)]
+pub struct ForcedInductionUnit {
+    /// The compressor, turbine, shaft and any wastegate/BOV/boost control.
+    pub hardware: ForcedInduction,
+    /// Which banks feed this unit's turbine.
+    pub banks: Vec<u8>,
+    /// Whether those banks feed the turbine through two separate,
+    /// unmerged inlets rather than one flux-weighted one.
+    ///
+    /// With two banks each bank is already its own inlet, so this only
+    /// changes how they are combined. With one bank it also determines how
+    /// that bank's own cylinders were split when the unit was fitted — see
+    /// [`EngineBlock::fit_forced_induction`].
+    pub twin_scroll: bool,
+}
+
 // ---------------------------------------------------------------------------
 // The block
 // ---------------------------------------------------------------------------
@@ -1281,9 +1335,10 @@ pub struct EngineBlock {
     /// Engine control unit: fuelling, timing, knock retard, limiters, and cylinder health.
     pub ecu: EngineControlUnit,
     /// Real turbocharger hardware, if this engine is boosted — see
-    /// `docs/TURBO_PLAN.md`'s TB3. `None` leaves the intake and exhaust paths
-    /// exactly as an atmospheric engine's.
-    pub forced_induction: Option<ForcedInduction>,
+    /// `docs/TURBO_PLAN.md`'s TB3. Empty leaves the intake and exhaust paths
+    /// exactly as an atmospheric engine's. More than one unit is a per-bank
+    /// turbo layout — see [`ForcedInductionUnit`] and TB5.
+    pub forced_induction: Vec<ForcedInductionUnit>,
 }
 
 impl EngineBlock {
@@ -1371,8 +1426,54 @@ impl EngineBlock {
             throttle: 1.0,
             idle_bypass: 0.0,
             ecu,
-            forced_induction: None,
+            forced_induction: Vec::new(),
         }
+    }
+
+    /// Fits a turbocharger driven by the listed banks' exhaust.
+    ///
+    /// `twin_scroll` with a single bank splits that bank's own cylinders
+    /// into the two groups [`FiringOrder::twin_scroll_groups`] picks and
+    /// rebuilds its collector to the smaller, divided volume one group's
+    /// own cylinders would fill alone — the same
+    /// `displacement * cylinders * 1.5` rule [`EngineBlock::new`] already
+    /// sizes a whole bank's collector by, applied to half as many
+    /// cylinders. A twin-scroll manifold is physically two smaller
+    /// collectors merging at the wheel, not one bank's full collector
+    /// wearing a different label, and a smaller lumped volume genuinely
+    /// resonates differently — see `docs/TURBO_PLAN.md`'s TB5. With two
+    /// banks each bank's collector already is that divided size, so
+    /// nothing is rebuilt; the flag only changes how
+    /// [`EngineBlock::update_manifolds`] feeds the turbine.
+    pub fn fit_forced_induction(
+        &mut self,
+        hardware: ForcedInduction,
+        banks: Vec<u8>,
+        twin_scroll: bool,
+    ) {
+        if twin_scroll {
+            if let [bank] = banks[..] {
+                let groups = self.firing.twin_scroll_groups(bank);
+                let scroll_cylinders = groups[0].len().max(1) as f64;
+                let bank_cylinders = self.firing.cylinders_on_bank(bank).len().max(1) as f64;
+                let manifold = &self.exhaust_banks[bank as usize];
+                let scroll_volume = manifold.plenum.volume * scroll_cylinders / bank_cylinders;
+                let pressure = manifold.plenum.pressure();
+                let temperature = manifold.plenum.temperature;
+                self.exhaust_banks[bank as usize].plenum = Plenum::new(
+                    scroll_volume,
+                    pressure,
+                    temperature,
+                    self.model.gas.r_burned,
+                    self.model.gas.gamma_burned,
+                );
+            }
+        }
+        self.forced_induction.push(ForcedInductionUnit {
+            hardware,
+            banks,
+            twin_scroll,
+        });
     }
 
     /// Re-sizes the exhaust manifolds from the block's current exhaust geometry.
@@ -1870,80 +1971,151 @@ impl EngineBlock {
         .clamp(0.0, 1.0);
         // Read before this frame's `advance_exhaust` below, so a fitted
         // compressor's shaft is loaded with *this* frame's power draw rather
-        // than a frame-stale one.
-        let upstream = if let Some(forced) = &mut self.forced_induction {
-            let previous = forced.upstream_port_state();
+        // than a frame-stale one. More than one unit's compressor discharges
+        // into the same shared charge air ahead of the throttle plate, so
+        // their outputs are combined the same flux-weighted way the exhaust
+        // side combines bank flux, below.
+        let mut intake_states: Vec<PortState> = Vec::new();
+        for unit in self.forced_induction.iter_mut() {
+            let previous = unit.hardware.upstream_port_state();
             let throttle_flow_estimate = self.intake.throttle_flow(self.throttle, &previous);
-            forced.advance_intake(
+            intake_states.push(unit.hardware.advance_intake(
                 dt,
                 throttle_flow_estimate,
                 self.intake.pressure(),
                 &self.environment,
                 &self.model.gas,
-            )
-        } else {
+            ));
+        }
+        let upstream = if intake_states.is_empty() {
             IntakePlenum::ambient_upstream(&self.environment, &self.model.gas)
+        } else {
+            let n = intake_states.len() as f64;
+            PortState {
+                pressure: intake_states.iter().map(|s| s.pressure).sum::<f64>() / n,
+                temperature: intake_states.iter().map(|s| s.temperature).sum::<f64>() / n,
+                ..intake_states[0]
+            }
         };
 
-        // A fitted turbine sits downstream of every bank's collector at once
-        // — TB3 closes the loop for a single shared shaft; splitting it one
-        // per bank is TB5's job. The turbine's upstream state is the
-        // flux-weighted mean of what each collector is actually holding right
-        // now, and the resulting flow is handed back to each bank in
-        // proportion to its own share of the total flux.
-        let total_flux: f64 = bank_flux.iter().map(|b| b.flux).sum();
-        let turbine_outflow: Option<f64> = if let Some(forced) = &mut self.forced_induction {
-            let (pressure, temperature) = if total_flux > 1e-12 {
-                let pressure = self
-                    .exhaust_banks
-                    .iter()
-                    .zip(&bank_flux)
-                    .map(|(bank, f)| bank.port_pressure() * f.flux)
-                    .sum::<f64>()
-                    / total_flux;
-                let temperature = self
-                    .exhaust_banks
-                    .iter()
-                    .zip(&bank_flux)
-                    .map(|(bank, f)| bank.plenum.temperature * f.flux)
-                    .sum::<f64>()
-                    / total_flux;
-                (pressure, temperature)
-            } else {
-                let n = self.exhaust_banks.len().max(1) as f64;
-                (
-                    self.exhaust_banks
-                        .iter()
-                        .map(|b| b.port_pressure())
-                        .sum::<f64>()
-                        / n,
-                    self.exhaust_banks
-                        .iter()
-                        .map(|b| b.plenum.temperature)
-                        .sum::<f64>()
-                        / n,
-                )
-            };
-            let turbine_upstream =
-                PortConditions::from_environment(&self.environment, &self.model.gas).exhaust;
-            let turbine_upstream = crate::physics::thermodynamics::PortState {
-                pressure,
-                temperature,
-                ..turbine_upstream
-            };
-            Some(forced.advance_exhaust(dt, &turbine_upstream, self.environment.pressure))
-        } else {
-            None
+        // Each fitted unit sits downstream of only the banks it lists — a
+        // per-bank turbo never sees another bank's exhaust, and a
+        // twin-scroll unit keeps its two inlets apart all the way to the
+        // wheel rather than flux-weighting them into one first (see
+        // [`ForcedInductionUnit::twin_scroll`]). Whatever flow a unit hands
+        // back is split to its own banks in proportion to their own share
+        // of what fed it; any bank no unit reaches vents straight to
+        // atmosphere, same as an atmospheric engine's.
+        let reference =
+            PortConditions::from_environment(&self.environment, &self.model.gas).exhaust;
+        let port_state = |pressure: f64, temperature: f64| PortState {
+            pressure,
+            temperature,
+            ..reference
         };
+        let mut bank_outflow: Vec<Option<f64>> = vec![None; self.exhaust_banks.len()];
+        for idx in 0..self.forced_induction.len() {
+            let twin_scroll = self.forced_induction[idx].twin_scroll;
+            let banks = self.forced_induction[idx].banks.clone();
+            if twin_scroll {
+                let inlets: [PortState; 2] = if let [bank] = banks[..] {
+                    let groups = self.firing.twin_scroll_groups(bank);
+                    let mut states = [port_state(0.0, 0.0); 2];
+                    for (g, group) in groups.iter().enumerate() {
+                        let mut flux = 0.0;
+                        let mut enthalpy_flux = 0.0;
+                        for &i in group {
+                            let sample = self.sample_of(i);
+                            let out = (-sample.exhaust_flow).max(0.0);
+                            flux += out;
+                            enthalpy_flux += out * sample.temperature;
+                        }
+                        let temperature = if flux > 1e-12 {
+                            enthalpy_flux / flux
+                        } else {
+                            self.exhaust_banks[bank as usize].plenum.temperature
+                        };
+                        states[g] = port_state(
+                            self.exhaust_banks[bank as usize].port_pressure(),
+                            temperature,
+                        );
+                    }
+                    states
+                } else {
+                    let mut states = [port_state(0.0, 0.0); 2];
+                    for (g, &bank) in banks.iter().enumerate().take(2) {
+                        states[g] = port_state(
+                            self.exhaust_banks[bank as usize].port_pressure(),
+                            self.exhaust_banks[bank as usize].plenum.temperature,
+                        );
+                    }
+                    states
+                };
+                let outflows = self.forced_induction[idx].hardware.advance_exhaust_scrolls(
+                    dt,
+                    &inlets,
+                    self.environment.pressure,
+                );
+                if let [bank] = banks[..] {
+                    bank_outflow[bank as usize] = Some(outflows[0] + outflows[1]);
+                } else {
+                    for (g, &bank) in banks.iter().enumerate().take(2) {
+                        bank_outflow[bank as usize] = Some(outflows[g]);
+                    }
+                }
+            } else {
+                let total: f64 = banks.iter().map(|&b| bank_flux[b as usize].flux).sum();
+                let (pressure, temperature) = if total > 1e-12 {
+                    let pressure = banks
+                        .iter()
+                        .map(|&b| {
+                            self.exhaust_banks[b as usize].port_pressure()
+                                * bank_flux[b as usize].flux
+                        })
+                        .sum::<f64>()
+                        / total;
+                    let temperature = banks
+                        .iter()
+                        .map(|&b| {
+                            self.exhaust_banks[b as usize].plenum.temperature
+                                * bank_flux[b as usize].flux
+                        })
+                        .sum::<f64>()
+                        / total;
+                    (pressure, temperature)
+                } else {
+                    let n = banks.len().max(1) as f64;
+                    (
+                        banks
+                            .iter()
+                            .map(|&b| self.exhaust_banks[b as usize].port_pressure())
+                            .sum::<f64>()
+                            / n,
+                        banks
+                            .iter()
+                            .map(|&b| self.exhaust_banks[b as usize].plenum.temperature)
+                            .sum::<f64>()
+                            / n,
+                    )
+                };
+                let turbine_upstream = port_state(pressure, temperature);
+                let outflow = self.forced_induction[idx].hardware.advance_exhaust(
+                    dt,
+                    &turbine_upstream,
+                    self.environment.pressure,
+                );
+                for &b in &banks {
+                    let share = if total > 1e-12 {
+                        bank_flux[b as usize].flux / total
+                    } else {
+                        1.0 / banks.len().max(1) as f64
+                    };
+                    bank_outflow[b as usize] = Some(outflow * share);
+                }
+            }
+        }
 
         for (bank, flux) in bank_flux.iter().enumerate() {
-            let bank_outflow = turbine_outflow.map(|total| {
-                if total_flux > 1e-12 {
-                    total * (flux.flux / total_flux)
-                } else {
-                    0.0
-                }
-            });
             self.exhaust_banks[bank].integrate(
                 dt,
                 rpm,
@@ -1951,7 +2123,7 @@ impl EngineBlock {
                 flux.flux,
                 flux.temperature,
                 flux.open_fraction,
-                bank_outflow,
+                bank_outflow[bank],
             );
         }
 

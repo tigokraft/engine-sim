@@ -219,6 +219,25 @@ pub struct TurbineGeometry {
     pub housing_ar: f64,
     /// Wheel blade count, for the blade-pass acoustic content [-].
     pub blade_count: u32,
+    /// Number of separate volutes the housing casts, and so how many
+    /// independent exhaust inlets it accepts.
+    pub scrolls: TurbineScrolls,
+}
+
+/// How many separate volutes a turbine housing casts.
+///
+/// A single-scroll housing merges every feeding cylinder's pulses into one
+/// nozzle before the wheel ever sees them. A twin-scroll housing keeps two
+/// groups of pulses apart in two separate volutes all the way to the wheel,
+/// which is why it is not just a smaller single-scroll housing wearing a
+/// different name: see `docs/TURBO_PLAN.md`'s TB5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TurbineScrolls {
+    /// One volute, one merged inlet.
+    #[default]
+    Single,
+    /// Two volutes, two independent inlets sharing one wheel.
+    Twin,
 }
 
 impl TurbineGeometry {
@@ -540,7 +559,12 @@ impl ExhaustSystem {
     /// housing's actual operating point via
     /// [`TurbineGeometry::operating_area_ratio`]. `None` keeps TB0's fixed
     /// figure, for callers with no live turbine state to feed it.
-    pub fn back_pressure(&self, mass_flow: f64, cutout_open: bool, turbine_reduced_flow: Option<f64>) -> f64 {
+    pub fn back_pressure(
+        &self,
+        mass_flow: f64,
+        cutout_open: bool,
+        turbine_reduced_flow: Option<f64>,
+    ) -> f64 {
         if mass_flow <= 0.0 {
             return 0.0;
         }
@@ -833,10 +857,12 @@ mod tests {
         let tight = TurbineGeometry {
             housing_ar: 0.35,
             blade_count: 9,
+            scrolls: TurbineScrolls::Single,
         };
         let open = TurbineGeometry {
             housing_ar: 1.4,
             blade_count: 9,
+            scrolls: TurbineScrolls::Single,
         };
         assert!(
             tight.throat_area_ratio() < open.throat_area_ratio(),
@@ -868,6 +894,7 @@ mod tests {
         let fitted = exhaust_with_turbine(Some(TurbineGeometry {
             housing_ar: 0.7,
             blade_count: 9,
+            scrolls: TurbineScrolls::Single,
         }))
         .back_pressure(mass_flow, false, None);
         assert!(
@@ -882,11 +909,13 @@ mod tests {
         let tight = exhaust_with_turbine(Some(TurbineGeometry {
             housing_ar: 0.4,
             blade_count: 9,
+            scrolls: TurbineScrolls::Single,
         }))
         .back_pressure(mass_flow, false, None);
         let open = exhaust_with_turbine(Some(TurbineGeometry {
             housing_ar: 1.2,
             blade_count: 9,
+            scrolls: TurbineScrolls::Single,
         }))
         .back_pressure(mass_flow, false, None);
         assert!(
@@ -904,8 +933,10 @@ mod tests {
         let turbine = Some(TurbineGeometry {
             housing_ar: 0.7,
             blade_count: 9,
+            scrolls: TurbineScrolls::Single,
         });
-        let with_turbine_closed = exhaust_with_turbine(turbine).back_pressure(mass_flow, false, None);
+        let with_turbine_closed =
+            exhaust_with_turbine(turbine).back_pressure(mass_flow, false, None);
         let with_turbine_open = exhaust_with_turbine(turbine).back_pressure(mass_flow, true, None);
         assert!(
             (with_turbine_closed - with_turbine_open).abs() < 1e-9,
@@ -913,7 +944,8 @@ mod tests {
              closed={with_turbine_closed:.3}, open={with_turbine_open:.3}"
         );
 
-        let no_turbine_open_cutout = exhaust_with_turbine(None).back_pressure(mass_flow, true, None);
+        let no_turbine_open_cutout =
+            exhaust_with_turbine(None).back_pressure(mass_flow, true, None);
         assert!(
             with_turbine_open > no_turbine_open_cutout,
             "the turbine's own term should still raise back pressure with the \
@@ -926,12 +958,14 @@ mod tests {
         let turbine = TurbineGeometry {
             housing_ar: 0.7,
             blade_count: 9,
+            scrolls: TurbineScrolls::Single,
         };
         // More reduced flow than the reference is the wheel passing more air
         // than its nominal calibration point, which should read as a wider
         // effective throat, not a narrower one.
         let wide_open = turbine.operating_area_ratio(TurbineGeometry::REFERENCE_REDUCED_FLOW * 3.0);
-        let choked_down = turbine.operating_area_ratio(TurbineGeometry::REFERENCE_REDUCED_FLOW * 0.3);
+        let choked_down =
+            turbine.operating_area_ratio(TurbineGeometry::REFERENCE_REDUCED_FLOW * 0.3);
         assert!(
             wide_open > turbine.throat_area_ratio(),
             "more reduced flow than the reference must open the effective throat"
@@ -944,8 +978,11 @@ mod tests {
         let mass_flow = 0.08;
         let exhaust = exhaust_with_turbine(Some(turbine));
         let nominal = exhaust.back_pressure(mass_flow, false, None);
-        let at_high_flow =
-            exhaust.back_pressure(mass_flow, false, Some(TurbineGeometry::REFERENCE_REDUCED_FLOW * 3.0));
+        let at_high_flow = exhaust.back_pressure(
+            mass_flow,
+            false,
+            Some(TurbineGeometry::REFERENCE_REDUCED_FLOW * 3.0),
+        );
         assert!(
             at_high_flow < nominal,
             "a wheel actually flowing more than its reference point must show \

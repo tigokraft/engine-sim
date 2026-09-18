@@ -125,6 +125,7 @@ temperature = 600.0
 [exhaust.turbine]
 housing_ar = 0.82
 blade_count = 10
+twin_scroll = false
 
 [intake]
 plenum_volume = 0.0035

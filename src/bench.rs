@@ -35,7 +35,7 @@ use crate::physics::cylinder::{default_float_rpm, deg, CylinderGeometry};
 use crate::physics::engine_block::{EngineBlock, FiringOrder};
 use crate::physics::plumbing::{
     Collector, Crossover, ExhaustSystem, IntakeSystem, PipeSection, Silencer, ThrottleLayout,
-    TurbineGeometry,
+    TurbineGeometry, TurbineScrolls,
 };
 use crate::physics::thermodynamics::{
     CylinderModel, DieselCombustion, HeatRelease, TwoPlugCombustion, ValveEvent, ValveTrain,
@@ -916,6 +916,7 @@ impl EnginePreset {
                 turbine: Some(TurbineGeometry {
                     housing_ar: 0.63,
                     blade_count: 11,
+                    scrolls: TurbineScrolls::Single,
                 }),
             },
             intake: IntakeSystem {
@@ -1007,6 +1008,7 @@ impl EnginePreset {
                 turbine: Some(TurbineGeometry {
                     housing_ar: 0.62,
                     blade_count: 9,
+                    scrolls: TurbineScrolls::Single,
                 }),
             },
             intake: IntakeSystem {
@@ -1311,6 +1313,7 @@ impl EnginePreset {
                 turbine: Some(TurbineGeometry {
                     housing_ar: 0.82,
                     blade_count: 10,
+                    scrolls: TurbineScrolls::Single,
                 }),
             },
             intake: IntakeSystem {

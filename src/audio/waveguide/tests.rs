@@ -435,8 +435,7 @@ fn chamber_transmission_loss_matches_theory() {
         TEMPERATURE,
     );
     let fixed_loss_db = -20.0
-        * (probe.entry_pass() as f64 * probe.wall_pass() as f64 * probe.exit_pass() as f64)
-            .log10();
+        * (probe.entry_pass() as f64 * probe.wall_pass() as f64 * probe.exit_pass() as f64).log10();
     let analytic = |f: f32| lossless(f) + fixed_loss_db as f32;
 
     // Quarter-wave point (peak loss), half-wave point (transparent in the
@@ -546,9 +545,7 @@ fn expansion_chamber_radiates_less_energy_than_no_silencer() {
     // drives a whole exhaust network, chamber fitted vs. straight pipe,
     // with the same pulse train, and requires the chamber to radiate
     // strictly less total energy.
-    use crate::physics::plumbing::{
-        Collector, Crossover, ExhaustSystem, PipeSection, Silencer,
-    };
+    use crate::physics::plumbing::{Collector, Crossover, ExhaustSystem, PipeSection, Silencer};
 
     const FS: f32 = 48_000.0;
 
@@ -722,9 +719,7 @@ fn crossover_transfers_energy_between_banks() {
     // `Crossover::None` the banks are two separate exhausts and nothing
     // does. Nothing here is a mixing coefficient — the transfer is whatever
     // the 4-port junction scatters.
-    use crate::physics::plumbing::{
-        Collector, Crossover, ExhaustSystem, PipeSection, Silencer,
-    };
+    use crate::physics::plumbing::{Collector, Crossover, ExhaustSystem, PipeSection, Silencer};
 
     const FS: f32 = 48_000.0;
 
@@ -812,15 +807,8 @@ fn stub_notches_at_c_over_four_l_stub() {
         let mut deepest = (0.0f32, f32::MAX);
         let mut f = expected * 0.75;
         while f <= expected * 1.25 {
-            let mut stub = QuarterWaveStub::new(
-                pipe_area,
-                stub_area,
-                stub_length,
-                FS,
-                GAMMA,
-                R,
-                TEMPERATURE,
-            );
+            let mut stub =
+                QuarterWaveStub::new(pipe_area, stub_area, stub_length, FS, GAMMA, R, TEMPERATURE);
             let settle = 24_000;
             let measure = 24_000;
             let mut transmitted = vec![0.0f32; measure];
@@ -1118,9 +1106,7 @@ fn steepening_raises_high_orders_with_amplitude() {
 
 #[test]
 fn opening_the_cutout_raises_high_order_content_and_lowers_back_pressure() {
-    use crate::physics::plumbing::{
-        Collector, Crossover, ExhaustSystem, PipeSection, Silencer,
-    };
+    use crate::physics::plumbing::{Collector, Crossover, ExhaustSystem, PipeSection, Silencer};
 
     const FS: f32 = 48_000.0;
 
@@ -1208,9 +1194,7 @@ fn cutout_fitment_alone_does_not_open_the_cutout() {
     // true and false and, without ever calling `set_cutout`, require the
     // renders to be bit-identical: a fitted-but-unopened cutout must sound
     // exactly like no cutout at all.
-    use crate::physics::plumbing::{
-        Collector, Crossover, ExhaustSystem, PipeSection, Silencer,
-    };
+    use crate::physics::plumbing::{Collector, Crossover, ExhaustSystem, PipeSection, Silencer};
 
     const FS: f32 = 48_000.0;
 
@@ -1315,9 +1299,7 @@ fn single_pipe_flanged(
     diameter: f64,
     flanged: bool,
 ) -> crate::physics::plumbing::ExhaustSystem {
-    use crate::physics::plumbing::{
-        Collector, Crossover, ExhaustSystem, PipeSection, Silencer,
-    };
+    use crate::physics::plumbing::{Collector, Crossover, ExhaustSystem, PipeSection, Silencer};
     let area = std::f64::consts::PI * (diameter * 0.5).powi(2);
     ExhaustSystem {
         primaries: vec![PipeSection::from_diameter(l_primary, diameter, 300.0)],
@@ -1501,9 +1483,7 @@ fn exhaust_modes_raise_high_order_content_monotonically() {
     // does not depend on the reactive chamber's own loss term (added in
     // Stage T5) being tuned any particular way — it is about T4's claim,
     // not T5's, and reaches for the silencer that has always attenuated.
-    use crate::physics::plumbing::{
-        Collector, Crossover, ExhaustSystem, PipeSection, Silencer,
-    };
+    use crate::physics::plumbing::{Collector, Crossover, ExhaustSystem, PipeSection, Silencer};
 
     const FS: f32 = 48_000.0;
 
@@ -1575,6 +1555,7 @@ fn turbo_test_geometry() -> crate::physics::plumbing::TurbineGeometry {
     crate::physics::plumbing::TurbineGeometry {
         housing_ar: 0.7,
         blade_count: 9,
+        scrolls: crate::physics::plumbing::TurbineScrolls::Single,
     }
 }
 
@@ -1591,6 +1572,7 @@ fn a_tighter_housing_reflects_more_and_transmits_less() {
         let geometry = crate::physics::plumbing::TurbineGeometry {
             housing_ar,
             blade_count: 9,
+            scrolls: crate::physics::plumbing::TurbineScrolls::Single,
         };
         let mut turbine = Turbine::new(&geometry, pipe_area, FS, GAMMA, R, TEMPERATURE);
         let settle = 12_000;
