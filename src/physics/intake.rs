@@ -991,6 +991,60 @@ impl ForcedInduction {
 
         turbine_flow + wastegate_flow
     }
+
+    /// Advances the shaft and turbine from two separate exhaust inlets
+    /// feeding a twin-scroll housing, and returns each inlet's own share of
+    /// the mass flow that should leave its collector this frame — see
+    /// [`Self::advance_exhaust`], which this generalizes to two inlets.
+    ///
+    /// Must be called after [`Self::advance_intake`] on the same frame, for
+    /// the same reason [`Self::advance_exhaust`] must.
+    pub fn advance_exhaust_scrolls(
+        &mut self,
+        dt: f64,
+        inlets: &[PortState; 2],
+        downstream_pressure: f64,
+    ) -> [f64; 2] {
+        let turbine_flows = self.shaft.advance_scrolls(
+            dt,
+            inlets,
+            downstream_pressure,
+            &self.turbine_map,
+            self.compressor_power,
+        );
+
+        let wastegate_flow = match &self.wastegate {
+            Some(wg) => {
+                let bias = self
+                    .boost_controller
+                    .as_ref()
+                    .map(|c| c.bias())
+                    .unwrap_or(0.0);
+                let effective_threshold = wg.spring_preload - bias;
+                // A wastegate diaphragm senses whichever scroll it is
+                // plumbed against; taking the higher-pressure inlet is
+                // conservative — that is the one that would actually lift
+                // the valve first.
+                let hottest = if inlets[0].pressure >= inlets[1].pressure {
+                    &inlets[0]
+                } else {
+                    &inlets[1]
+                };
+                wg.mass_flow(hottest, downstream_pressure, effective_threshold)
+            }
+            None => 0.0,
+        };
+
+        let total_turbine_flow = turbine_flows[0] + turbine_flows[1];
+        if total_turbine_flow > 1e-12 {
+            [
+                turbine_flows[0] + wastegate_flow * (turbine_flows[0] / total_turbine_flow),
+                turbine_flows[1] + wastegate_flow * (turbine_flows[1] / total_turbine_flow),
+            ]
+        } else {
+            [wastegate_flow * 0.5, wastegate_flow * 0.5]
+        }
+    }
 }
 
 /// How an engine breathes.

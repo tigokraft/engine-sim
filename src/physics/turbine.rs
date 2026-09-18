@@ -78,12 +78,18 @@ impl TurbineSpeedLine {
 
     /// Lowest expansion ratio this line has data for [-].
     pub fn min_expansion_ratio(&self) -> f64 {
-        self.points.first().expect("validated non-empty").expansion_ratio
+        self.points
+            .first()
+            .expect("validated non-empty")
+            .expansion_ratio
     }
 
     /// Highest expansion ratio this line has data for [-].
     pub fn max_expansion_ratio(&self) -> f64 {
-        self.points.last().expect("validated non-empty").expansion_ratio
+        self.points
+            .last()
+            .expect("validated non-empty")
+            .expansion_ratio
     }
 
     /// Reduced flow and efficiency at an expansion ratio, piecewise-linear
@@ -135,7 +141,10 @@ impl TurbineMap {
     /// be interpolated in the speed direction at all.
     pub fn new(mut lines: Vec<TurbineSpeedLine>) -> Self {
         lines.sort_by(|a, b| a.corrected_speed.partial_cmp(&b.corrected_speed).unwrap());
-        assert!(lines.len() >= 2, "a turbine map needs at least two speed lines");
+        assert!(
+            lines.len() >= 2,
+            "a turbine map needs at least two speed lines"
+        );
         Self { lines }
     }
 
@@ -204,40 +213,65 @@ fn turbine_line(corrected_speed: f64, points: &[(f64, f64, f64)]) -> TurbineSpee
         corrected_speed,
         points
             .iter()
-            .map(|&(expansion_ratio, reduced_flow, efficiency)| TurbineMapPoint {
-                expansion_ratio,
-                reduced_flow,
-                efficiency,
-            })
+            .map(
+                |&(expansion_ratio, reduced_flow, efficiency)| TurbineMapPoint {
+                    expansion_ratio,
+                    reduced_flow,
+                    efficiency,
+                },
+            )
             .collect(),
     )
 }
 
 fn small_frame_map() -> TurbineMap {
     TurbineMap::new(vec![
-        turbine_line(50_000.0, &[(1.0, 0.020, 0.48), (1.6, 0.060, 0.68), (2.6, 0.095, 0.58)]),
-        turbine_line(150_000.0, &[(1.0, 0.030, 0.52), (2.0, 0.100, 0.74), (3.2, 0.150, 0.60)]),
+        turbine_line(
+            50_000.0,
+            &[(1.0, 0.020, 0.48), (1.6, 0.060, 0.68), (2.6, 0.095, 0.58)],
+        ),
+        turbine_line(
+            150_000.0,
+            &[(1.0, 0.030, 0.52), (2.0, 0.100, 0.74), (3.2, 0.150, 0.60)],
+        ),
     ])
 }
 
 fn medium_frame_map() -> TurbineMap {
     TurbineMap::new(vec![
-        turbine_line(40_000.0, &[(1.0, 0.045, 0.50), (1.6, 0.130, 0.70), (2.6, 0.205, 0.60)]),
-        turbine_line(125_000.0, &[(1.0, 0.065, 0.54), (2.0, 0.215, 0.76), (3.2, 0.320, 0.62)]),
+        turbine_line(
+            40_000.0,
+            &[(1.0, 0.045, 0.50), (1.6, 0.130, 0.70), (2.6, 0.205, 0.60)],
+        ),
+        turbine_line(
+            125_000.0,
+            &[(1.0, 0.065, 0.54), (2.0, 0.215, 0.76), (3.2, 0.320, 0.62)],
+        ),
     ])
 }
 
 fn large_frame_map() -> TurbineMap {
     TurbineMap::new(vec![
-        turbine_line(30_000.0, &[(1.0, 0.085, 0.52), (1.6, 0.245, 0.71), (2.6, 0.385, 0.61)]),
-        turbine_line(100_000.0, &[(1.0, 0.120, 0.55), (2.0, 0.400, 0.77), (3.2, 0.590, 0.63)]),
+        turbine_line(
+            30_000.0,
+            &[(1.0, 0.085, 0.52), (1.6, 0.245, 0.71), (2.6, 0.385, 0.61)],
+        ),
+        turbine_line(
+            100_000.0,
+            &[(1.0, 0.120, 0.55), (2.0, 0.400, 0.77), (3.2, 0.590, 0.63)],
+        ),
     ])
 }
 
 /// Converts a reduced flow back to an actual mass flow at real inlet
 /// conditions — the inverse of [`compressor::corrected_flow`].
-fn reduced_flow_to_mass_flow(reduced_flow: f64, inlet_temperature: f64, inlet_pressure: f64) -> f64 {
-    reduced_flow * (inlet_pressure / compressor::P_REF) / (inlet_temperature / compressor::T_REF).sqrt()
+fn reduced_flow_to_mass_flow(
+    reduced_flow: f64,
+    inlet_temperature: f64,
+    inlet_pressure: f64,
+) -> f64 {
+    reduced_flow * (inlet_pressure / compressor::P_REF)
+        / (inlet_temperature / compressor::T_REF).sqrt()
 }
 
 /// Isentropic specific work extracted per unit mass, as a fraction of the
@@ -265,7 +299,11 @@ pub fn turbine_operating_point(
     let expansion_ratio = (upstream.pressure / downstream_pressure.max(1.0)).max(1.0);
     let (speed_lo, speed_hi) = map.speed_range();
     let reading = map.evaluate(corrected_speed.clamp(speed_lo, speed_hi), expansion_ratio);
-    let mass_flow = reduced_flow_to_mass_flow(reading.reduced_flow, upstream.temperature, upstream.pressure);
+    let mass_flow = reduced_flow_to_mass_flow(
+        reading.reduced_flow,
+        upstream.temperature,
+        upstream.pressure,
+    );
     (mass_flow, reading.efficiency, expansion_ratio)
 }
 
@@ -285,7 +323,10 @@ pub fn turbine_power(
 ) -> f64 {
     let (mass_flow, efficiency, expansion_ratio) =
         turbine_operating_point(upstream, downstream_pressure, map, corrected_speed);
-    mass_flow * upstream.cp() * upstream.temperature * specific_extraction(expansion_ratio, upstream.gamma, efficiency)
+    mass_flow
+        * upstream.cp()
+        * upstream.temperature
+        * specific_extraction(expansion_ratio, upstream.gamma, efficiency)
 }
 
 /// Turbocharger bearing cartridge, which sets how much shaft power the
@@ -379,7 +420,8 @@ impl TurboShaft {
     /// variable that is actually smooth at rest.
     pub fn integrate(&mut self, dt: f64, turbine_power: f64, compressor_power: f64) -> f64 {
         let bearing_power = self.bearing.viscous_loss_coefficient() * self.omega * self.omega;
-        let net_power = turbine_power * self.mechanical_efficiency - compressor_power - bearing_power;
+        let net_power =
+            turbine_power * self.mechanical_efficiency - compressor_power - bearing_power;
         let energy = 0.5 * self.inertia * self.omega * self.omega;
         let next_energy = (energy + net_power * dt).max(0.0);
         self.omega = (2.0 * next_energy / self.inertia).sqrt();
@@ -399,12 +441,19 @@ impl TurboShaft {
     ) -> f64 {
         self.turbine_inlet_temperature = turbine_upstream.temperature;
 
-        let corrected_speed = compressor::corrected_speed(self.shaft_rpm(), turbine_upstream.temperature);
-        let power = turbine_power(turbine_upstream, turbine_downstream_pressure, turbine_map, corrected_speed);
+        let corrected_speed =
+            compressor::corrected_speed(self.shaft_rpm(), turbine_upstream.temperature);
+        let power = turbine_power(
+            turbine_upstream,
+            turbine_downstream_pressure,
+            turbine_map,
+            corrected_speed,
+        );
         self.integrate(dt, power, compressor_power);
 
         let (_, max_corrected) = turbine_map.speed_range();
-        let max_shaft_rpm = max_corrected * (turbine_upstream.temperature / compressor::T_REF).sqrt();
+        let max_shaft_rpm =
+            max_corrected * (turbine_upstream.temperature / compressor::T_REF).sqrt();
         if self.shaft_rpm() > max_shaft_rpm {
             self.omega = max_shaft_rpm * 2.0 * PI / 60.0;
             self.overspeed = true;
@@ -413,6 +462,69 @@ impl TurboShaft {
         }
 
         self.shaft_rpm()
+    }
+
+    /// Advances the shaft from two separate exhaust inlets feeding a
+    /// twin-scroll housing, and returns each inlet's own mass flow through
+    /// the wheel — see [`Self::advance`], which this generalizes to more
+    /// than one simultaneous inlet.
+    ///
+    /// The map is evaluated separately against each inlet's own
+    /// instantaneous state at the shared shaft speed and the two resulting
+    /// powers are summed, rather than evaluating once against a
+    /// flux-weighted mean of the two states. [`turbine_power`]'s own doc
+    /// explains why an instantaneous evaluation keeps pulse energy a mean
+    /// throws away; the same reasoning applies across two inlets held
+    /// simultaneously apart in separate scrolls as it does across one
+    /// inlet's own time history, and is the entire acoustic point of
+    /// dividing the manifold in the first place — see
+    /// `docs/TURBO_PLAN.md`'s TB5.
+    pub fn advance_scrolls(
+        &mut self,
+        dt: f64,
+        inlets: &[PortState; 2],
+        turbine_downstream_pressure: f64,
+        turbine_map: &TurbineMap,
+        compressor_power: f64,
+    ) -> [f64; 2] {
+        self.turbine_inlet_temperature = inlets[0].temperature.max(inlets[1].temperature);
+
+        let corrected_speed =
+            compressor::corrected_speed(self.shaft_rpm(), self.turbine_inlet_temperature);
+        let total_power: f64 = inlets
+            .iter()
+            .map(|inlet| {
+                turbine_power(
+                    inlet,
+                    turbine_downstream_pressure,
+                    turbine_map,
+                    corrected_speed,
+                )
+            })
+            .sum();
+        self.integrate(dt, total_power, compressor_power);
+
+        let (_, max_corrected) = turbine_map.speed_range();
+        let max_shaft_rpm =
+            max_corrected * (self.turbine_inlet_temperature / compressor::T_REF).sqrt();
+        if self.shaft_rpm() > max_shaft_rpm {
+            self.omega = max_shaft_rpm * 2.0 * PI / 60.0;
+            self.overspeed = true;
+        } else {
+            self.overspeed = false;
+        }
+
+        let mut flows = [0.0; 2];
+        for (i, inlet) in inlets.iter().enumerate() {
+            let (mass_flow, _, _) = turbine_operating_point(
+                inlet,
+                turbine_downstream_pressure,
+                turbine_map,
+                corrected_speed,
+            );
+            flows[i] = mass_flow;
+        }
+        flows
     }
 }
 
@@ -454,7 +566,12 @@ impl Wastegate {
     }
 
     /// Mass flow bypassed around the turbine wheel [kg/s].
-    pub fn mass_flow(&self, upstream: &PortState, downstream_pressure: f64, effective_threshold: f64) -> f64 {
+    pub fn mass_flow(
+        &self,
+        upstream: &PortState,
+        downstream_pressure: f64,
+        effective_threshold: f64,
+    ) -> f64 {
         let gauge_pressure = upstream.pressure - downstream_pressure;
         let area = self.max_flow_area * self.open_fraction(gauge_pressure, effective_threshold);
         if area <= 0.0 {
@@ -628,21 +745,63 @@ mod tests {
         let low = port(100_000.0, 1100.0);
         let mean = port(180_000.0, 1100.0);
 
-        let (m_high, _, _) = turbine_operating_point(&high, downstream_pressure, &map, corrected_speed);
-        let (m_low, _, _) = turbine_operating_point(&low, downstream_pressure, &map, corrected_speed);
+        let (m_high, _, _) =
+            turbine_operating_point(&high, downstream_pressure, &map, corrected_speed);
+        let (m_low, _, _) =
+            turbine_operating_point(&low, downstream_pressure, &map, corrected_speed);
         let power_high = turbine_power(&high, downstream_pressure, &map, corrected_speed);
         let power_low = turbine_power(&low, downstream_pressure, &map, corrected_speed);
         let pulse_average_power = (power_high + power_low) / 2.0;
 
         let average_mass_flow = (m_high + m_low) / 2.0;
-        let (_, eff_mean, pr_mean) = turbine_operating_point(&mean, downstream_pressure, &map, corrected_speed);
-        let mean_flow_power =
-            average_mass_flow * mean.cp() * mean.temperature * specific_extraction(pr_mean, mean.gamma, eff_mean);
+        let (_, eff_mean, pr_mean) =
+            turbine_operating_point(&mean, downstream_pressure, &map, corrected_speed);
+        let mean_flow_power = average_mass_flow
+            * mean.cp()
+            * mean.temperature
+            * specific_extraction(pr_mean, mean.gamma, eff_mean);
 
         assert!(
             pulse_average_power > mean_flow_power,
             "pulse-average power {pulse_average_power} did not exceed mean-flow power \
              {mean_flow_power} at the same average mass flow {average_mass_flow}"
+        );
+    }
+
+    #[test]
+    fn twin_scroll_inlets_spin_the_shaft_faster_than_a_merged_mean_inlet() {
+        // The same correlation the pulse-fed test above measures in time —
+        // mass flow and pressure rising together — also holds between two
+        // scrolls held simultaneously apart: two separated inlets deliver
+        // more shaft power than one inlet flux-weighted down to their mean
+        // pressure, at the same average flow. This is TB5's whole acoustic
+        // case for dividing the manifold in the first place.
+        let map = sample_map();
+        let downstream_pressure = 100_000.0;
+        let dt = 1.0 / 480.0;
+
+        let high = port(260_000.0, 1100.0);
+        let low = port(100_000.0, 1100.0);
+        let mean = port(180_000.0, 1100.0);
+
+        let mut divided = TurboShaft::new(1e-5, 0.97, BearingType::BallBearing);
+        divided.advance_scrolls(dt, &[high, low], downstream_pressure, &map, 0.0);
+
+        // A merged single inlet at the mean pressure, driven by the same
+        // corrected speed (both shafts start at rest) so the comparison
+        // isolates the map's response to two separated pressures against
+        // one averaged one, rather than an artifact of integration order.
+        let mut merged = TurboShaft::new(1e-5, 0.97, BearingType::BallBearing);
+        let corrected_speed = compressor::corrected_speed(0.0, mean.temperature);
+        let power = 2.0 * turbine_power(&mean, downstream_pressure, &map, corrected_speed);
+        merged.integrate(dt, power, 0.0);
+
+        assert!(
+            divided.shaft_rpm() > merged.shaft_rpm(),
+            "twin-scroll inlets should spin the shaft faster than a merged \
+             mean inlet at the same average flow: divided={:.0} rpm, merged={:.0} rpm",
+            divided.shaft_rpm(),
+            merged.shaft_rpm()
         );
     }
 
@@ -666,7 +825,10 @@ mod tests {
             shaft.shaft_rpm(),
             max_shaft_rpm
         );
-        assert!(shaft.is_overspeed(), "shaft at its clamp did not report overspeed");
+        assert!(
+            shaft.is_overspeed(),
+            "shaft at its clamp did not report overspeed"
+        );
     }
 
     #[test]
@@ -689,7 +851,10 @@ mod tests {
     fn shaft_accelerates_when_turbine_power_exceeds_the_load_and_not_otherwise() {
         let mut shaft = TurboShaft::new(3e-5, 0.97, BearingType::Journal);
         shaft.integrate(1.0 / 480.0, 7000.0, 3000.0);
-        assert!(shaft.shaft_rpm() > 0.0, "shaft did not accelerate under net positive power");
+        assert!(
+            shaft.shaft_rpm() > 0.0,
+            "shaft did not accelerate under net positive power"
+        );
 
         let mut stalled = TurboShaft::new(3e-5, 0.97, BearingType::Journal);
         stalled.integrate(1.0 / 480.0, 2000.0, 3000.0);
@@ -764,9 +929,7 @@ mod tests {
         let small = TurbineMap::stock(FrameSize::Small);
         let medium = TurbineMap::stock(FrameSize::Medium);
         let large = TurbineMap::stock(FrameSize::Large);
-        let max_flow = |map: &TurbineMap| {
-            map.evaluate(map.speed_range().1, 3.2).reduced_flow
-        };
+        let max_flow = |map: &TurbineMap| map.evaluate(map.speed_range().1, 3.2).reduced_flow;
         assert!(max_flow(&medium) > max_flow(&small));
         assert!(max_flow(&large) > max_flow(&medium));
     }
@@ -794,7 +957,10 @@ mod tests {
     fn a_wastegate_stays_shut_below_its_spring_preload() {
         let wg = wastegate();
         assert_eq!(wg.open_fraction(0.0, wg.spring_preload), 0.0);
-        assert_eq!(wg.open_fraction(wg.spring_preload * 0.5, wg.spring_preload), 0.0);
+        assert_eq!(
+            wg.open_fraction(wg.spring_preload * 0.5, wg.spring_preload),
+            0.0
+        );
     }
 
     #[test]
@@ -807,7 +973,11 @@ mod tests {
 
         let upstream = hot_exhaust(2.0e5);
         let downstream = 1.0e5;
-        let half_open = wg.mass_flow(&upstream, downstream, wg.spring_preload + wg.opening_span * 1.5);
+        let half_open = wg.mass_flow(
+            &upstream,
+            downstream,
+            wg.spring_preload + wg.opening_span * 1.5,
+        );
         let fully_open = wg.mass_flow(&upstream, downstream, wg.spring_preload);
         assert!(fully_open > half_open);
     }
@@ -829,7 +999,10 @@ mod tests {
         for _ in 0..2_000 {
             ctl.update(1.0 / 480.0, 2.0);
         }
-        assert!(ctl.bias() > 0.0, "over target must produce a positive (threshold-lowering) bias");
+        assert!(
+            ctl.bias() > 0.0,
+            "over target must produce a positive (threshold-lowering) bias"
+        );
 
         let mut relieved = BoostController::new(1.8, 2.0e5, 0.5e5, 0.05);
         for _ in 0..2_000 {
