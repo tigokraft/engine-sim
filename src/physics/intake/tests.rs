@@ -795,3 +795,50 @@ fn a_real_expansion_ratio_spools_the_shaft_and_a_flat_one_does_not() {
     }
     assert!(idle.shaft.shaft_rpm() < 1.0);
 }
+
+#[test]
+fn a_heat_soaked_housing_delivers_a_lower_charge_density_at_the_same_operating_point() {
+    fn settle(fi: &mut ForcedInduction) -> PortState {
+        let mut state = fi.advance_intake(1.0e-3, 0.02, env().pressure, &env(), &gas());
+        for _ in 0..500 {
+            state = fi.advance_intake(1.0e-3, 0.02, env().pressure, &env(), &gas());
+        }
+        state
+    }
+
+    let mut fresh = forced_induction();
+    spool_up(&mut fresh, 0.5);
+    let fresh_state = settle(&mut fresh);
+
+    let mut soaked = forced_induction().with_heat_soak(ThermalMass::new(
+        env().temperature,
+        5.0,
+        5.0,
+        env().temperature,
+    ));
+    spool_up(&mut soaked, 0.5);
+    let soaked_state = settle(&mut soaked);
+
+    assert!(
+        soaked.housing.unwrap().temperature > env().temperature + 10.0,
+        "the housing should have genuinely picked up heat from the hot \
+         exhaust it just ran: {}",
+        soaked.housing.unwrap().temperature
+    );
+    assert!(
+        soaked_state.temperature > fresh_state.temperature,
+        "a heat-soaked housing should deliver a hotter discharge at the same \
+         operating point: fresh={:.1} K, soaked={:.1} K",
+        fresh_state.temperature,
+        soaked_state.temperature
+    );
+
+    let density = |s: &PortState| s.pressure / (s.gas_constant * s.temperature);
+    assert!(
+        density(&soaked_state) < density(&fresh_state),
+        "a heat-soaked turbo should deliver a lower charge density than a \
+         fresh one at the same pressure ratio: fresh={:.4}, soaked={:.4}",
+        density(&fresh_state),
+        density(&soaked_state)
+    );
+}

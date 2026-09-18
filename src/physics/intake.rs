@@ -40,6 +40,7 @@ use crate::environment::Environment;
 use crate::physics::compressor::{self, CompressorMap};
 use crate::physics::cylinder::GasProperties;
 use crate::physics::engine_block::Plenum;
+use crate::physics::thermal::ThermalMass;
 use crate::physics::thermodynamics::{flow_function, PortConditions, PortState};
 use crate::physics::turbine::{
     BearingType, BoostController, TurbineMap, TurboShaft, VgtActuator, Wastegate,
@@ -58,6 +59,12 @@ const TEMPERATURE_BOUNDS: (f64, f64) = (1.0, 4000.0);
 /// per unit of pressure-ratio overshoot [-]. See
 /// [`ForcedInduction::advance_intake`]'s surge branch.
 const SURGE_REVERSAL_GAIN: f64 = 3.0;
+
+/// Conductance from the exhaust gas passing through the turbine into a
+/// fitted housing's own thermal mass [W/K]. Distinct from that mass's own
+/// conductance to ambient, which sets how it sheds heat rather than how it
+/// picks it up — see [`ForcedInduction::advance_exhaust`].
+const HOUSING_GAS_CONDUCTANCE: f64 = 15.0;
 
 /// Largest number of internal steps one `advance` will take.
 ///
@@ -766,6 +773,11 @@ pub struct ForcedInduction {
     pub blow_off: Option<BlowOffValve>,
     /// Variable turbine geometry, `None` for a fixed-A/R fitment.
     pub vgt: Option<VgtActuator>,
+    /// The turbo's own housing, as a lumped thermal mass heat-soaked by the
+    /// exhaust gas passing through it, `None` to skip the effect entirely.
+    /// See [`Self::advance_exhaust`] and [`Self::advance_intake`], where a
+    /// soaked housing pre-heats the air the compressor draws in.
+    pub housing: Option<ThermalMass>,
     /// Shaft power the compressor drew on the most recent
     /// [`Self::advance_intake`] [W], held here so [`Self::advance_exhaust`]
     /// can load the shaft with it without recomputing the compressor's
@@ -812,6 +824,7 @@ impl ForcedInduction {
             boost_controller: None,
             blow_off: None,
             vgt: None,
+            housing: None,
             compressor_power: 0.0,
             last_mass_flow: 0.0,
         }
@@ -838,6 +851,12 @@ impl ForcedInduction {
     /// Fits variable turbine geometry.
     pub fn with_vgt(mut self, vgt: VgtActuator) -> Self {
         self.vgt = Some(vgt);
+        self
+    }
+
+    /// Fits the turbo's own housing as a heat-soaking thermal mass.
+    pub fn with_heat_soak(mut self, housing: ThermalMass) -> Self {
+        self.housing = Some(housing);
         self
     }
 
@@ -919,8 +938,21 @@ impl ForcedInduction {
             .max(0.0)
         };
 
+        // A heat-soaked housing pre-warms the air the wheel actually draws
+        // in, independent of the map's own speed/flow correction — which
+        // stays tied to true ambient above, exactly as a real map's
+        // reference conditions would. This is why a car is slower on its
+        // third run at the same boost: the same pressure ratio now starts
+        // from a hotter inlet and so ends at a hotter, less dense discharge.
+        let compressor_inlet_temperature = self
+            .housing
+            .as_ref()
+            .map_or(ambient.temperature, |housing| {
+                ambient.temperature.max(housing.temperature)
+            });
+
         let discharge_temperature = compressor::discharge_temperature(
-            ambient.temperature,
+            compressor_inlet_temperature,
             reading.pressure_ratio,
             reading.efficiency.max(0.05),
             ambient.gamma,
@@ -933,7 +965,7 @@ impl ForcedInduction {
         self.last_mass_flow = mass_flow.max(0.0);
         self.compressor_power = compressor::compressor_power(
             mass_flow.max(0.0),
-            ambient.temperature,
+            compressor_inlet_temperature,
             reading.pressure_ratio,
             reading.efficiency.max(0.05),
             ambient.gas_constant,
@@ -996,6 +1028,11 @@ impl ForcedInduction {
         area_fraction: f64,
     ) -> f64 {
         let area_fraction = area_fraction * self.vgt.as_mut().map(|v| v.update(dt)).unwrap_or(1.0);
+        if let Some(housing) = &mut self.housing {
+            let heat_in = HOUSING_GAS_CONDUCTANCE
+                * (turbine_upstream.temperature - housing.temperature).max(0.0);
+            housing.integrate(dt, heat_in);
+        }
         let corrected_speed =
             compressor::corrected_speed(self.shaft.shaft_rpm(), turbine_upstream.temperature);
         self.shaft.advance(
@@ -1044,6 +1081,11 @@ impl ForcedInduction {
         inlets: &[PortState; 2],
         downstream_pressure: f64,
     ) -> [f64; 2] {
+        if let Some(housing) = &mut self.housing {
+            let hottest = inlets[0].temperature.max(inlets[1].temperature);
+            let heat_in = HOUSING_GAS_CONDUCTANCE * (hottest - housing.temperature).max(0.0);
+            housing.integrate(dt, heat_in);
+        }
         let turbine_flows = self.shaft.advance_scrolls(
             dt,
             inlets,
