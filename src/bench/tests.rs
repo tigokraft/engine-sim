@@ -547,9 +547,8 @@ fn the_starter_releases_after_the_engine_catches_and_its_whine_stops() {
             }
         }
 
-        let (released, release_rpm) = released_at.unwrap_or_else(|| {
-            panic!("{} never caught: {:.0} rpm", preset.name, driveline.rpm)
-        });
+        let (released, release_rpm) = released_at
+            .unwrap_or_else(|| panic!("{} never caught: {:.0} rpm", preset.name, driveline.rpm));
         assert!(
             released > 0.0 && released < 5.0,
             "{} took {released:.1} s to catch",
@@ -1022,8 +1021,7 @@ fn a_big_overlap_cam_fails_to_settle_at_idle() {
 
     // And it is a lope rather than roughness: the period is far below the
     // firing frequency, which is what a listener hears as a rate at all.
-    let firing_hz =
-        mean(&lopey_rpms) / 120.0 * EnginePreset::cross_plane_v8().firing.len() as f64;
+    let firing_hz = mean(&lopey_rpms) / 120.0 * EnginePreset::cross_plane_v8().firing.len() as f64;
     assert!(
         lopey_hunt.hunt_hz() < firing_hz / 20.0,
         "the limit cycle must be well under the firing frequency: {:.2} Hz against \
@@ -1087,8 +1085,7 @@ fn a_peripheral_port_does_not_settle_at_the_idle_a_side_port_does() {
     let mean = |rpms: &[f64]| rpms.iter().sum::<f64>() / rpms.len() as f64;
 
     let (side_rpms, _side_hunt) = idle(crate::physics::rotor::side_port(), 30.0);
-    let (peripheral_rpms, _peripheral_hunt) =
-        idle(crate::physics::rotor::peripheral_port(), 30.0);
+    let (peripheral_rpms, _peripheral_hunt) = idle(crate::physics::rotor::peripheral_port(), 30.0);
 
     // The side port holds a recognisable idle: it stays alive, well clear
     // of the stall floor, near its own target.
@@ -1510,8 +1507,7 @@ fn physics_pipe_and_audio_path_round_trip_times_agree() {
                 temperature as f32,
             ) as f64;
 
-            let diff_filter_samples =
-                (phys_round_trip - audio_filter_round_trip).abs() * fs as f64;
+            let diff_filter_samples = (phys_round_trip - audio_filter_round_trip).abs() * fs as f64;
             assert!(
                 diff_filter_samples < 1.0,
                 "{}, bank {}: physics round trip ({:.6} s) and audio filter ({:.6} s) disagree by {:.3} samples",

@@ -245,7 +245,11 @@ impl CompressorMap {
     /// needs. Pressure ratio falls monotonically with flow on every speed
     /// line, so bisection converges to the unique answer, clamping to the
     /// surge or choke boundary if `pressure_ratio` is not achievable at all.
-    pub fn flow_for_pressure_ratio(&self, corrected_speed: f64, pressure_ratio: f64) -> (f64, MapReading) {
+    pub fn flow_for_pressure_ratio(
+        &self,
+        corrected_speed: f64,
+        pressure_ratio: f64,
+    ) -> (f64, MapReading) {
         let speed = corrected_speed.clamp(self.speed_range().0, self.speed_range().1);
         let (lo_line, hi_line) = self.bracket(speed);
         let mut lo = 0.0f64;
@@ -319,7 +323,8 @@ pub fn compressor_power(
     gamma: f64,
 ) -> f64 {
     let cp = gamma * gas_constant / (gamma - 1.0);
-    let outlet_temperature = discharge_temperature(inlet_temperature, pressure_ratio, efficiency, gamma);
+    let outlet_temperature =
+        discharge_temperature(inlet_temperature, pressure_ratio, efficiency, gamma);
     mass_flow.max(0.0) * cp * (outlet_temperature - inlet_temperature)
 }
 
@@ -362,28 +367,112 @@ fn line(corrected_speed: f64, points: &[(f64, f64, f64)]) -> SpeedLine {
 
 fn small_frame_map() -> CompressorMap {
     CompressorMap::new(vec![
-        line(60_000.0, &[(0.020, 1.45, 0.62), (0.045, 1.35, 0.74), (0.065, 1.05, 0.58)]),
-        line(90_000.0, &[(0.035, 1.95, 0.66), (0.065, 1.80, 0.77), (0.090, 1.30, 0.60)]),
-        line(120_000.0, &[(0.050, 2.55, 0.65), (0.085, 2.35, 0.76), (0.115, 1.55, 0.58)]),
-        line(150_000.0, &[(0.060, 3.05, 0.60), (0.100, 2.75, 0.72), (0.135, 1.70, 0.54)]),
+        line(
+            60_000.0,
+            &[
+                (0.020, 1.45, 0.62),
+                (0.045, 1.35, 0.74),
+                (0.065, 1.05, 0.58),
+            ],
+        ),
+        line(
+            90_000.0,
+            &[
+                (0.035, 1.95, 0.66),
+                (0.065, 1.80, 0.77),
+                (0.090, 1.30, 0.60),
+            ],
+        ),
+        line(
+            120_000.0,
+            &[
+                (0.050, 2.55, 0.65),
+                (0.085, 2.35, 0.76),
+                (0.115, 1.55, 0.58),
+            ],
+        ),
+        line(
+            150_000.0,
+            &[
+                (0.060, 3.05, 0.60),
+                (0.100, 2.75, 0.72),
+                (0.135, 1.70, 0.54),
+            ],
+        ),
     ])
 }
 
 fn medium_frame_map() -> CompressorMap {
     CompressorMap::new(vec![
-        line(50_000.0, &[(0.045, 1.40, 0.63), (0.090, 1.30, 0.75), (0.130, 1.05, 0.59)]),
-        line(75_000.0, &[(0.070, 1.90, 0.67), (0.130, 1.75, 0.78), (0.180, 1.30, 0.61)]),
-        line(100_000.0, &[(0.095, 2.50, 0.66), (0.170, 2.30, 0.77), (0.230, 1.55, 0.59)]),
-        line(125_000.0, &[(0.115, 3.00, 0.61), (0.200, 2.70, 0.73), (0.270, 1.70, 0.55)]),
+        line(
+            50_000.0,
+            &[
+                (0.045, 1.40, 0.63),
+                (0.090, 1.30, 0.75),
+                (0.130, 1.05, 0.59),
+            ],
+        ),
+        line(
+            75_000.0,
+            &[
+                (0.070, 1.90, 0.67),
+                (0.130, 1.75, 0.78),
+                (0.180, 1.30, 0.61),
+            ],
+        ),
+        line(
+            100_000.0,
+            &[
+                (0.095, 2.50, 0.66),
+                (0.170, 2.30, 0.77),
+                (0.230, 1.55, 0.59),
+            ],
+        ),
+        line(
+            125_000.0,
+            &[
+                (0.115, 3.00, 0.61),
+                (0.200, 2.70, 0.73),
+                (0.270, 1.70, 0.55),
+            ],
+        ),
     ])
 }
 
 fn large_frame_map() -> CompressorMap {
     CompressorMap::new(vec![
-        line(40_000.0, &[(0.090, 1.35, 0.64), (0.180, 1.25, 0.76), (0.260, 1.05, 0.60)]),
-        line(60_000.0, &[(0.140, 1.85, 0.68), (0.260, 1.70, 0.79), (0.360, 1.30, 0.62)]),
-        line(80_000.0, &[(0.190, 2.45, 0.67), (0.340, 2.25, 0.78), (0.460, 1.55, 0.60)]),
-        line(100_000.0, &[(0.230, 2.95, 0.62), (0.400, 2.65, 0.74), (0.540, 1.70, 0.56)]),
+        line(
+            40_000.0,
+            &[
+                (0.090, 1.35, 0.64),
+                (0.180, 1.25, 0.76),
+                (0.260, 1.05, 0.60),
+            ],
+        ),
+        line(
+            60_000.0,
+            &[
+                (0.140, 1.85, 0.68),
+                (0.260, 1.70, 0.79),
+                (0.360, 1.30, 0.62),
+            ],
+        ),
+        line(
+            80_000.0,
+            &[
+                (0.190, 2.45, 0.67),
+                (0.340, 2.25, 0.78),
+                (0.460, 1.55, 0.60),
+            ],
+        ),
+        line(
+            100_000.0,
+            &[
+                (0.230, 2.95, 0.62),
+                (0.400, 2.65, 0.74),
+                (0.540, 1.70, 0.56),
+            ],
+        ),
     ])
 }
 
@@ -426,15 +515,27 @@ mod tests {
         CompressorMap::new(vec![
             SpeedLine::new(
                 60_000.0,
-                vec![point(0.02, 1.5, 0.6), point(0.04, 1.4, 0.72), point(0.06, 1.1, 0.55)],
+                vec![
+                    point(0.02, 1.5, 0.6),
+                    point(0.04, 1.4, 0.72),
+                    point(0.06, 1.1, 0.55),
+                ],
             ),
             SpeedLine::new(
                 90_000.0,
-                vec![point(0.03, 2.0, 0.62), point(0.06, 1.85, 0.75), point(0.09, 1.35, 0.58)],
+                vec![
+                    point(0.03, 2.0, 0.62),
+                    point(0.06, 1.85, 0.75),
+                    point(0.09, 1.35, 0.58),
+                ],
             ),
             SpeedLine::new(
                 120_000.0,
-                vec![point(0.04, 2.5, 0.6), point(0.08, 2.3, 0.74), point(0.12, 1.6, 0.56)],
+                vec![
+                    point(0.04, 2.5, 0.6),
+                    point(0.08, 2.3, 0.74),
+                    point(0.12, 1.6, 0.56),
+                ],
             ),
         ])
     }
@@ -492,12 +593,24 @@ mod tests {
         // Two maps that disagree only about where surge starts must disagree
         // about whether the same point is surging.
         let narrow = CompressorMap::new(vec![
-            SpeedLine::new(60_000.0, vec![point(0.02, 1.5, 0.6), point(0.06, 1.1, 0.55)]),
-            SpeedLine::new(90_000.0, vec![point(0.03, 2.0, 0.62), point(0.09, 1.35, 0.58)]),
+            SpeedLine::new(
+                60_000.0,
+                vec![point(0.02, 1.5, 0.6), point(0.06, 1.1, 0.55)],
+            ),
+            SpeedLine::new(
+                90_000.0,
+                vec![point(0.03, 2.0, 0.62), point(0.09, 1.35, 0.58)],
+            ),
         ]);
         let wide = CompressorMap::new(vec![
-            SpeedLine::new(60_000.0, vec![point(0.005, 1.5, 0.6), point(0.06, 1.1, 0.55)]),
-            SpeedLine::new(90_000.0, vec![point(0.010, 2.0, 0.62), point(0.09, 1.35, 0.58)]),
+            SpeedLine::new(
+                60_000.0,
+                vec![point(0.005, 1.5, 0.6), point(0.06, 1.1, 0.55)],
+            ),
+            SpeedLine::new(
+                90_000.0,
+                vec![point(0.010, 2.0, 0.62), point(0.09, 1.35, 0.58)],
+            ),
         ]);
         assert_eq!(narrow.evaluate(75_000.0, 0.012).region, MapRegion::Surge);
         assert_eq!(wide.evaluate(75_000.0, 0.012).region, MapRegion::Operating);

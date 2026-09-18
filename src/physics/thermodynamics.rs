@@ -1041,7 +1041,10 @@ impl ValveEvent {
     /// [`EnginePreset::synth_config`](crate::bench::EnginePreset::synth_config)
     /// scales the valve voices with.
     pub fn ramp_rate(&self) -> f64 {
-        RAISED_COSINE_RAMP / self.ramp_fraction.clamp(PERIPHERAL_PORT_RAMP, RAISED_COSINE_RAMP)
+        RAISED_COSINE_RAMP
+            / self
+                .ramp_fraction
+                .clamp(PERIPHERAL_PORT_RAMP, RAISED_COSINE_RAMP)
     }
 
     /// Fraction of the event elapsed at a crank angle; `None` while shut.
@@ -1078,7 +1081,9 @@ impl ValveEvent {
         let Some(u) = self.progress(theta) else {
             return 0.0;
         };
-        let r = self.ramp_fraction.clamp(PERIPHERAL_PORT_RAMP, RAISED_COSINE_RAMP);
+        let r = self
+            .ramp_fraction
+            .clamp(PERIPHERAL_PORT_RAMP, RAISED_COSINE_RAMP);
         // Formed as `(PI / r) * u` rather than `PI * (u / r)` so that the
         // default half ramp divides exactly by two and lands on the same
         // `2 PI u` the single raised cosine used, to the last bit.

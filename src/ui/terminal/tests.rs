@@ -62,8 +62,7 @@ fn the_documented_bindings_all_do_what_the_footer_says() {
     // catalogue: both must select nothing rather than clamp onto the
     // nearest one.
     let unbound = std::iter::once('0').chain(
-        (dashboard.presets.len() + 1..=9)
-            .map(|n| char::from_digit(n as u32, 10).expect("a digit")),
+        (dashboard.presets.len() + 1..=9).map(|n| char::from_digit(n as u32, 10).expect("a digit")),
     );
     for key in unbound {
         assert_eq!(

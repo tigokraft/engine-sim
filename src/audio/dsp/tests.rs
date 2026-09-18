@@ -279,8 +279,7 @@ fn induction_is_a_train_of_gulps_at_the_firing_order() {
     let firing = 3_000.0 / 120.0 * 8.0;
     let at_firing = magnitude_at(&out, firing, FS);
     // Two frequencies either side that are not orders of anything.
-    let off =
-        0.5 * (magnitude_at(&out, firing * 0.63, FS) + magnitude_at(&out, firing * 1.47, FS));
+    let off = 0.5 * (magnitude_at(&out, firing * 0.63, FS) + magnitude_at(&out, firing * 1.47, FS));
     assert!(
         at_firing > 4.0 * off,
         "induction is not pitched: {at_firing:.2e} at the firing order against {off:.2e} beside it"
@@ -2205,8 +2204,7 @@ fn reciprocating_shake_is_a_no_op_at_zero_mass() {
     };
 
     let zero_default = CylinderGeometry::default().with_reciprocating_mass(0.0);
-    let zero_other =
-        CylinderGeometry::new(0.060, 0.050, 0.090, 9.0).with_reciprocating_mass(0.0);
+    let zero_other = CylinderGeometry::new(0.060, 0.050, 0.090, 9.0).with_reciprocating_mass(0.0);
     assert_eq!(
         render_with(zero_default),
         render_with(zero_other),
@@ -2506,8 +2504,7 @@ fn piston_slap_scales_with_pressure_and_vanishes_on_spark_cut() {
         ..EngineSnapshot::default()
     };
     let slap_gain_normal = slap.level_law.compute(&snap_normal, cycle_hz) * slap.base_level;
-    let intake_gain_normal =
-        intake.level_law.compute(&snap_normal, cycle_hz) * intake.base_level;
+    let intake_gain_normal = intake.level_law.compute(&snap_normal, cycle_hz) * intake.base_level;
     assert!(slap_gain_normal > 0.0, "slap must be live when firing");
     assert!(intake_gain_normal > 0.0, "intake must be live");
 
@@ -3070,8 +3067,7 @@ fn limiter_bounce_float_band_appears_and_disappears_with_each_cut() {
     let mut noise = Noise::new(999);
 
     // A bandpass filter centered around 4.5 kHz isolates the valve float impact band.
-    let filter_coeffs =
-        crate::audio::filters::BiquadCoeffs::bandpass(sample_rate, 4_500.0, 1.5);
+    let filter_coeffs = crate::audio::filters::BiquadCoeffs::bandpass(sample_rate, 4_500.0, 1.5);
     let mut filter = crate::audio::filters::Biquad::new(filter_coeffs);
 
     // Cycle through 3 limiter bounce cycles: below float -> overspeed excursion -> recovered below float

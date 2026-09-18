@@ -58,8 +58,7 @@ fn export_and_validate_all_catalogue_toml_files() {
 fn engine_config_roundtrip_all_catalogue_presets() {
     for preset in EnginePreset::catalogue() {
         let toml_str = preset.to_toml().expect("failed to serialize preset");
-        let restored =
-            EnginePreset::from_toml(&toml_str).expect("failed to deserialize preset");
+        let restored = EnginePreset::from_toml(&toml_str).expect("failed to deserialize preset");
 
         assert_eq!(restored.name, preset.name);
         assert_eq!(restored.firing.len(), preset.firing.len());
@@ -68,8 +67,7 @@ fn engine_config_roundtrip_all_catalogue_presets() {
         assert_eq!(restored.limiter_mode, preset.limiter_mode);
         assert_eq!(restored.limiter_cut, preset.limiter_cut);
         assert!(
-            (restored.model.geometry.displacement() - preset.model.geometry.displacement())
-                .abs()
+            (restored.model.geometry.displacement() - preset.model.geometry.displacement()).abs()
                 < 1e-9
         );
     }

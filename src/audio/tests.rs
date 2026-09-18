@@ -90,12 +90,8 @@ fn valve_timing_changes_the_pulse_spectrum() {
     // the two cams trap different masses and radiate at different levels,
     // and that is not what is being asserted.
     let tilt_of = |block: &EngineBlock| {
-        let snapshot = SnapshotSource::new(block).sample(
-            block,
-            RPM,
-            1.0 / 240.0,
-            EngineControls::wide_open(),
-        );
+        let snapshot =
+            SnapshotSource::new(block).sample(block, RPM, 1.0 / 240.0, EngineControls::wide_open());
         let mut config = long_config.clone();
         // Leave only the exhaust: the pulse is what is being measured.
         config.intake_level = 0.0;
@@ -108,8 +104,7 @@ fn valve_timing_changes_the_pulse_spectrum() {
         let mono: Vec<f32> = buffer.chunks(2).map(|f| 0.5 * (f[0] + f[1])).collect();
         let spectrum = AverageSpectrum::of(&mono, 48_000.0);
         let cycle_hz = RPM / 120.0;
-        band_db(&spectrum, cycle_hz, 600.0, 1_500.0)
-            - band_db(&spectrum, cycle_hz, 150.0, 600.0)
+        band_db(&spectrum, cycle_hz, 600.0, 1_500.0) - band_db(&spectrum, cycle_hz, 150.0, 600.0)
     };
 
     let long_tilt = tilt_of(&long);
@@ -492,12 +487,7 @@ fn fuel_cut_cannot_backfire_while_spark_cut_does() {
     let mut fuel_peak = 0.0f32;
     for _ in 0..(2 * 240) {
         block.update(dt, 6_600.0);
-        fuel_synth.set_snapshot(&source.sample(
-            &block,
-            6_600.0,
-            dt,
-            EngineControls::wide_open(),
-        ));
+        fuel_synth.set_snapshot(&source.sample(&block, 6_600.0, dt, EngineControls::wide_open()));
         fuel_synth.render(&mut buffer, 2);
         fuel_peak = buffer.iter().fold(fuel_peak, |m, s| m.max(s.abs()));
     }
@@ -523,12 +513,7 @@ fn fuel_cut_cannot_backfire_while_spark_cut_does() {
     let mut spark_peak = 0.0f32;
     for _ in 0..(2 * 240) {
         block.update(dt, 6_600.0);
-        spark_synth.set_snapshot(&source.sample(
-            &block,
-            6_600.0,
-            dt,
-            EngineControls::wide_open(),
-        ));
+        spark_synth.set_snapshot(&source.sample(&block, 6_600.0, dt, EngineControls::wide_open()));
         spark_synth.render(&mut buffer, 2);
         spark_peak = buffer.iter().fold(spark_peak, |m, s| m.max(s.abs()));
     }
@@ -655,8 +640,7 @@ fn supercharger_whine_tracks_crank_speed_exactly_and_shows_no_spool_lag() {
     // millisecond spool lag.
     let block = primed(2_000.0);
     let mut source_roots = SnapshotSource::with_induction(&block, Induction::roots());
-    let mut source_centrifugal =
-        SnapshotSource::with_induction(&block, Induction::centrifugal());
+    let mut source_centrifugal = SnapshotSource::with_induction(&block, Induction::centrifugal());
     let mut source_turbo = SnapshotSource::with_induction(&block, Induction::large_single());
 
     let wot = EngineControls::wide_open();

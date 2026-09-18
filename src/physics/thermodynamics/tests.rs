@@ -923,8 +923,7 @@ fn full_cycle_breathes_and_stays_bounded() {
         st = solver.substep(&model, &st, omega, deg(1.0), &ports);
         if crossed(previous, deg(1.0), model.valves.intake.close_angle()) {
             st.latch = CycleLatch {
-                fuel_mass: model
-                    .trapped_fuel_mass(st.cylinder.mass, st.cylinder.burned_fraction),
+                fuel_mass: model.trapped_fuel_mass(st.cylinder.mass, st.cylinder.burned_fraction),
                 dilution: st.cylinder.burned_fraction,
                 pressure: st.cylinder.pressure(&model.geometry, &model.gas),
                 temperature: st.cylinder.temperature,

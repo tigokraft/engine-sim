@@ -110,9 +110,8 @@ fn throttle_flow_chokes_below_the_critical_pressure_ratio() {
     // And it equals the analytic sonic plateau.
     let g: f64 = up.gamma;
     let psi = g.sqrt() * (2.0 / (g + 1.0)).powf((g + 1.0) / (2.0 * (g - 1.0)));
-    let expected = body.effective_area(1.0) * up.pressure
-        / (up.gas_constant * up.temperature).sqrt()
-        * psi;
+    let expected =
+        body.effective_area(1.0) * up.pressure / (up.gas_constant * up.temperature).sqrt() * psi;
     approx(deep, expected, expected * 1e-9);
 
     // Just above critical it must already be falling away from the plateau.
