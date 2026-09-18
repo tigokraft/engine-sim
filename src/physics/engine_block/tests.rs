@@ -1740,3 +1740,92 @@ fn anti_lag_holds_shaft_speed_and_raises_turbine_inlet_temperature_at_a_shut_thr
             .turbine_inlet_temperature()
     );
 }
+
+#[test]
+fn two_turbos_on_one_v8_spool_independently_with_different_maps() {
+    use crate::physics::compressor::{CompressorMap, FrameSize};
+    use crate::physics::intake::ForcedInduction;
+    use crate::physics::turbine::{BearingType, TurbineMap};
+
+    let env = Environment::default();
+    let mut block = EngineBlock::cross_plane_v8(env);
+    block.throttle = 1.0;
+
+    let large = ForcedInduction::new(
+        CompressorMap::stock(FrameSize::Medium),
+        TurbineMap::stock(FrameSize::Medium),
+        8.0e-5,
+        0.97,
+        BearingType::BallBearing,
+        2.0e-3,
+        None,
+        &env,
+        &GasProperties::default(),
+    );
+    let small = ForcedInduction::new(
+        CompressorMap::stock(FrameSize::Small),
+        TurbineMap::stock(FrameSize::Small),
+        3.0e-5,
+        0.97,
+        BearingType::BallBearing,
+        1.0e-3,
+        None,
+        &env,
+        &GasProperties::default(),
+    );
+    block.fit_forced_induction(large, vec![0], false);
+    block.fit_forced_induction(small, vec![1], false);
+
+    let dt = 1.0 / 480.0;
+    for _ in 0..3_000 {
+        block.update(dt, 4_500.0);
+    }
+
+    let bank0_before = block.forced_induction[0].hardware.shaft.shaft_rpm();
+    let bank1_before = block.forced_induction[1].hardware.shaft.shaft_rpm();
+    assert!(bank0_before > 100.0, "bank 0's own turbo did not spool");
+    assert!(bank1_before > 100.0, "bank 1's own turbo did not spool");
+    assert!(
+        (bank0_before - bank1_before).abs() > bank0_before.max(bank1_before) * 0.05,
+        "two turbos with different maps should not converge to the same \
+         speed: bank0={bank0_before:.0} rpm, bank1={bank1_before:.0} rpm"
+    );
+
+    // Independence, not just different calibration: pin bank 0's own
+    // collector far hotter and higher pressure than bank 1's, every frame,
+    // and give the shafts real time to react. Each unit must read only the
+    // bank(s) it was fitted to, never a shared or averaged exhaust state,
+    // so only bank 0's shaft should gain speed from it while bank 1's,
+    // starved down to no differential at all, decays.
+    for _ in 0..500 {
+        block.exhaust_banks[0].plenum = Plenum::new(
+            block.exhaust_banks[0].plenum.volume,
+            4.0e5,
+            1_100.0,
+            block.model.gas.r_burned,
+            block.model.gas.gamma_burned,
+        );
+        block.exhaust_banks[1].plenum = Plenum::new(
+            block.exhaust_banks[1].plenum.volume,
+            env.pressure,
+            env.temperature,
+            block.model.gas.r_burned,
+            block.model.gas.gamma_burned,
+        );
+        block.update(dt, 4_500.0);
+    }
+
+    let bank0_after = block.forced_induction[0].hardware.shaft.shaft_rpm();
+    let bank1_after = block.forced_induction[1].hardware.shaft.shaft_rpm();
+    assert!(
+        bank0_after > bank0_before,
+        "bank 0's turbo should gain speed from its own bank running hot \
+         and high pressure: before={bank0_before:.0} rpm, after={bank0_after:.0} rpm"
+    );
+    assert!(
+        bank1_after < bank1_before,
+        "bank 1's turbo should spin down once starved to no differential, \
+         unaffected by bank 0's own exhaust state: \
+         before={bank1_before:.0} rpm, after={bank1_after:.0} rpm"
+    );
+}
