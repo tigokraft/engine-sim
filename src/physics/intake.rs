@@ -767,6 +767,14 @@ pub struct ForcedInduction {
     /// can load the shaft with it without recomputing the compressor's
     /// operating point a second time.
     compressor_power: f64,
+    /// Mass flow the compressor delivered on the most recent
+    /// [`Self::advance_intake`] [kg/s], held here so a caller merging more
+    /// than one unit's discharge — see
+    /// [`crate::physics::engine_block::EngineBlock::update_manifolds`] — can
+    /// weight the merge by how much each unit is actually flowing rather
+    /// than averaging a spun-down unit's near-ambient state in at full
+    /// weight.
+    last_mass_flow: f64,
 }
 
 impl ForcedInduction {
@@ -800,6 +808,7 @@ impl ForcedInduction {
             boost_controller: None,
             blow_off: None,
             compressor_power: 0.0,
+            last_mass_flow: 0.0,
         }
     }
 
@@ -819,6 +828,12 @@ impl ForcedInduction {
     pub fn with_blow_off(mut self, valve: BlowOffValve) -> Self {
         self.blow_off = Some(valve);
         self
+    }
+
+    /// The compressor's own mass flow on the most recent
+    /// [`Self::advance_intake`] [kg/s].
+    pub fn last_mass_flow(&self) -> f64 {
+        self.last_mass_flow
     }
 
     /// The charge pipe's current [`PortState`], without advancing anything.
@@ -904,6 +919,7 @@ impl ForcedInduction {
             None => discharge_temperature,
         };
 
+        self.last_mass_flow = mass_flow.max(0.0);
         self.compressor_power = compressor::compressor_power(
             mass_flow.max(0.0),
             ambient.temperature,
@@ -953,11 +969,17 @@ impl ForcedInduction {
     /// Must be called after [`Self::advance_intake`] on the same frame: the
     /// shaft's power balance needs that call's compressor power draw, and a
     /// fitted wastegate needs that call's boost controller update.
+    ///
+    /// `area_fraction` is the turbine's effective nozzle area, `1.0` for a
+    /// fixed-geometry fitment — see [`TurboShaft::advance`]. It scales the
+    /// wheel's own flow and power only; a wastegate bypasses the wheel
+    /// entirely, so its own flow is unaffected by it.
     pub fn advance_exhaust(
         &mut self,
         dt: f64,
         turbine_upstream: &PortState,
         downstream_pressure: f64,
+        area_fraction: f64,
     ) -> f64 {
         let corrected_speed =
             compressor::corrected_speed(self.shaft.shaft_rpm(), turbine_upstream.temperature);
@@ -967,6 +989,7 @@ impl ForcedInduction {
             downstream_pressure,
             &self.turbine_map,
             self.compressor_power,
+            area_fraction,
         );
         let (speed_lo, speed_hi) = self.turbine_map.speed_range();
         let (turbine_flow, _, _) = crate::physics::turbine::turbine_operating_point(
@@ -975,6 +998,7 @@ impl ForcedInduction {
             &self.turbine_map,
             corrected_speed.clamp(speed_lo, speed_hi),
         );
+        let turbine_flow = turbine_flow * area_fraction;
 
         let wastegate_flow = match &self.wastegate {
             Some(wg) => {

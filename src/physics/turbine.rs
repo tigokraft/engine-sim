@@ -431,6 +431,16 @@ impl TurboShaft {
     /// Advances the shaft from the instantaneous exhaust manifold state,
     /// reading turbine power off `turbine_map` rather than taking it as a
     /// precomputed input — see [`turbine_power`].
+    ///
+    /// `area_fraction` is the effective nozzle area as a fraction of the
+    /// map's own reference, `1.0` meaning the fitted geometry unmodified.
+    /// Power scales linearly in mass flow at a fixed expansion ratio and
+    /// efficiency, so scaling the already-evaluated power by it here is
+    /// exactly equivalent to scaling the map's reduced flow before the
+    /// lookup, without needing a second map evaluation. This is the one
+    /// mechanism [`ForcedInductionUnit::activation`](crate::physics::engine_block::ForcedInductionUnit::activation)'s
+    /// sequential changeover and a variable-geometry turbine's vanes both
+    /// drive — see `docs/TURBO_PLAN.md`'s TB5.
     pub fn advance(
         &mut self,
         dt: f64,
@@ -438,6 +448,7 @@ impl TurboShaft {
         turbine_downstream_pressure: f64,
         turbine_map: &TurbineMap,
         compressor_power: f64,
+        area_fraction: f64,
     ) -> f64 {
         self.turbine_inlet_temperature = turbine_upstream.temperature;
 
@@ -448,7 +459,7 @@ impl TurboShaft {
             turbine_downstream_pressure,
             turbine_map,
             corrected_speed,
-        );
+        ) * area_fraction;
         self.integrate(dt, power, compressor_power);
 
         let (_, max_corrected) = turbine_map.speed_range();
@@ -816,7 +827,7 @@ mod tests {
         let max_shaft_rpm = max_corrected * (upstream.temperature / compressor::T_REF).sqrt();
 
         for _ in 0..50_000 {
-            shaft.advance(dt, &upstream, 100_000.0, &map, 1000.0);
+            shaft.advance(dt, &upstream, 100_000.0, &map, 1000.0, 1.0);
         }
 
         assert!(
@@ -837,12 +848,12 @@ mod tests {
         let mut shaft = TurboShaft::new(3e-5, 0.97, BearingType::Journal);
 
         let cool = port(200_000.0, 900.0);
-        shaft.advance(1.0 / 480.0, &cool, 100_000.0, &map, 1000.0);
+        shaft.advance(1.0 / 480.0, &cool, 100_000.0, &map, 1000.0, 1.0);
         assert_eq!(shaft.turbine_inlet_temperature(), 900.0);
         assert!(!shaft.is_over_temperature_limit());
 
         let scorching = port(200_000.0, 1400.0);
-        shaft.advance(1.0 / 480.0, &scorching, 100_000.0, &map, 1000.0);
+        shaft.advance(1.0 / 480.0, &scorching, 100_000.0, &map, 1000.0, 1.0);
         assert_eq!(shaft.turbine_inlet_temperature(), 1400.0);
         assert!(shaft.is_over_temperature_limit());
     }

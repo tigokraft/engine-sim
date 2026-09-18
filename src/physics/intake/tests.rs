@@ -690,7 +690,7 @@ fn spool_up(fi: &mut ForcedInduction, seconds: f64) {
     let dt = 1.0e-3;
     let mut t = 0.0;
     while t < seconds {
-        fi.advance_exhaust(dt, &hot_upstream, env().pressure);
+        fi.advance_exhaust(dt, &hot_upstream, env().pressure, 1.0);
         t += dt;
     }
 }
@@ -791,7 +791,7 @@ fn a_real_expansion_ratio_spools_the_shaft_and_a_flat_one_does_not() {
         burned_fraction: 1.0,
     };
     for _ in 0..1_000 {
-        idle.advance_exhaust(1.0e-3, &flat, env().pressure);
+        idle.advance_exhaust(1.0e-3, &flat, env().pressure, 1.0);
     }
     assert!(idle.shaft.shaft_rpm() < 1.0);
 }

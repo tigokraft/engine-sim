@@ -30,7 +30,7 @@
 use std::f64::consts::PI;
 
 use crate::environment::Environment;
-use crate::physics::control::{CylinderHealth, EngineControlUnit, LimiterCut};
+use crate::physics::control::{CylinderHealth, EngineControlUnit, LimiterCut, SequentialValve};
 use crate::physics::cylinder::{deg, wrap_cycle, CylinderGeometry, GasProperties, CYCLE_ANGLE};
 use crate::physics::intake::{ForcedInduction, IntakePlenum, ThrottleBody, ValveDraw};
 use crate::physics::plumbing::{ExhaustSystem, IntakeSystem, ThrottleLayout};
@@ -1243,6 +1243,19 @@ pub struct ForcedInductionUnit {
     /// that bank's own cylinders were split when the unit was fitted — see
     /// [`EngineBlock::fit_forced_induction`].
     pub twin_scroll: bool,
+    /// A sequential changeover valve gating how much of this unit's shared
+    /// bank actually reaches its turbine, `None` meaning always fully open.
+    ///
+    /// A sequential or small-feeds-a-large-one layout is two units on the
+    /// same `banks`: a primary with `activation: None` and a secondary whose
+    /// valve brings it online past a threshold — see `docs/TURBO_PLAN.md`'s
+    /// TB5. [`EngineBlock::update_manifolds`] feeds the valve's own open
+    /// fraction to [`crate::physics::intake::ForcedInduction::advance_exhaust`]
+    /// as its turbine's effective nozzle area fraction, so a shut valve
+    /// really is a zero-area nozzle — no flow, no power — rather than one
+    /// that merely sees a discounted pressure and still, through the map's
+    /// own low-flow floor, draws a little of both.
+    pub activation: Option<SequentialValve>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1473,6 +1486,7 @@ impl EngineBlock {
             hardware,
             banks,
             twin_scroll,
+            activation: None,
         });
     }
 
@@ -1973,28 +1987,78 @@ impl EngineBlock {
         // compressor's shaft is loaded with *this* frame's power draw rather
         // than a frame-stale one. More than one unit's compressor discharges
         // into the same shared charge air ahead of the throttle plate, so
-        // their outputs are combined the same flux-weighted way the exhaust
-        // side combines bank flux, below.
-        let mut intake_states: Vec<PortState> = Vec::new();
+        // their outputs are combined here — weighted by each unit's own mass
+        // flow rather than a plain mean, because a unit that is not actually
+        // flowing (a spun-down sequential secondary) sits near ambient
+        // pressure and would otherwise dilute an active unit's boost by its
+        // full share regardless of how little air it is moving. An
+        // always-on multi-unit fitment like a per-bank twin turbo has
+        // near-equal flows on every unit, so this is a no-op there.
+        // The estimate the throttle body hands back is its whole draw, as
+        // if only one pipe fed it — correct with exactly one unit fitted,
+        // but with more than one every pipe would otherwise be charged for
+        // the *entire* draw rather than its own share, N-fold overcounting
+        // the mass actually leaving. Split it by last frame's own recorded
+        // flow, the same weighting the merge below uses, falling back to an
+        // even split before any unit has flowed at all.
+        let total_previous_flow: f64 = self
+            .forced_induction
+            .iter()
+            .map(|u| u.hardware.last_mass_flow())
+            .sum();
+        let unit_count = self.forced_induction.len().max(1) as f64;
+        let mut intake_states: Vec<(PortState, f64)> = Vec::new();
         for unit in self.forced_induction.iter_mut() {
             let previous = unit.hardware.upstream_port_state();
-            let throttle_flow_estimate = self.intake.throttle_flow(self.throttle, &previous);
-            intake_states.push(unit.hardware.advance_intake(
+            let total_throttle_flow_estimate =
+                self.intake.throttle_flow(self.throttle, &previous);
+            let share = if total_previous_flow > 1e-9 {
+                unit.hardware.last_mass_flow() / total_previous_flow
+            } else {
+                1.0 / unit_count
+            };
+            let throttle_flow_estimate = total_throttle_flow_estimate * share;
+            let state = unit.hardware.advance_intake(
                 dt,
                 throttle_flow_estimate,
                 self.intake.pressure(),
                 &self.environment,
                 &self.model.gas,
-            ));
+            );
+            intake_states.push((state, unit.hardware.last_mass_flow()));
         }
         let upstream = if intake_states.is_empty() {
             IntakePlenum::ambient_upstream(&self.environment, &self.model.gas)
         } else {
+            let total_flow: f64 = intake_states.iter().map(|(_, flow)| flow).sum();
             let n = intake_states.len() as f64;
+            let (pressure, temperature) = if total_flow > 1e-9 {
+                (
+                    intake_states
+                        .iter()
+                        .map(|(s, flow)| s.pressure * flow)
+                        .sum::<f64>()
+                        / total_flow,
+                    intake_states
+                        .iter()
+                        .map(|(s, flow)| s.temperature * flow)
+                        .sum::<f64>()
+                        / total_flow,
+                )
+            } else {
+                (
+                    intake_states.iter().map(|(s, _)| s.pressure).sum::<f64>() / n,
+                    intake_states
+                        .iter()
+                        .map(|(s, _)| s.temperature)
+                        .sum::<f64>()
+                        / n,
+                )
+            };
             PortState {
-                pressure: intake_states.iter().map(|s| s.pressure).sum::<f64>() / n,
-                temperature: intake_states.iter().map(|s| s.temperature).sum::<f64>() / n,
-                ..intake_states[0]
+                pressure,
+                temperature,
+                ..intake_states[0].0
             }
         };
 
@@ -2013,7 +2077,12 @@ impl EngineBlock {
             temperature,
             ..reference
         };
-        let mut bank_outflow: Vec<Option<f64>> = vec![None; self.exhaust_banks.len()];
+        // Accumulated rather than merely set, because a sequential pair
+        // shares one `banks` entry across two units — see
+        // [`ForcedInductionUnit::activation`] — and both units' outflow
+        // leaves the same collector this frame.
+        let mut bank_outflow = vec![0.0_f64; self.exhaust_banks.len()];
+        let mut bank_has_induction = vec![false; self.exhaust_banks.len()];
         for idx in 0..self.forced_induction.len() {
             let twin_scroll = self.forced_induction[idx].twin_scroll;
             let banks = self.forced_induction[idx].banks.clone();
@@ -2057,13 +2126,27 @@ impl EngineBlock {
                     self.environment.pressure,
                 );
                 if let [bank] = banks[..] {
-                    bank_outflow[bank as usize] = Some(outflows[0] + outflows[1]);
+                    bank_outflow[bank as usize] += outflows[0] + outflows[1];
+                    bank_has_induction[bank as usize] = true;
                 } else {
                     for (g, &bank) in banks.iter().enumerate().take(2) {
-                        bank_outflow[bank as usize] = Some(outflows[g]);
+                        bank_outflow[bank as usize] += outflows[g];
+                        bank_has_induction[bank as usize] = true;
                     }
                 }
             } else {
+                // A sequential secondary's own valve doubles as its turbine's
+                // effective nozzle area fraction — see [`TurboShaft::advance`]
+                // — a shut valve is a zero-area nozzle, drawing no power and
+                // passing no flow whatever the bank's own pressure is doing,
+                // and an open one is a fixed-geometry fitment's ordinary 1.0.
+                // `None` (no valve fitted) always reads back exactly 1.0, so
+                // every existing fitment is unaffected.
+                let activation = self.forced_induction[idx]
+                    .activation
+                    .as_mut()
+                    .map(|valve| valve.update(dt, rpm))
+                    .unwrap_or(1.0);
                 let total: f64 = banks.iter().map(|&b| bank_flux[b as usize].flux).sum();
                 let (pressure, temperature) = if total > 1e-12 {
                     let pressure = banks
@@ -2103,6 +2186,7 @@ impl EngineBlock {
                     dt,
                     &turbine_upstream,
                     self.environment.pressure,
+                    activation,
                 );
                 for &b in &banks {
                     let share = if total > 1e-12 {
@@ -2110,7 +2194,8 @@ impl EngineBlock {
                     } else {
                         1.0 / banks.len().max(1) as f64
                     };
-                    bank_outflow[b as usize] = Some(outflow * share);
+                    bank_outflow[b as usize] += outflow * share;
+                    bank_has_induction[b as usize] = true;
                 }
             }
         }
@@ -2123,7 +2208,7 @@ impl EngineBlock {
                 flux.flux,
                 flux.temperature,
                 flux.open_fraction,
-                bank_outflow[bank],
+                bank_has_induction[bank].then_some(bank_outflow[bank]),
             );
         }
 

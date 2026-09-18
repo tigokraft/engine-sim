@@ -1172,5 +1172,66 @@ impl EngineControlUnit {
     }
 }
 
+/// A discrete two-state exhaust valve that brings a second turbocharger
+/// online, for a sequential or small-feeds-a-large-one layout — see
+/// `docs/TURBO_PLAN.md`'s TB5.
+///
+/// Hysteresis between `open_above` and `close_below` keeps it from chattering
+/// right at the threshold, and the first-order actuator lag (the same shape
+/// [`crate::physics::turbine::BoostController::update`] already uses) is what
+/// makes the changeover a bounded transient instead of a step: nothing about
+/// shaft speed or torque should be discontinuous when this valve moves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SequentialValve {
+    /// Rpm above which the valve starts driving open [rev/min].
+    pub open_above: f64,
+    /// Rpm at or below which the valve starts driving shut [rev/min]. Must
+    /// not exceed `open_above`; the gap between them is the hysteresis band.
+    pub close_below: f64,
+    /// First-order response time of the actuator itself [s].
+    pub actuator_lag: f64,
+    /// Which side of the hysteresis band the actuator is currently driving
+    /// toward.
+    target_open: bool,
+    /// Current open fraction, `0..=1`.
+    fraction: f64,
+}
+
+impl SequentialValve {
+    /// A valve at rest, fully shut.
+    pub fn new(open_above: f64, close_below: f64, actuator_lag: f64) -> Self {
+        Self {
+            open_above,
+            close_below,
+            actuator_lag,
+            target_open: false,
+            fraction: 0.0,
+        }
+    }
+
+    /// Current open fraction, `0..=1`.
+    pub fn fraction(&self) -> f64 {
+        self.fraction
+    }
+
+    /// Advances the actuator by `dt` toward whichever side of the hysteresis
+    /// band `rpm` currently calls for, and returns the new open fraction.
+    pub fn update(&mut self, dt: f64, rpm: f64) -> f64 {
+        if rpm >= self.open_above {
+            self.target_open = true;
+        } else if rpm <= self.close_below {
+            self.target_open = false;
+        }
+        let target = if self.target_open { 1.0 } else { 0.0 };
+        let alpha = if self.actuator_lag > 1e-6 {
+            1.0 - (-dt.max(0.0) / self.actuator_lag).exp()
+        } else {
+            1.0
+        };
+        self.fraction += (target - self.fraction) * alpha;
+        self.fraction
+    }
+}
+
 #[cfg(test)]
 mod tests;

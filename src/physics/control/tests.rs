@@ -605,3 +605,44 @@ fn a_cold_engine_is_commanded_richer_than_a_warm_one() {
         "enriched past anything that would burn at all: {cold}"
     );
 }
+
+#[test]
+fn a_sequential_valve_stays_shut_below_its_open_threshold() {
+    let mut valve = SequentialValve::new(5_000.0, 4_000.0, 0.2);
+    for _ in 0..1_000 {
+        valve.update(1.0 / 480.0, 3_000.0);
+    }
+    assert_eq!(valve.fraction(), 0.0);
+}
+
+#[test]
+fn a_sequential_valve_opens_and_shuts_with_hysteresis_and_a_bounded_ramp() {
+    let mut valve = SequentialValve::new(5_000.0, 4_000.0, 0.2);
+    let dt = 1.0 / 480.0;
+
+    // Above the open threshold it drives toward open, but not in one step.
+    let first = valve.update(dt, 5_500.0);
+    assert!(
+        first > 0.0 && first < 1.0,
+        "a single frame past threshold should not snap the valve open: {first}"
+    );
+    for _ in 0..2_000 {
+        valve.update(dt, 5_500.0);
+    }
+    assert!(valve.fraction() > 0.99, "valve did not settle open");
+
+    // Between the two thresholds it holds wherever it already was —
+    // that gap is the hysteresis band, and without it the valve would
+    // chatter every frame the signal sat near one threshold.
+    valve.update(dt, 4_500.0);
+    assert!(
+        valve.fraction() > 0.99,
+        "valve closed inside the hysteresis band instead of holding open"
+    );
+
+    // Below the close threshold it drives shut, again with a ramp.
+    for _ in 0..2_000 {
+        valve.update(dt, 3_000.0);
+    }
+    assert!(valve.fraction() < 0.01, "valve did not settle shut");
+}

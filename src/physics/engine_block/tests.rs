@@ -1505,3 +1505,128 @@ fn twin_scroll_shrinks_the_bank_collector_to_the_divided_volume() {
     );
     approx(divided_volume, expected_divided_volume, 1e-9);
 }
+
+#[test]
+fn a_sequential_secondary_brings_a_bounded_transient_with_no_discontinuity() {
+    use crate::physics::compressor::{CompressorMap, FrameSize};
+    use crate::physics::control::SequentialValve;
+    use crate::physics::turbine::{BearingType, TurbineMap, TurbineMapPoint, TurbineSpeedLine};
+
+    // A real sequential secondary is a genuinely smaller unit brought in
+    // alongside a primary that already covers the bank on its own — not a
+    // second, identically-sized turbo, which would ask a V8's two banks to
+    // feed two full-size wheels at once and starve both.
+    fn small_secondary_hardware(env: &Environment) -> crate::physics::intake::ForcedInduction {
+        use crate::physics::turbine::{BoostController, Wastegate, WastegateFitment};
+
+        let point = |expansion_ratio: f64, reduced_flow: f64, efficiency: f64| TurbineMapPoint {
+            expansion_ratio,
+            reduced_flow,
+            efficiency,
+        };
+        let turbine_map = TurbineMap::new(vec![
+            TurbineSpeedLine::new(
+                60_000.0,
+                vec![
+                    point(1.0, 0.02, 0.48),
+                    point(1.6, 0.06, 0.66),
+                    point(2.4, 0.09, 0.56),
+                ],
+            ),
+            TurbineSpeedLine::new(
+                160_000.0,
+                vec![
+                    point(1.0, 0.03, 0.52),
+                    point(2.0, 0.10, 0.72),
+                    point(3.2, 0.15, 0.58),
+                ],
+            ),
+        ]);
+        crate::physics::intake::ForcedInduction::new(
+            CompressorMap::stock(FrameSize::Small),
+            turbine_map,
+            3.0e-5,
+            0.97,
+            BearingType::BallBearing,
+            1.0e-3,
+            None,
+            env,
+            &GasProperties::default(),
+        )
+        .with_wastegate(Wastegate {
+            fitment: WastegateFitment::Internal,
+            max_flow_area: 4.0e-4,
+            spring_preload: 0.4e5,
+            opening_span: 0.3e5,
+        })
+        .with_boost_controller(BoostController::new(1.6, 3.0e5, 0.6e5, 0.15))
+    }
+
+    let env = Environment::default();
+    let mut block = EngineBlock::cross_plane_v8(env);
+    block.throttle = 1.0;
+    block.fit_forced_induction(
+        test_turbo_hardware_with_wastegate(&env, 1.6, 3.0e5, 8.0e-4),
+        vec![0, 1],
+        false,
+    );
+    block.fit_forced_induction(small_secondary_hardware(&env), vec![0, 1], false);
+    block.forced_induction[1].activation = Some(SequentialValve::new(4_200.0, 3_800.0, 0.15));
+
+    let dt = 1.0 / 480.0;
+    for _ in 0..3_000 {
+        block.update(dt, 3_000.0);
+    }
+    assert_eq!(
+        block.forced_induction[1]
+            .activation
+            .as_ref()
+            .unwrap()
+            .fraction(),
+        0.0,
+        "valve should still be shut below its open threshold"
+    );
+
+    // Step rpm straight across the valve's open threshold in one frame — the
+    // sharpest possible signal — and check the valve's own realized effect
+    // immediately after, rather than downstream aggregates like manifold
+    // pressure or brake torque: both have their own large frame-to-frame
+    // swings in a free-running multi-turbo engine (combustion events, an
+    // unregulated wheel's own surge) entirely unrelated to this valve, which
+    // would swamp the much smaller step the valve itself could ever cause.
+    // A real actuator cannot jump straight to fully open in one small step,
+    // so even a step input to the signal it watches should still leave the
+    // valve mostly shut on the very next frame.
+    block.update(dt, 4_500.0);
+    let fraction_after_one_frame = block.forced_induction[1]
+        .activation
+        .as_ref()
+        .unwrap()
+        .fraction();
+    assert!(
+        fraction_after_one_frame > 0.0 && fraction_after_one_frame < 0.1,
+        "the valve should open gradually even after a step past its \
+         threshold, not snap open in a single frame: {fraction_after_one_frame}"
+    );
+
+    // Hold well past the threshold for long enough to fully open and for
+    // the secondary to actually spool up — the changeover is bounded, not
+    // permanently blocked.
+    for _ in 0..3_000 {
+        block.update(dt, 5_000.0);
+    }
+    assert!(
+        block.forced_induction[1]
+            .activation
+            .as_ref()
+            .unwrap()
+            .fraction()
+            > 0.99,
+        "valve did not settle open"
+    );
+    assert!(
+        block.forced_induction[1].hardware.shaft.shaft_rpm() > 1_000.0,
+        "the secondary never actually came online once its valve opened: {}",
+        block.forced_induction[1].hardware.shaft.shaft_rpm()
+    );
+}
