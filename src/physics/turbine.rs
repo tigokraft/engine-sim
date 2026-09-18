@@ -653,6 +653,60 @@ impl BoostController {
     }
 }
 
+/// Variable turbine geometry: moving nozzle vanes, so the effective throat
+/// area [`TurboShaft::advance`] and [`TurboShaft::advance_scrolls`] take as
+/// `area_fraction` becomes a controlled variable instead of a fixed
+/// fitment's constant `1.0` — see `docs/TURBO_PLAN.md`'s TB5.
+///
+/// Closing the vanes at a given exhaust manifold pressure passes strictly
+/// less flow and less power than fully open, the same as any nozzle
+/// restriction would — but that manifold pressure is not fixed: less flow
+/// escaping raises it, over the frames that follow, through the same
+/// plenum feedback [`crate::physics::engine_block::EngineBlock::update_manifolds`]
+/// already integrates for every fitted turbine. That rising pressure is
+/// what actually spools the wheel sooner and shows up as higher back
+/// pressure — this actuator only ever supplies the local restriction; nothing
+/// here re-implements the feedback that produces the net effect.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VgtActuator {
+    /// Commanded vane position as an effective nozzle area fraction, `1.0`
+    /// fully open and `0.0` fully shut. Set this directly; [`Self::update`]
+    /// chases it at the actuator's own rate rather than snapping to it.
+    pub target_area_fraction: f64,
+    /// First-order response time of the actuator itself [s].
+    pub actuator_lag: f64,
+    /// Current area fraction the vanes are actually holding.
+    fraction: f64,
+}
+
+impl VgtActuator {
+    /// An actuator at rest, vanes fully open.
+    pub fn new(actuator_lag: f64) -> Self {
+        Self {
+            target_area_fraction: 1.0,
+            actuator_lag,
+            fraction: 1.0,
+        }
+    }
+
+    /// Current area fraction the vanes are actually holding.
+    pub fn area_fraction(&self) -> f64 {
+        self.fraction
+    }
+
+    /// Advances the actuator by `dt` toward [`Self::target_area_fraction`],
+    /// and returns the new area fraction.
+    pub fn update(&mut self, dt: f64) -> f64 {
+        let alpha = if self.actuator_lag > 1e-6 {
+            1.0 - (-dt.max(0.0) / self.actuator_lag).exp()
+        } else {
+            1.0
+        };
+        self.fraction += (self.target_area_fraction - self.fraction) * alpha;
+        self.fraction
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1043,6 +1097,28 @@ mod tests {
             ctl.bias() < ctl.authority * 0.5,
             "a real actuator cannot jump straight to full bias in one small step: {}",
             ctl.bias()
+        );
+    }
+
+    #[test]
+    fn a_vgt_actuator_starts_fully_open_and_chases_its_target_gradually() {
+        let mut vgt = VgtActuator::new(0.2);
+        assert_eq!(vgt.area_fraction(), 1.0);
+
+        vgt.target_area_fraction = 0.3;
+        let first = vgt.update(1.0 / 480.0);
+        assert!(
+            first > 0.3 && first < 1.0,
+            "a real actuator cannot snap the vanes straight to their new \
+             position in one small step: {first}"
+        );
+        for _ in 0..2_000 {
+            vgt.update(1.0 / 480.0);
+        }
+        assert!(
+            (vgt.area_fraction() - 0.3).abs() < 1e-3,
+            "vanes did not settle at their commanded position: {}",
+            vgt.area_fraction()
         );
     }
 }

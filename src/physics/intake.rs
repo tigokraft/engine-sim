@@ -41,7 +41,9 @@ use crate::physics::compressor::{self, CompressorMap};
 use crate::physics::cylinder::GasProperties;
 use crate::physics::engine_block::Plenum;
 use crate::physics::thermodynamics::{flow_function, PortConditions, PortState};
-use crate::physics::turbine::{BearingType, BoostController, TurbineMap, TurboShaft, Wastegate};
+use crate::physics::turbine::{
+    BearingType, BoostController, TurbineMap, TurboShaft, VgtActuator, Wastegate,
+};
 
 /// Smallest mass the plenum is allowed to hold [kg].
 ///
@@ -762,6 +764,8 @@ pub struct ForcedInduction {
     pub wastegate: Option<Wastegate>,
     pub boost_controller: Option<BoostController>,
     pub blow_off: Option<BlowOffValve>,
+    /// Variable turbine geometry, `None` for a fixed-A/R fitment.
+    pub vgt: Option<VgtActuator>,
     /// Shaft power the compressor drew on the most recent
     /// [`Self::advance_intake`] [W], held here so [`Self::advance_exhaust`]
     /// can load the shaft with it without recomputing the compressor's
@@ -807,6 +811,7 @@ impl ForcedInduction {
             wastegate: None,
             boost_controller: None,
             blow_off: None,
+            vgt: None,
             compressor_power: 0.0,
             last_mass_flow: 0.0,
         }
@@ -827,6 +832,12 @@ impl ForcedInduction {
     /// Fits a blow-off valve to vent the charge pipe.
     pub fn with_blow_off(mut self, valve: BlowOffValve) -> Self {
         self.blow_off = Some(valve);
+        self
+    }
+
+    /// Fits variable turbine geometry.
+    pub fn with_vgt(mut self, vgt: VgtActuator) -> Self {
+        self.vgt = Some(vgt);
         self
     }
 
@@ -970,10 +981,13 @@ impl ForcedInduction {
     /// shaft's power balance needs that call's compressor power draw, and a
     /// fitted wastegate needs that call's boost controller update.
     ///
-    /// `area_fraction` is the turbine's effective nozzle area, `1.0` for a
-    /// fixed-geometry fitment — see [`TurboShaft::advance`]. It scales the
-    /// wheel's own flow and power only; a wastegate bypasses the wheel
-    /// entirely, so its own flow is unaffected by it.
+    /// `area_fraction` is a caller-supplied nozzle area fraction — a
+    /// sequential changeover valve's own gating, `1.0` when the caller has
+    /// none to apply — see [`TurboShaft::advance`]. A fitted
+    /// [`Self::vgt`](Self::vgt) contributes its own area fraction on top of
+    /// it, the two composing the way two restrictions in series would; it
+    /// scales the wheel's own flow and power only, and a wastegate bypasses
+    /// the wheel entirely, so its own flow is unaffected by either.
     pub fn advance_exhaust(
         &mut self,
         dt: f64,
@@ -981,6 +995,7 @@ impl ForcedInduction {
         downstream_pressure: f64,
         area_fraction: f64,
     ) -> f64 {
+        let area_fraction = area_fraction * self.vgt.as_mut().map(|v| v.update(dt)).unwrap_or(1.0);
         let corrected_speed =
             compressor::corrected_speed(self.shaft.shaft_rpm(), turbine_upstream.temperature);
         self.shaft.advance(

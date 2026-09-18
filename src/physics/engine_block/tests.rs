@@ -1630,3 +1630,44 @@ fn a_sequential_secondary_brings_a_bounded_transient_with_no_discontinuity() {
         block.forced_induction[1].hardware.shaft.shaft_rpm()
     );
 }
+
+#[test]
+fn closing_vgt_vanes_spools_sooner_and_raises_back_pressure() {
+    use crate::physics::turbine::VgtActuator;
+
+    fn run(vane_target: f64) -> EngineBlock {
+        let env = Environment::default();
+        let mut block = EngineBlock::cross_plane_v8(env);
+        block.throttle = 1.0;
+        let hardware = test_turbo_hardware(&env).with_vgt(VgtActuator::new(0.1));
+        block.fit_forced_induction(hardware, vec![0, 1], false);
+        block.forced_induction[0].hardware.vgt.as_mut().unwrap().target_area_fraction = vane_target;
+        for _ in 0..2_500 {
+            block.update(1.0 / 480.0, 4_000.0);
+        }
+        block
+    }
+
+    let closed = run(0.4);
+    let open = run(1.0);
+
+    assert!(
+        closed.forced_induction[0].hardware.vgt.unwrap().area_fraction() < 0.41,
+        "vanes did not actually settle toward their commanded closed position"
+    );
+    assert!(
+        closed.forced_induction[0].hardware.shaft.shaft_rpm()
+            > open.forced_induction[0].hardware.shaft.shaft_rpm(),
+        "closed vanes should spool the wheel faster than open ones from a \
+         cold start: closed={:.0} rpm, open={:.0} rpm",
+        closed.forced_induction[0].hardware.shaft.shaft_rpm(),
+        open.forced_induction[0].hardware.shaft.shaft_rpm()
+    );
+    assert!(
+        closed.exhaust_banks[0].port_pressure() > open.exhaust_banks[0].port_pressure(),
+        "closed vanes should raise back pressure relative to open ones: \
+         closed={:.0} Pa, open={:.0} Pa",
+        closed.exhaust_banks[0].port_pressure(),
+        open.exhaust_banks[0].port_pressure()
+    );
+}
